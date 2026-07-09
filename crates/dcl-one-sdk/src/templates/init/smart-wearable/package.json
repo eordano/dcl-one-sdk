@@ -1,0 +1,21 @@
+{
+  "name": "{{SLUG}}",
+  "version": "1.0.0",
+  "description": "{{DESCRIPTION}}",
+  "scripts": {
+    "start": "sdk-commands start",
+    "build": "sdk-commands build",
+    "deploy": "sdk-commands deploy",
+    "pack": "sdk-commands pack-smart-wearable",
+    "upgrade-sdk": "npm install --save-dev @dcl/sdk@latest",
+    "upgrade-sdk:next": "npm install --save-dev @dcl/sdk@next"
+  },
+  "devDependencies": {
+    "@dcl/js-runtime": "7.22.6-25007982108.commit-83012ab",
+    "@dcl/sdk": "7.22.6-25007982108.commit-83012ab"
+  },
+  "engines": {
+    "node": ">=16",
+    "npm": ">=6"
+  }
+}

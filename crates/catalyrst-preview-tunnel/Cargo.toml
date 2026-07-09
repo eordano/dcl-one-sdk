@@ -1,0 +1,25 @@
+[package]
+name = "catalyrst-preview-tunnel"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted preview tunnel for dcl-one-sdk: agents dial out one WebSocket trunk, the service allocates public /t/<id> routes and multiplexes inbound HTTP + WebSocket traffic back over the trunk. Port 5167."
+
+[[bin]]
+name = "catalyrst-preview-tunnel"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+catalyrst-envcfg = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+rand = "0.10"
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }

@@ -1,0 +1,1003 @@
+{
+  "source": "@dcl/ecs dist-cjs engine component definitions (schema.jsonSchema)",
+  "ecsVersion": "7.22.6-25007982108.commit-83012ab",
+  "generatedAt": "2026-07-06T21:52:28.500Z",
+  "registrationErrors": [],
+  "componentCount": 74,
+  "components": [
+    {
+      "name": "composite::root",
+      "componentId": 2548763028,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "src": {
+            "type": "string",
+            "serializationType": "utf8-string"
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "src": {
+                  "type": "integer",
+                  "serializationType": "entity"
+                },
+                "dest": {
+                  "type": "integer",
+                  "serializationType": "entity"
+                }
+              },
+              "serializationType": "map"
+            },
+            "serializationType": "array"
+          }
+        },
+        "serializationType": "map"
+      }
+    },
+    {
+      "name": "core-schema::Name",
+      "componentId": 3864921337,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "serializationType": "utf8-string"
+          }
+        },
+        "serializationType": "map"
+      }
+    },
+    {
+      "name": "core-schema::Network-Entity",
+      "componentId": 1075645054,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "networkId": {
+            "type": "integer",
+            "serializationType": "int64"
+          },
+          "entityId": {
+            "type": "integer",
+            "serializationType": "entity"
+          }
+        },
+        "serializationType": "map"
+      }
+    },
+    {
+      "name": "core-schema::Network-Parent",
+      "componentId": 1420531287,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "networkId": {
+            "type": "integer",
+            "serializationType": "int64"
+          },
+          "entityId": {
+            "type": "integer",
+            "serializationType": "entity"
+          }
+        },
+        "serializationType": "map"
+      }
+    },
+    {
+      "name": "core-schema::Sync-Components",
+      "componentId": 2241712969,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "componentIds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "serializationType": "int64"
+            },
+            "serializationType": "array"
+          }
+        },
+        "serializationType": "map"
+      }
+    },
+    {
+      "name": "core-schema::Tags",
+      "componentId": 4148173090,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "serializationType": "utf8-string"
+            },
+            "serializationType": "array"
+          }
+        },
+        "serializationType": "map"
+      }
+    },
+    {
+      "name": "core::Animator",
+      "componentId": 1042,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAnimator"
+      }
+    },
+    {
+      "name": "core::AssetLoad",
+      "componentId": 1213,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAssetLoad"
+      }
+    },
+    {
+      "name": "core::AssetLoadLoadingState",
+      "componentId": 1214,
+      "componentType": 1,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAssetLoadLoadingState"
+      }
+    },
+    {
+      "name": "core::AudioEvent",
+      "componentId": 1105,
+      "componentType": 1,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAudioEvent"
+      }
+    },
+    {
+      "name": "core::AudioSource",
+      "componentId": 1020,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAudioSource"
+      }
+    },
+    {
+      "name": "core::AudioStream",
+      "componentId": 1021,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAudioStream"
+      }
+    },
+    {
+      "name": "core::AvatarAttach",
+      "componentId": 1073,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarAttach"
+      }
+    },
+    {
+      "name": "core::AvatarBase",
+      "componentId": 1087,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarBase"
+      }
+    },
+    {
+      "name": "core::AvatarEmoteCommand",
+      "componentId": 1088,
+      "componentType": 1,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarEmoteCommand"
+      }
+    },
+    {
+      "name": "core::AvatarEquippedData",
+      "componentId": 1091,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarEquippedData"
+      }
+    },
+    {
+      "name": "core::AvatarLocomotionSettings",
+      "componentId": 1211,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarLocomotionSettings"
+      }
+    },
+    {
+      "name": "core::AvatarModifierArea",
+      "componentId": 1070,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarModifierArea"
+      }
+    },
+    {
+      "name": "core::AvatarMovement",
+      "componentId": 1501,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarMovement"
+      }
+    },
+    {
+      "name": "core::AvatarMovementInfo",
+      "componentId": 1500,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarMovementInfo"
+      }
+    },
+    {
+      "name": "core::AvatarShape",
+      "componentId": 1080,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarShape"
+      }
+    },
+    {
+      "name": "core::Billboard",
+      "componentId": 1090,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBBillboard"
+      }
+    },
+    {
+      "name": "core::CameraLayer",
+      "componentId": 1503,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBCameraLayer"
+      }
+    },
+    {
+      "name": "core::CameraLayers",
+      "componentId": 1208,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBCameraLayers"
+      }
+    },
+    {
+      "name": "core::CameraMode",
+      "componentId": 1072,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBCameraMode"
+      }
+    },
+    {
+      "name": "core::CameraModeArea",
+      "componentId": 1071,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBCameraModeArea"
+      }
+    },
+    {
+      "name": "core::EngineInfo",
+      "componentId": 1048,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBEngineInfo"
+      }
+    },
+    {
+      "name": "core::GlobalLight",
+      "componentId": 1206,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBGlobalLight"
+      }
+    },
+    {
+      "name": "core::GltfContainer",
+      "componentId": 1041,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBGltfContainer"
+      }
+    },
+    {
+      "name": "core::GltfContainerLoadingState",
+      "componentId": 1049,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBGltfContainerLoadingState"
+      }
+    },
+    {
+      "name": "core::GltfNode",
+      "componentId": 1200,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBGltfNode"
+      }
+    },
+    {
+      "name": "core::GltfNodeModifiers",
+      "componentId": 1099,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBGltfNodeModifiers"
+      }
+    },
+    {
+      "name": "core::GltfNodeState",
+      "componentId": 1201,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBGltfNodeState"
+      }
+    },
+    {
+      "name": "core::InputModifier",
+      "componentId": 1078,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBInputModifier"
+      }
+    },
+    {
+      "name": "core::LightSource",
+      "componentId": 1079,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBLightSource"
+      }
+    },
+    {
+      "name": "core::MainCamera",
+      "componentId": 1075,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBMainCamera"
+      }
+    },
+    {
+      "name": "core::Material",
+      "componentId": 1017,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBMaterial"
+      }
+    },
+    {
+      "name": "core::MeshCollider",
+      "componentId": 1019,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBMeshCollider"
+      }
+    },
+    {
+      "name": "core::MeshRenderer",
+      "componentId": 1018,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBMeshRenderer"
+      }
+    },
+    {
+      "name": "core::NftShape",
+      "componentId": 1040,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBNftShape"
+      }
+    },
+    {
+      "name": "core::ParticleSystem",
+      "componentId": 1217,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBParticleSystem"
+      }
+    },
+    {
+      "name": "core::PhysicsCombinedForce",
+      "componentId": 1216,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBPhysicsCombinedForce"
+      }
+    },
+    {
+      "name": "core::PhysicsCombinedImpulse",
+      "componentId": 1215,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBPhysicsCombinedImpulse"
+      }
+    },
+    {
+      "name": "core::PlayerIdentityData",
+      "componentId": 1089,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBPlayerIdentityData"
+      }
+    },
+    {
+      "name": "core::PointerEvents",
+      "componentId": 1062,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBPointerEvents"
+      }
+    },
+    {
+      "name": "core::PointerEventsResult",
+      "componentId": 1063,
+      "componentType": 1,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBPointerEventsResult"
+      }
+    },
+    {
+      "name": "core::PointerLock",
+      "componentId": 1074,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBPointerLock"
+      }
+    },
+    {
+      "name": "core::PrimaryPointerInfo",
+      "componentId": 1209,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBPrimaryPointerInfo"
+      }
+    },
+    {
+      "name": "core::Raycast",
+      "componentId": 1067,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBRaycast"
+      }
+    },
+    {
+      "name": "core::RaycastResult",
+      "componentId": 1068,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBRaycastResult"
+      }
+    },
+    {
+      "name": "core::RealmInfo",
+      "componentId": 1106,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBRealmInfo"
+      }
+    },
+    {
+      "name": "core::SkyboxTime",
+      "componentId": 1210,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBSkyboxTime"
+      }
+    },
+    {
+      "name": "core::TextShape",
+      "componentId": 1030,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTextShape"
+      }
+    },
+    {
+      "name": "core::TextureCamera",
+      "componentId": 1207,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTextureCamera"
+      }
+    },
+    {
+      "name": "core::Transform",
+      "componentId": 1,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "position": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            }
+          },
+          "scale": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            }
+          },
+          "rotation": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              },
+              "w": {
+                "type": "number"
+              }
+            }
+          },
+          "parent": {
+            "type": "integer"
+          }
+        },
+        "serializationType": "transform"
+      }
+    },
+    {
+      "name": "core::TriggerArea",
+      "componentId": 1060,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTriggerArea"
+      }
+    },
+    {
+      "name": "core::TriggerAreaResult",
+      "componentId": 1061,
+      "componentType": 1,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTriggerAreaResult"
+      }
+    },
+    {
+      "name": "core::Tween",
+      "componentId": 1102,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTween"
+      }
+    },
+    {
+      "name": "core::TweenSequence",
+      "componentId": 1104,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTweenSequence"
+      }
+    },
+    {
+      "name": "core::TweenState",
+      "componentId": 1103,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTweenState"
+      }
+    },
+    {
+      "name": "core::UiBackground",
+      "componentId": 1053,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiBackground"
+      }
+    },
+    {
+      "name": "core::UiCanvas",
+      "componentId": 1203,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiCanvas"
+      }
+    },
+    {
+      "name": "core::UiCanvasInformation",
+      "componentId": 1054,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiCanvasInformation"
+      }
+    },
+    {
+      "name": "core::UiDropdown",
+      "componentId": 1094,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiDropdown"
+      }
+    },
+    {
+      "name": "core::UiDropdownResult",
+      "componentId": 1096,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiDropdownResult"
+      }
+    },
+    {
+      "name": "core::UiInput",
+      "componentId": 1093,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiInput"
+      }
+    },
+    {
+      "name": "core::UiInputResult",
+      "componentId": 1095,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiInputResult"
+      }
+    },
+    {
+      "name": "core::UiScrollResult",
+      "componentId": 1202,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiScrollResult"
+      }
+    },
+    {
+      "name": "core::UiText",
+      "componentId": 1052,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiText"
+      }
+    },
+    {
+      "name": "core::UiTransform",
+      "componentId": 1050,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiTransform"
+      }
+    },
+    {
+      "name": "core::VideoEvent",
+      "componentId": 1044,
+      "componentType": 1,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBVideoEvent"
+      }
+    },
+    {
+      "name": "core::VideoPlayer",
+      "componentId": 1043,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBVideoPlayer"
+      }
+    },
+    {
+      "name": "core::VirtualCamera",
+      "componentId": 1076,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBVirtualCamera"
+      }
+    },
+    {
+      "name": "core::VisibilityComponent",
+      "componentId": 1081,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBVisibilityComponent"
+      }
+    }
+  ]
+}

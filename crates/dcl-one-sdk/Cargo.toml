@@ -1,0 +1,49 @@
+[package]
+name = "dcl-one-sdk"
+version = "0.9.9"
+edition = "2021"
+description = "Binary-compatible Rust replacement for @dcl/sdk-commands: bundle (rolldown, in-process), preview-serve, and deploy Decentraland SDK7 scenes"
+
+[[bin]]
+name = "dcl-one-sdk"
+path = "src/main.rs"
+
+[dependencies]
+catalyrst-hashing = { workspace = true }
+catalyrst-crypto = { workspace = true }
+catalyrst-preview-tunnel = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+dunce = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+if-addrs = "=0.15.0"
+ignore = "0.4.23"
+notify = "8"
+prost = "0.14"
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
+rand = "0.10"
+tokio-tungstenite = { workspace = true }
+rolldown = { version = "=1.1.4", optional = true }
+rolldown_common = { version = "=1.1.4", optional = true }
+rolldown_utils = { version = "=1.1.4", optional = true }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+hex = "0.4"
+
+[features]
+default = ["rolldown"]
+rolldown = ["dep:rolldown", "dep:rolldown_common", "dep:rolldown_utils"]
+
+[build-dependencies]
+prost-build = "0.14"

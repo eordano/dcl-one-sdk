@@ -1,0 +1,9 @@
+[package]
+name = "catalyrst-envcfg"
+version = "0.1.0"
+edition = "2021"
+description = "Shared env-var config helpers + standard --help/--version argv handling for catalyrst service bins"
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }

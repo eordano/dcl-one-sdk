@@ -1,0 +1,19 @@
+{
+  "name": "{{SLUG}}",
+  "version": "1.0.0",
+  "description": "{{DESCRIPTION}}",
+  "scripts": {
+    "start": "dcl-one-sdk start",
+    "build": "dcl-one-sdk build",
+    "deploy": "dcl-one-sdk deploy"
+  },
+  "devDependencies": {
+    "@dcl/js-runtime": "7.24.5",
+    "@dcl/sdk": "7.24.5",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=16",
+    "npm": ">=6"
+  }
+}

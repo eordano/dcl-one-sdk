@@ -1,0 +1,24 @@
+{
+  "id": "{{ID}}",
+  "name": "{{TITLE}}",
+  "description": "{{DESCRIPTION}}",
+  "rarity": "mythic",
+  "data": {
+    "replaces": [],
+    "hides": [],
+    "tags": ["special", "new"],
+    "representations": [
+      {
+        "bodyShapes": [
+          "urn:decentraland:off-chain:base-avatars:BaseMale",
+          "urn:decentraland:off-chain:base-avatars:BaseFemale"
+        ],
+        "mainFile": "model.glb",
+        "contents": ["model.glb"],
+        "overrideHides": [],
+        "overrideReplaces": []
+      }
+    ],
+    "category": "eyewear"
+  }
+}

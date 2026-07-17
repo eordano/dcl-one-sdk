@@ -1,0 +1,483 @@
+[
+  {
+    "label": "empty object",
+    "input": {},
+    "output": "{\"version\":0,\"components\":[]}"
+  },
+  {
+    "label": "string version",
+    "input": {
+      "version": "1"
+    },
+    "output": "{\"version\":1,\"components\":[]}"
+  },
+  {
+    "label": "float version rounds",
+    "input": {
+      "version": 1.6
+    },
+    "output": "{\"version\":2,\"components\":[]}"
+  },
+  {
+    "label": "unknown fields dropped",
+    "input": {
+      "version": 1,
+      "extra": "x",
+      "components": [
+        {
+          "name": "foo",
+          "unknown": 1,
+          "data": {}
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"foo\",\"data\":{}}]}"
+  },
+  {
+    "label": "empty component defaults",
+    "input": {
+      "components": [
+        {}
+      ]
+    },
+    "output": "{\"version\":0,\"components\":[{\"name\":\"\",\"data\":{}}]}"
+  },
+  {
+    "label": "numeric name coerced",
+    "input": {
+      "components": [
+        {
+          "name": 42
+        }
+      ]
+    },
+    "output": "{\"version\":0,\"components\":[{\"name\":\"42\",\"data\":{}}]}"
+  },
+  {
+    "label": "data keys sorted ascending",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "json": 2
+            },
+            "513": {
+              "json": 1
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"json\":2},\"513\":{\"json\":1}}}]}"
+  },
+  {
+    "label": "non-canonical key collides",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "json": "canonical"
+            },
+            "0512": {
+              "json": "padded"
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"json\":\"padded\"}}}]}"
+  },
+  {
+    "label": "$case dropped",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "$case": "json",
+              "json": {
+                "x": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"json\":{\"x\":1}}}}]}"
+  },
+  {
+    "label": "json null becomes empty",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "json": null
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{}}}]}"
+  },
+  {
+    "label": "json falsy preserved",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "json": false
+            },
+            "513": {
+              "json": 0
+            },
+            "514": {
+              "json": ""
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"json\":false},\"513\":{\"json\":0},\"514\":{\"json\":\"\"}}}]}"
+  },
+  {
+    "label": "payload key order verbatim",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "json": {
+                "b": 1,
+                "a": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"json\":{\"b\":1,\"a\":2}}}}]}"
+  },
+  {
+    "label": "json wins over binary",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "json": {
+                "x": 1
+              },
+              "binary": "AAAA"
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"json\":{\"x\":1}}}}]}"
+  },
+  {
+    "label": "binary repadded",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "binary": "AAA"
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"binary\":\"AAA=\"}}}]}"
+  },
+  {
+    "label": "binary urlsafe recanonicalized",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "binary": "-_x8"
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"binary\":\"+/x8\"}}}]}"
+  },
+  {
+    "label": "binary empty",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "512": {
+              "binary": ""
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"512\":{\"binary\":\"\"}}}]}"
+  },
+  {
+    "label": "jsonSchema verbatim",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "jsonSchema": {
+            "whatever": true,
+            "zz": 1,
+            "aa": 2
+          },
+          "data": {}
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"jsonSchema\":{\"whatever\":true,\"zz\":1,\"aa\":2},\"data\":{}}]}"
+  },
+  {
+    "label": "jsonSchema absent stays absent",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "core::Transform",
+          "data": {
+            "512": {
+              "json": {
+                "position": {
+                  "x": 1,
+                  "y": 1,
+                  "z": 1
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"core::Transform\",\"data\":{\"512\":{\"json\":{\"position\":{\"x\":1,\"y\":1,\"z\":1}}}}}]}"
+  },
+  {
+    "label": "above-max-index key order",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "42": {
+              "json": 2
+            },
+            "4294967295": {
+              "json": 1
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"42\":{\"json\":2},\"4294967295\":{\"json\":1}}}]}"
+  },
+  {
+    "label": "negative key",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "5": {
+              "json": 2
+            },
+            "-1": {
+              "json": 1
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"5\":{\"json\":2},\"-1\":{\"json\":1}}}]}"
+  },
+  {
+    "label": "float key",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "1.5": {
+              "json": 1
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"1.5\":{\"json\":1}}}]}"
+  },
+  {
+    "label": "non-numeric key becomes NaN",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": {
+            "abc": {
+              "json": 1
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{\"NaN\":{\"json\":1}}}]}"
+  },
+  {
+    "label": "data null becomes empty",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "a",
+          "data": null
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"a\",\"data\":{}}]}"
+  },
+  {
+    "label": "components null becomes empty",
+    "input": {
+      "version": 1,
+      "components": null
+    },
+    "output": "{\"version\":1,\"components\":[]}"
+  },
+  {
+    "label": "json payload integer keys reorder ascending recursively",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "core::Transform",
+          "data": {
+            "512": {
+              "json": {
+                "b": 1,
+                "2": "two",
+                "1": "one",
+                "nested": {
+                  "10": "x",
+                  "3": "y",
+                  "z": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"core::Transform\",\"data\":{\"512\":{\"json\":{\"1\":\"one\",\"2\":\"two\",\"b\":1,\"nested\":{\"3\":\"y\",\"10\":\"x\",\"z\":0}}}}}]}"
+  },
+  {
+    "label": "json payload array of objects reorder",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "core::Transform",
+          "data": {
+            "0": {
+              "json": {
+                "items": [
+                  {
+                    "2": "x",
+                    "1": "y",
+                    "a": 1
+                  },
+                  {
+                    "5": 5,
+                    "b": 2,
+                    "4": 4
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"core::Transform\",\"data\":{\"0\":{\"json\":{\"items\":[{\"1\":\"y\",\"2\":\"x\",\"a\":1},{\"4\":4,\"5\":5,\"b\":2}]}}}}]}"
+  },
+  {
+    "label": "jsonSchema integer keys reorder",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "my::Thing",
+          "jsonSchema": {
+            "type": "object",
+            "2": "b",
+            "1": "a",
+            "props": {
+              "20": 1,
+              "3": 2
+            }
+          },
+          "data": {}
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"my::Thing\",\"jsonSchema\":{\"1\":\"a\",\"2\":\"b\",\"type\":\"object\",\"props\":{\"3\":2,\"20\":1}},\"data\":{}}]}"
+  },
+  {
+    "label": "json payload index cap boundary reorder",
+    "input": {
+      "version": 1,
+      "components": [
+        {
+          "name": "core::Transform",
+          "data": {
+            "512": {
+              "json": {
+                "4294967295": "hi",
+                "4294967294": "lo",
+                "zz": 3,
+                "0": "first"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "output": "{\"version\":1,\"components\":[{\"name\":\"core::Transform\",\"data\":{\"512\":{\"json\":{\"0\":\"first\",\"4294967294\":\"lo\",\"4294967295\":\"hi\",\"zz\":3}}}}]}"
+  }
+]

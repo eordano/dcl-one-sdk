@@ -1,0 +1,173 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      abgen_tag:
+        description: "abgen release tag whose binaries get embedded (from https://github.com/eordano/abgen/releases)"
+        required: false
+        default: "v0.9.9"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  ABGEN_TAG: ${{ github.event.inputs.abgen_tag || 'v0.9.9' }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            abgen_target: x86_64-unknown-linux-gnu
+            bin: dcl-one-sdk
+            abgen_bin: abgen
+          - name: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            abgen_target: aarch64-unknown-linux-gnu
+            bin: dcl-one-sdk
+            abgen_bin: abgen
+          - name: x86_64-pc-windows-gnu
+            runner: ubuntu-22.04
+            target: x86_64-pc-windows-gnu
+            abgen_target: x86_64-pc-windows-gnu
+            bin: dcl-one-sdk.exe
+            abgen_bin: abgen.exe
+          - name: aarch64-apple-darwin
+            runner: macos-14
+            target: aarch64-apple-darwin
+            abgen_target: aarch64-apple-darwin
+            bin: dcl-one-sdk
+            abgen_bin: abgen
+          - name: x86_64-apple-darwin
+            # the last free Intel image; scheduled to live through August 2027
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            abgen_target: x86_64-apple-darwin
+            bin: dcl-one-sdk
+            abgen_bin: abgen
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable @ 2026-07-08
+        with:
+          toolchain: "1.97.0"
+          targets: ${{ matrix.target }}
+
+      - name: install protoc
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends protobuf-compiler
+          fi
+
+      - name: install mingw cross toolchain
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix cmake
+          cat > /tmp/mingw-toolchain.cmake <<'EOF'
+          set(CMAKE_SYSTEM_NAME Windows)
+          set(CMAKE_SYSTEM_PROCESSOR x86_64)
+          set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc-posix)
+          set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++-posix)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          EOF
+          {
+            echo "CMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake"
+            echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc-posix"
+            echo "CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc-posix"
+            echo "CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++-posix"
+            echo "AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar"
+          } >> "$GITHUB_ENV"
+
+      - name: fetch the abgen release archive to embed
+        run: |
+          base="https://github.com/eordano/abgen/releases/download/$ABGEN_TAG"
+          archive="abgen-$ABGEN_TAG-${{ matrix.abgen_target }}.tar.gz"
+          curl -fsSLO "$base/$archive"
+          curl -fsSLO "$base/SHA256SUMS.txt"
+          grep " $archive\$" SHA256SUMS.txt | shasum -a 256 -c
+          tar -xzf "$archive"
+          echo "ABGEN_EMBED_BIN=$PWD/abgen-$ABGEN_TAG-${{ matrix.abgen_target }}/${{ matrix.abgen_bin }}" >> "$GITHUB_ENV"
+
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p dcl-one-sdk
+
+      - name: smoke test (embedded abgen extracts and answers /readyz)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        run: |
+          bin="$PWD/target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          "$bin" --help >/dev/null
+          "$bin" init --dir /tmp/smoke-scene --project scene -y
+          cd /tmp/smoke-scene
+          "$bin" start --ci --skip-build --port 5197 > /tmp/smoke-start.log 2>&1 &
+          server=$!
+          # the banner prints only after the sidecar passed its /readyz gate
+          for _ in $(seq 1 120); do
+            url=$(grep -o 'abgen JIT): http://[^ ]*' /tmp/smoke-start.log | grep -o 'http://[^ ]*') && break
+            sleep 0.5
+          done
+          cat /tmp/smoke-start.log
+          test -n "${url:-}"
+          curl -sf "$url/readyz"
+          ls "${TMPDIR:-/tmp}"/dcl-abgen/bin/*/abgen
+          kill "$server" || true
+
+      - name: assemble archive
+        run: |
+          dist="dcl-one-sdk-${GITHUB_REF_NAME:-dev}-${{ matrix.name }}"
+          mkdir -p "$dist"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$dist/"
+          cp LICENSE README.md "$dist/"
+          TAR=tar; command -v gtar >/dev/null && TAR=gtar
+          "$TAR" --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@$(git log -1 --format=%ct)" -czf "$dist.tar.gz" "$dist"
+          shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dcl-one-sdk-*.tar.gz
+            dcl-one-sdk-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: |
+          cd dist
+          cat ./*.sha256 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "dcl-one-sdk $GITHUB_REF_NAME" \
+            --notes "Self-contained npm-free toolchain binaries. Each binary embeds the abgen asset-bundle server ($ABGEN_TAG from https://github.com/eordano/abgen/releases): \`start\` extracts it on first use and serves optimized preview asset bundles with zero extra installs. Sidecar resolution order: \`ABGEN_BIN\` env, the embedded copy, the scene's \`@dcl/abgen\` npm package, then PATH. Toolchain: rust 1.97.0 (pinned), \`--locked\` against the committed Cargo.lock." \
+            dist/*.tar.gz dist/SHA256SUMS.txt

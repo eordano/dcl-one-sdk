@@ -1,0 +1,16 @@
+{
+  "ecs7": true,
+  "runtimeVersion": "7",
+  "isPortableExperience": true,
+  "display": {
+    "title": "{{TITLE}}",
+    "description": "{{DESCRIPTION}}"
+  },
+  "owner": "",
+  "contact": { "name": "", "email": "" },
+  "main": "bin/index.js",
+  "tags": [],
+  "requiredPermissions": [],
+  "scene": { "parcels": [{{PARCELS}}], "base": "0,0" },
+  "featureToggles": { "portableExperiences": "enabled" }
+}

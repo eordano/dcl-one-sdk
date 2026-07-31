@@ -6,6 +6,7 @@ members = [
     "crates/catalyrst-hashing",
     "crates/catalyrst-crypto",
     "crates/catalyrst-preview-tunnel",
+    "crates/catalyrst-testgate",
     "crates/dcl-one-sdk",
 ]
 
@@ -44,3 +45,4 @@ catalyrst-types = { path = "crates/catalyrst-types", default-features = false }
 catalyrst-hashing = { path = "crates/catalyrst-hashing" }
 catalyrst-crypto = { path = "crates/catalyrst-crypto" }
 catalyrst-preview-tunnel = { path = "crates/catalyrst-preview-tunnel" }
+catalyrst-testgate = { path = "crates/catalyrst-testgate" }

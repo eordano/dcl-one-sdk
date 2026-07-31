@@ -1,8 +1,11 @@
 [package]
 name = "catalyrst-crypto"
-version = "0.14.1"
+version = "0.14.3"
 edition = "2021"
 description = "Rust port of the Decentraland @dcl/crypto auth chain verification"
+
+[features]
+test-signer = []
 
 [dependencies]
 catalyrst-types = { path = "../catalyrst-types", default-features = false }

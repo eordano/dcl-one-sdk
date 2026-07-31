@@ -1,4 +1,4 @@
-use super::net::{resolve_target_from, url_path};
+use super::net::{resolve_target_from, url_path, TargetConsent};
 use super::run::load_signer;
 use crate::ux::{self, TrySteps, UserError};
 use crate::world::signed_headers;
@@ -48,6 +48,7 @@ pub async fn unpublish(opts: &UnpublishOptions) -> Result<()> {
         opts.target_content.as_deref(),
         None,
         true,
+        TargetConsent::default(),
     )
     .await?;
     let path = format!("{}/scenes/{parcel}", url_path(&base));

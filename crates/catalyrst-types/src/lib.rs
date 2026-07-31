@@ -27,7 +27,7 @@ pub use sorting::{
 };
 
 pub use error::{
-    ApiErrorBody, ContentError, ContentResult, FailedDeploymentReason, HttpError,
+    ApiError, ApiErrorBody, ContentError, ContentResult, FailedDeploymentReason, HttpError,
     InvalidParameterError, MarketplaceApiError,
 };
 

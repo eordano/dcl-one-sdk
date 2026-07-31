@@ -1,4 +1,6 @@
-use super::{now_ms, DeployOptions, CATALYST_ROTATION};
+use super::{
+    catalyst_rotation, configured_catalyst_rotation, now_ms, DeployOptions, UPSTREAM_CATALYST_HOSTS,
+};
 use crate::ux::{self, TrySteps, UserError};
 use anyhow::{bail, Context, Result};
 use catalyrst_crypto::Wallet;
@@ -22,6 +24,15 @@ fn upload_client() -> Result<reqwest::Client> {
         .context("building the upload http client")
 }
 
+/// How far the caller has already consented to a target being chosen for it.
+/// Only consulted when nothing named one, which is the single path on which
+/// this CLI can reach the public network without being asked to.
+#[derive(Clone, Copy, Default)]
+pub(super) struct TargetConsent {
+    pub assume_yes: bool,
+    pub non_interactive: bool,
+}
+
 pub(super) async fn resolve_target(
     opts: &DeployOptions,
     world: Option<&str>,
@@ -32,6 +43,10 @@ pub(super) async fn resolve_target(
         opts.target_content.as_deref(),
         world,
         headless,
+        TargetConsent {
+            assume_yes: opts.yes,
+            non_interactive: opts.ci,
+        },
     )
     .await
 }
@@ -41,6 +56,7 @@ pub(super) async fn resolve_target_from(
     target_content: Option<&str>,
     world: Option<&str>,
     headless: bool,
+    consent: TargetConsent,
 ) -> Result<String> {
     match (target, target_content) {
         (Some(_), Some(_)) => Err(UserError::new(
@@ -75,14 +91,14 @@ pub(super) async fn resolve_target_from(
                 .why("key-signed deploys never pick a server implicitly")
                 .into());
             }
-            rotation_content_url().await
+            rotation_content_url(consent).await
         }
     }
 }
 
 pub fn non_upstream_note(target: &str) -> Option<String> {
     let host = host_of(target)?;
-    let upstream = CATALYST_ROTATION
+    let upstream = UPSTREAM_CATALYST_HOSTS
         .iter()
         .any(|r| host_of(r).is_some_and(|h| h.eq_ignore_ascii_case(&host)));
     if upstream {
@@ -189,9 +205,44 @@ async fn default_env_target(t: &str) -> Result<String> {
     Ok(base)
 }
 
-async fn rotation_content_url() -> Result<String> {
+/// Nothing named a target, so one is about to be picked, and the built-in
+/// rotation publishes to Genesis City: say so and get a yes before uploading.
+fn consent_to_public_deploy(base: &str, consent: TargetConsent) -> Result<()> {
+    let host = host_of(base).unwrap_or_else(|| base.to_string());
+    ux::note(format!(
+        "no --target given \u{2014} publishing to the public Genesis City network via {host}"
+    ));
+    if consent.assume_yes {
+        return Ok(());
+    }
+    if consent.non_interactive || !std::io::stdin().is_terminal() {
+        return Err(UserError::new(
+            format!("this deploy would publish to the public Genesis City network via {base}"),
+            TrySteps::one(
+                "pass --target <catalyst-domain> or --target-content <url> to publish elsewhere",
+            )
+            .and("or set DCL_ONE_SDK_DEFAULT_TARGET=<catalyst-or-content-url>")
+            .and("or pass --yes to confirm the public deploy non-interactively"),
+        )
+        .why("no target was given, so the target was chosen for you")
+        .into());
+    }
+    if prompt_continue()? {
+        Ok(())
+    } else {
+        Err(UserError::new(
+            "deployment cancelled",
+            TrySteps::one("pass --target <catalyst-domain> to publish somewhere else"),
+        )
+        .into())
+    }
+}
+
+async fn rotation_content_url(consent: TargetConsent) -> Result<String> {
+    let configured = configured_catalyst_rotation();
+    let rotation = configured.clone().unwrap_or_else(catalyst_rotation);
     let client = probe_client()?;
-    for base in CATALYST_ROTATION {
+    for base in &rotation {
         match fetch_about(&client, base).await {
             Ok(about) => {
                 let healthy = about
@@ -202,7 +253,13 @@ async fn rotation_content_url() -> Result<String> {
                     continue;
                 }
                 if let Some(content) = about_content_url(&about, base) {
-                    ux::note(format!("deploying via the public catalyst {base}"));
+                    if configured.is_some() {
+                        ux::note(format!(
+                            "deploying via {base} from DCL_ONE_SDK_CATALYST_ROTATION"
+                        ));
+                    } else {
+                        consent_to_public_deploy(base, consent)?;
+                    }
                     return Ok(content);
                 }
             }
@@ -210,7 +267,7 @@ async fn rotation_content_url() -> Result<String> {
         }
     }
     Err(UserError::new(
-        "no public catalyst answered healthy",
+        "no catalyst in the rotation answered healthy",
         TrySteps::one("check your network connection")
             .and("or pass --target <catalyst-domain> / --target-content <url> explicitly"),
     )

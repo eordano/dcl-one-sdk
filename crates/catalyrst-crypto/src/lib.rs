@@ -5,6 +5,7 @@ pub mod recover;
 pub mod rpc_validator;
 pub mod sign;
 pub mod signed_fetch;
+pub mod signer;
 pub mod validation_cache;
 pub mod verify;
 
@@ -13,4 +14,5 @@ pub use eip1654::{verify_eip1654, Eip1654Validator};
 pub use error::AuthError;
 pub use rpc_validator::RpcEip1654Validator;
 pub use sign::{create_simple_auth_chain, SignError, Wallet};
+pub use signer::Signer;
 pub use validation_cache::ValidationCache;

@@ -18,6 +18,7 @@
 use http::HeaderMap;
 use thiserror::Error;
 
+use crate::signer::Signer;
 use crate::verify::verify_auth_chain;
 use crate::AuthError;
 use catalyrst_types::{AuthLink as CryptoAuthLink, AuthLinkType, EthAddress};
@@ -61,6 +62,26 @@ pub enum AuthChainError {
     ForbiddenSigner,
     #[error("EIP-1654 not implemented")]
     EipNotImplemented,
+
+    // Variants below are produced by service-side validators built on this
+    // chain type (market's address check, world-storage's async EIP-1654
+    // validator and scene-signer policy), not by the extraction/validation in
+    // this module. They live here so services share one AuthChainError instead
+    // of redefining the enum plus a From<> mapping each.
+    #[error("Forbidden: address mismatch")]
+    AddressMismatch { expected: String, recovered: String },
+    #[error("Invalid timestamp")]
+    InvalidTimestamp(String),
+    #[error("Error connecting to catalyst")]
+    CatalystUnavailable(String),
+    #[error("Requests from scenes are not allowed")]
+    SceneSignerRejected,
+}
+
+impl From<AuthChainError> for catalyrst_types::ApiError {
+    fn from(e: AuthChainError) -> Self {
+        catalyrst_types::ApiError::http(401, format!("Unauthenticated: {e}"))
+    }
 }
 
 pub fn build_payload(method: &str, path: &str, timestamp: &str, metadata: &str) -> String {
@@ -169,7 +190,7 @@ pub fn validate_signature(
     timestamp: &str,
     expiration_secs: i64,
     now: i64,
-) -> Result<EthAddress, AuthChainError> {
+) -> Result<Signer, AuthChainError> {
     if let Ok(signed_at_ms) = timestamp.parse::<i64>() {
         let signed_at = signed_at_ms / 1000;
         if (now - signed_at).abs() > expiration_secs {
@@ -183,7 +204,7 @@ pub fn validate_signature(
 
     let crypto_chain = to_crypto_chain(chain);
     verify_auth_chain(&crypto_chain, payload, Some(now * 1000)).map_err(map_auth_error)?;
-    Ok(chain.signer.clone())
+    Ok(Signer::from_verified_chain(&chain.signer))
 }
 
 fn map_auth_error(err: AuthError) -> AuthChainError {
@@ -220,7 +241,7 @@ pub fn try_extract_signer(
     method: &str,
     path: &str,
     tolerance_secs: i64,
-) -> Option<String> {
+) -> Option<Signer> {
     let path = signed_fetch_path(headers, path);
     let path = path.as_ref();
     let chain = try_extract(headers)?;
@@ -238,7 +259,7 @@ pub fn verify_signed_fetch(
     method: &str,
     path: &str,
     tolerance_secs: i64,
-) -> Result<EthAddress, AuthChainError> {
+) -> Result<Signer, AuthChainError> {
     let path = signed_fetch_path(headers, path);
     let path = path.as_ref();
     let chain = extract_auth_chain(headers)?;
@@ -258,7 +279,7 @@ pub fn verify_signed_fetch_meta(
     method: &str,
     path: &str,
     tolerance_secs: i64,
-) -> Result<(EthAddress, serde_json::Value), AuthChainError> {
+) -> Result<(Signer, serde_json::Value), AuthChainError> {
     let path = signed_fetch_path(headers, path);
     let path = path.as_ref();
     let chain = extract_auth_chain(headers)?;
@@ -285,9 +306,10 @@ pub mod handshake {
         build_payload, signed_fetch_path, AuthChain, AuthLink, AUTH_CHAIN_HEADER_PREFIX,
         AUTH_METADATA_HEADER, AUTH_TIMESTAMP_HEADER, MAX_AUTH_CHAIN_LINKS,
     };
+    use crate::signer::Signer;
     use crate::verify::verify_auth_chain;
     use crate::AuthError;
-    use catalyrst_types::{AuthLink as CryptoAuthLink, AuthLinkType, EthAddress};
+    use catalyrst_types::{AuthLink as CryptoAuthLink, AuthLinkType};
 
     #[derive(Debug, Error)]
     pub enum AuthChainError {
@@ -385,7 +407,7 @@ pub mod handshake {
         timestamp: &str,
         expiration_secs: i64,
         now: i64,
-    ) -> Result<EthAddress, AuthChainError> {
+    ) -> Result<Signer, AuthChainError> {
         if let Ok(signed_at_ms) = timestamp.parse::<i64>() {
             let signed_at = signed_at_ms / 1000;
             if (now - signed_at).abs() > expiration_secs {
@@ -399,7 +421,7 @@ pub mod handshake {
 
         let crypto_chain = super::to_crypto_chain(chain);
         verify_auth_chain(&crypto_chain, payload, Some(now * 1000)).map_err(map_auth_error)?;
-        Ok(chain.signer.clone())
+        Ok(Signer::from_verified_chain(&chain.signer))
     }
 
     fn map_auth_error(err: AuthError) -> AuthChainError {
@@ -440,7 +462,7 @@ pub mod handshake {
         path: &str,
         expiration_secs: i64,
         now_secs: i64,
-    ) -> Result<EthAddress, AuthChainError> {
+    ) -> Result<Signer, AuthChainError> {
         let value: Value =
             serde_json::from_str(frame_json).map_err(|e| AuthChainError::MalformedChain {
                 index: 0,
@@ -461,7 +483,7 @@ pub mod handshake {
         method: &str,
         path: &str,
         tolerance_secs: i64,
-    ) -> Result<String, AuthChainError> {
+    ) -> Result<Signer, AuthChainError> {
         let path = signed_fetch_path(headers, path);
         let path = path.as_ref();
         let mut value = serde_json::Map::new();
@@ -487,7 +509,7 @@ pub mod handshake {
         method: &str,
         path: &str,
         tolerance_secs: i64,
-    ) -> Option<String> {
+    ) -> Option<Signer> {
         if !headers.keys().any(|k| {
             k.as_str()
                 .eq_ignore_ascii_case(&format!("{}0", AUTH_CHAIN_HEADER_PREFIX))

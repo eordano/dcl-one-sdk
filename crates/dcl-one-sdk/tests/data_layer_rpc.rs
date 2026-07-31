@@ -81,9 +81,16 @@ process.exit(0)
 "#;
 
 fn sandbox_node_modules() -> Option<PathBuf> {
-    std::env::var_os("DCL_ONE_SDK_TEST_NODE_MODULES")
+    match std::env::var_os("DCL_ONE_SDK_TEST_NODE_MODULES")
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
+    {
+        Some(p) => Some(p),
+        None => catalyrst_testgate::unavailable(
+            "DCL_ONE_SDK_TEST_NODE_MODULES",
+            "point it at a scene node_modules dir on the same filesystem",
+        ),
+    }
 }
 
 fn write(path: &Path, contents: &str) {
@@ -143,13 +150,14 @@ fn wait_for_file(path: &Path, timeout: Duration) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_layer_rpc_edit_saves_composite_and_reloads() {
     let Some(node_modules) = sandbox_node_modules() else {
-        eprintln!(
-            "skipping data-layer e2e: set DCL_ONE_SDK_TEST_NODE_MODULES to a scene node_modules dir (same filesystem) to run it"
-        );
         return;
     };
-    let Some(node) = dcl_one_sdk::build::find_node() else {
-        eprintln!("skipping data-layer e2e: node not on PATH");
+    let Some(node) = dcl_one_sdk::build::find_node().or_else(|| {
+        catalyrst_testgate::unavailable(
+            "node on PATH",
+            "the data-layer e2e drives a real node process",
+        )
+    }) else {
         return;
     };
 

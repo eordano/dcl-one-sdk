@@ -13,25 +13,30 @@ use serde_json::json;
 
 use super::http::preview_host;
 
-const DEFAULT_CATALYST: &str = "https://interconnected.online";
+/// Falls back to the local catalyrst content server rather than a public
+/// catalyst: a preview must never silently source its realm from production.
+const LOCAL_CATALYST: &str = "http://127.0.0.1:5141";
 
 pub(crate) fn catalyst_base() -> String {
     match std::env::var("DCL_ONE_SDK_CATALYST") {
-        Ok(v) if !v.is_empty() => v.trim_end_matches('/').to_string(),
-        _ => DEFAULT_CATALYST.to_string(),
+        Ok(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_string(),
+        _ => LOCAL_CATALYST.to_string(),
     }
 }
 
-/// The primary upstream plus two fallbacks from the deploy rotation, so a
+/// The primary upstream plus two fallbacks from a configured rotation, so a
 /// timeout or 5xx on one catalyst does not strand wearable/profile fetches.
 /// An explicit DCL_ONE_SDK_CATALYST is respected first but still falls back.
+/// Only a rotation someone named is used: unlike `deploy`, whose purpose is to
+/// publish to the public network, a preview must not source a realm from it
+/// unasked.
 fn upstream_candidates() -> Vec<String> {
     let primary = catalyst_base();
     let mut out = vec![primary.clone()];
     out.extend(
-        crate::deploy::CATALYST_ROTATION
-            .iter()
-            .map(|c| c.to_string())
+        crate::deploy::configured_catalyst_rotation()
+            .unwrap_or_default()
+            .into_iter()
             .filter(|c| *c != primary)
             .take(2),
     );

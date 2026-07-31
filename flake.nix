@@ -13,7 +13,7 @@
       packages = forAllSystems (pkgs: rec {
         dcl-one-sdk = pkgs.rustPlatform.buildRustPackage {
           pname = "dcl-one-sdk";
-          version = "0.14.1";
+          version = "0.14.3";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "-p" "dcl-one-sdk" "--bin" "dcl-one-sdk" ];

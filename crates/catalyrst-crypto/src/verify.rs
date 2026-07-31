@@ -16,15 +16,6 @@ pub fn verify_auth_chain(
     verify_chain_inner(chain, expected_address, now_ms)
 }
 
-pub fn verify_auth_chain_with_validator(
-    chain: &AuthChain,
-    expected_address: &str,
-    now_ms: Option<i64>,
-    _eip1654_validator: Option<&dyn Eip1654Validator>,
-) -> Result<(), AuthError> {
-    verify_chain_inner(chain, expected_address, now_ms)
-}
-
 pub async fn verify_auth_chain_async(
     chain: &AuthChain,
     expected_address: &str,

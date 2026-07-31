@@ -202,10 +202,7 @@ fn init_creates_a_missing_target_directory() {
 
 #[test]
 fn init_scene_is_immediately_buildable_with_provisioned_node_modules() {
-    let Some(src) = std::env::var_os("DCL_ONE_SDK_TEST_SCENE") else {
-        eprintln!(
-            "skipped: set DCL_ONE_SDK_TEST_SCENE to a scene checkout with node_modules installed"
-        );
+    let Some(src) = catalyrst_testgate::require_env("DCL_ONE_SDK_TEST_SCENE") else {
         return;
     };
     let src = PathBuf::from(src);

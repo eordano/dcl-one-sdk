@@ -1,6 +1,6 @@
 [package]
 name = "dcl-one-sdk"
-version = "0.14.1"
+version = "0.14.3"
 edition = "2021"
 description = "Binary-compatible Rust replacement for @dcl/sdk-commands: bundle (rolldown, in-process), preview-serve, and deploy Decentraland SDK7 scenes"
 
@@ -43,6 +43,7 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate
 libc = "0.2"
 
 [dev-dependencies]
+catalyrst-testgate = { workspace = true }
 hex = "0.4"
 
 [features]

@@ -9,9 +9,16 @@ use tokio_tungstenite::tungstenite::Message;
 const BIN: &str = env!("CARGO_BIN_EXE_dcl-one-sdk");
 
 fn sandbox_node_modules() -> Option<PathBuf> {
-    std::env::var_os("DCL_ONE_SDK_TEST_NODE_MODULES")
+    match std::env::var_os("DCL_ONE_SDK_TEST_NODE_MODULES")
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
+    {
+        Some(p) => Some(p),
+        None => catalyrst_testgate::unavailable(
+            "DCL_ONE_SDK_TEST_NODE_MODULES",
+            "point it at a scene node_modules dir on the same filesystem",
+        ),
+    }
 }
 
 fn scene_json(title: &str, parcel: &str) -> String {
@@ -89,9 +96,6 @@ async fn wait_for_about(base: &str, client: &reqwest::Client) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_member_workspace_builds_serves_and_reloads_per_member() {
     let Some(node_modules) = sandbox_node_modules() else {
-        eprintln!(
-            "skipping workspace e2e: set DCL_ONE_SDK_TEST_NODE_MODULES to a scene node_modules dir (same filesystem) to run it"
-        );
         return;
     };
 

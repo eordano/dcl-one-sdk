@@ -190,6 +190,66 @@ impl IntoResponse for MarketplaceApiError {
     }
 }
 
+/// Generic message-passthrough service error over the [`ApiErrorBody`]
+/// envelope (`{"ok":false,"error":msg,"message":msg}`). Services whose errors
+/// are just status+message use this directly; domain-specific variants stay in
+/// the service crates, either wrapping this or keeping their own envelope.
+#[derive(Debug, Error)]
+pub enum ApiError {
+    #[error("{message}")]
+    Http { status: u16, message: String },
+
+    #[cfg(feature = "sqlx")]
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl ApiError {
+    pub fn http(status: u16, message: impl Into<String>) -> Self {
+        Self::Http {
+            status,
+            message: message.into(),
+        }
+    }
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self::http(400, msg)
+    }
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self::http(401, msg)
+    }
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self::http(403, msg)
+    }
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::http(404, msg)
+    }
+    pub fn service_unavailable(msg: impl Into<String>) -> Self {
+        Self::http(503, msg)
+    }
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::Internal(msg.into())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (code, message) = match self {
+            ApiError::Http { status, message } => (status, message),
+            #[cfg(feature = "sqlx")]
+            ApiError::Database(e) => {
+                tracing::error!(error = %e, "sqlx error");
+                (500, "database error".to_string())
+            }
+            ApiError::Internal(m) => (500, m),
+        };
+        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(ApiErrorBody::new(message))).into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

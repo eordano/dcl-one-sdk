@@ -30,14 +30,10 @@ fn sidecar_port() -> Option<u16> {
     free_port()
 }
 
-/// Zone-aware upstream ab-cdn: .zone catalysts pair with the .zone CDN.
-/// abgen derives the matching asset-bundle-registry from this URL itself.
+/// The local catalyrst-abgen serve endpoint. Overridden with
+/// ABGEN_UPSTREAM_AB_CDN; never defaults to a public asset-bundle CDN.
 fn upstream_ab_cdn_default() -> String {
-    if crate::start::proxy::catalyst_base().ends_with(".zone") {
-        "https://ab-cdn.decentraland.zone".to_string()
-    } else {
-        "https://ab-cdn.decentraland.org".to_string()
-    }
+    "http://127.0.0.1:5147".to_string()
 }
 
 fn host_platform() -> &'static str {

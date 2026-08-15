@@ -111,9 +111,19 @@ backward-compatible with them.
   abgen prints a one-line hint and preview starts immediately (it can no
   longer be missing), and `--no-asset-bundles` turns the sidecar off — which
   is exactly upstream's preview, since upstream has no sidecar at all.
-  `--asset-bundles` (upstream
-  7.26.0) hands conversion to the desktop Explorer instead: the sidecar is
-  skipped and every desktop deep link carries `local-ab=true`. `--mcp` and
+  `--asset-bundles` (upstream 7.26.0) does NOT hand conversion to the
+  Explorer — an earlier version of this file and of `--asset-bundles --help`
+  both said so and both were wrong. Per `AppArgsFlags.LOCAL_AB` in
+  unity-explorer the flag "carries no URL or port": the client appends
+  `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH` (`/optimized-assets`) to the
+  realm it already has, so the PREVIEW SERVER must serve
+  `{realm}/optimized-assets` — pinned by that repo's
+  `RealmLaunchSettingsShould` cases (`http://127.0.0.1:8000` ->
+  `http://127.0.0.1:8000/optimized-assets`, ref js-sdk-toolchain#1504). This
+  server proxies that path to the sidecar, so the sidecar keeps running under
+  `--asset-bundles` and only the addressing changes: `local-ab=true` in the
+  deep link instead of `optimized-assets-url`. One origin means no second port
+  and no second firewall approval on a LAN join. `--mcp` and
   `--mcp-port N` forward as deep-link params, and anything after a standalone
   `--` is forwarded verbatim into the deep link as query params
   (`--key=value`, `--key value`, bare `--key` becomes `key=true`; declared

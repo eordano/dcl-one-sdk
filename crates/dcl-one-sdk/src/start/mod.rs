@@ -59,11 +59,19 @@ pub struct StartOptions {
     pub ignore_composite: bool,
     pub offline_comms: bool,
     pub mobile: bool,
-    /// Run the local abgen conversion sidecar (the default). Off under
-    /// --no-asset-bundles, and under --asset-bundles too: that flag hands
-    /// conversion to the Explorer itself via `local-ab=true`, as upstream.
+    /// Run the local abgen conversion sidecar. On unless --no-asset-bundles —
+    /// including under --asset-bundles, which only changes HOW the explorer
+    /// reaches it (see `local_ab`), not whether it runs.
     pub ab_sidecar: bool,
     /// Forward `local-ab=true` in the desktop deep link (--asset-bundles).
+    ///
+    /// Upstream's flag does NOT hand conversion to the explorer, which is what
+    /// this used to claim. Per `AppArgsFlags.LOCAL_AB` in unity-explorer it
+    /// "carries no URL or port": the client appends
+    /// `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH` to the realm it already has
+    /// and fetches `{realm}/optimized-assets`, which this server proxies to the
+    /// sidecar. The alternative — the default — is to name the sidecar directly
+    /// with `optimized-assets-url`, which the explorer treats as an override.
     pub local_ab: bool,
     pub mcp: bool,
     pub mcp_port: Option<u16>,
@@ -183,6 +191,12 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .route("/lambdas/{*path}", any(lambdas_proxy))
         .route("/explorer/{*path}", any(explorer_proxy))
         .route("/world/{name}/about", get(world_about))
+        // The realm-derived asset-bundle base the explorer uses under
+        // `local-ab=true` (what --asset-bundles forwards). Proxies the sidecar.
+        .route(
+            "/optimized-assets/{*path}",
+            any(crate::start::proxy::optimized_assets),
+        )
         .route(
             "/world-content/{name}/contents/{hash}",
             get(world_content).head(world_content),
@@ -207,6 +221,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     let is_multi = workspace.is_multi();
     let scene_json = first.scene_json.clone();
     let mobile = opts.mobile;
+    let local_ab = opts.local_ab;
     let tunnel_token = opts.tunnel_token.clone();
     tokio::spawn(async move {
         let optimized_assets_url = match sidecar.as_mut() {
@@ -233,7 +248,15 @@ pub async fn start(opts: StartOptions) -> Result<()> {
             unreachable,
             tunnel_hint: trunk_url.is_none(),
             editor: banner_state.data_layer.is_some(),
-            optimized_assets_url,
+            // The two are alternatives, never both: the explorer treats
+            // `optimized-assets-url` as an OVERRIDE of the realm-derived base
+            // (DecentralandUrlsSource::ResolveOptimizedAssetsUrl), so emitting
+            // it alongside `local-ab=true` would silently defeat the flag the
+            // user just asked for.
+            optimized_assets_url: match local_ab {
+                true => None,
+                false => optimized_assets_url,
+            },
             deep_link_extra: banner_state.deep_link_extra.clone(),
             native_hud: true,
         };

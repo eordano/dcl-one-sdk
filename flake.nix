@@ -59,7 +59,7 @@
 
         dcl-one-sdk = pkgs.rustPlatform.buildRustPackage {
           pname = "dcl-one-sdk";
-          version = "0.16.6";
+          version = "0.16.7";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "-p" "dcl-one-sdk" "--bin" "dcl-one-sdk" ];

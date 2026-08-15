@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-hashing"
-version = "0.16.6"
+version = "0.16.7"
 edition = "2021"
 description = "Decentraland content-addressing: CIDv0 (Qm…) and CIDv1 (bafy…) hashing"
 

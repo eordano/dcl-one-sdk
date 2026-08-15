@@ -375,7 +375,41 @@ fn is_published_hash(st: &AppState, project: &Project, hash: &str) -> bool {
         })
 }
 
+/// The explorer's asset-bundle verdict for this scene, read off the entity as
+/// `status` (`DCL.Ipfs.TrimmedEntityDefinitionBase.assetBundleRegistryEnum`,
+/// `[JsonProperty("status")]`) and rendered in its connection-status panel.
+///
+/// Upstream sdk-commands sends no such field — in production it comes from the
+/// asset-bundle registry, which a preview has no equivalent of. Reporting it
+/// here is a deliberate divergence: the sidecar IS the registry for a preview,
+/// so it can answer honestly instead of leaving the client to default the enum
+/// to `complete` whether or not any bundle exists.
+///
+/// `fallback` is the accurate word when the sidecar is off: the client falls
+/// back to raw GLTFs, which is exactly what happens.
+fn ab_status(st: &AppState) -> &'static str {
+    ab_status_from(&st.optimized_assets_url)
+}
+
+fn ab_status_from(optimized_assets_url: &std::sync::OnceLock<String>) -> &'static str {
+    match optimized_assets_url.get() {
+        Some(_) => "complete",
+        None => "fallback",
+    }
+}
+
 fn scene_entity(st: &AppState, project: &Project) -> Value {
+    // `status` is injected per request, not baked into the cache entry: the
+    // sidecar reports ready AFTER the first entities can be served, so a cached
+    // "fallback" would otherwise outlive the thing it describes.
+    let mut entity = scene_entity_cached(st, project);
+    if let Some(obj) = entity.as_object_mut() {
+        obj.insert("status".into(), json!(ab_status(st)));
+    }
+    entity
+}
+
+fn scene_entity_cached(st: &AppState, project: &Project) -> Value {
     if let Some((at, cached)) = lock_cache(st).get(&project.root) {
         if at.elapsed() < ENTITY_CACHE_TTL {
             return cached.clone();
@@ -550,6 +584,17 @@ mod tests {
             root,
             scene_json: json!({ "main": "bin/index.js" }),
         }
+    }
+
+    #[test]
+    fn ab_status_tells_the_truth_about_whether_bundles_are_served() {
+        // The explorer reads this as AssetBundleRegistryEnum. Absent, the enum
+        // defaults to `complete` (it is variant 0) whether or not a single
+        // bundle exists — which is why saying `fallback` out loud matters.
+        let url = std::sync::OnceLock::new();
+        assert_eq!(ab_status_from(&url), "fallback");
+        let _ = url.set("http://127.0.0.1:5147".to_string());
+        assert_eq!(ab_status_from(&url), "complete");
     }
 
     #[test]

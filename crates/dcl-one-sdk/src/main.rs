@@ -153,7 +153,7 @@ enum Command {
         #[arg(
             long = "asset-bundles",
             conflicts_with = "no_asset_bundles",
-            help = "Let the desktop Explorer convert asset bundles itself: forwards local-ab=true in the deep link and skips the local abgen sidecar"
+            help = "Serve asset bundles the way upstream does: forwards local-ab=true, so the Explorer derives the base from the realm and fetches {realm}/optimized-assets (proxied to the sidecar) instead of taking a separate optimized-assets-url"
         )]
         asset_bundles: bool,
         #[arg(
@@ -575,7 +575,10 @@ async fn run(command: Command) -> Result<()> {
                 ignore_composite,
                 offline_comms,
                 mobile,
-                ab_sidecar: !no_asset_bundles && !asset_bundles,
+                // --asset-bundles still needs the sidecar: local-ab makes the
+                // explorer fetch from {realm}/optimized-assets, which this
+                // server proxies TO the sidecar. Only --no-asset-bundles is off.
+                ab_sidecar: !no_asset_bundles,
                 local_ab: asset_bundles,
                 mcp,
                 mcp_port,

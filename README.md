@@ -93,9 +93,17 @@ unpacks into a temp directory keyed by a content hash and is reused from then
 on.
 
 `--no-asset-bundles` turns the sidecar off — that is upstream `sdk-commands`
-behaviour, which has no sidecar at all. `--asset-bundles` matches upstream's
-flag of the same name: it forwards `local-ab=true` in the deep link and lets
-the desktop Explorer do its own conversion, so the sidecar stays down.
+behaviour, which has no sidecar at all.
+
+`--asset-bundles` matches upstream's flag of the same name and forwards
+`local-ab=true`. That flag does not ask the Explorer to convert anything: per
+`AppArgsFlags.LOCAL_AB` in unity-explorer it "carries no URL or port", so the
+client appends `/optimized-assets` to the realm it already has and expects the
+PREVIEW SERVER to serve it. This server does, proxying that path to the
+sidecar — so the sidecar keeps running and only the addressing changes:
+`local-ab=true` instead of `optimized-assets-url`. Everything then arrives over
+one origin, which on a LAN join means no second port and no second firewall
+approval.
 
 `ABGEN_BIN` overrides the embedded copy at run time. It is for advanced use —
 an abgen you built yourself, a bisect, a test — and nothing else consults the

@@ -94,13 +94,49 @@ fn proxy_client() -> Result<reqwest::Client, Response> {
 /// routes that exist only to lift a fetch onto the preview origin (CORS), where
 /// there is nothing to rewrite and no fallback rotation to walk.
 pub(super) async fn passthrough_get(url: &str) -> Response {
+    passthrough(Method::GET, url).await
+}
+
+/// `{realm}/optimized-assets/*` — the path the explorer derives from the realm
+/// when it is told `local-ab=true`, which is how upstream sdk-commands asks for
+/// asset bundles (`AppArgsFlags.LOCAL_AB`: "served by the preview server at
+/// {realm}/optimized-assets … carries no URL or port"; the base is pinned by
+/// `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH`).
+///
+/// Serving it here means `--asset-bundles` works without a second origin: the
+/// client keeps talking to the realm it already has, so there is no extra port
+/// in the deep link and no second firewall approval on the LAN. The sidecar is
+/// still the thing doing the work — this only forwards to it.
+pub(super) async fn optimized_assets(
+    method: Method,
+    axum::extract::State(st): axum::extract::State<std::sync::Arc<super::AppState>>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    raw_query: axum::extract::RawQuery,
+) -> Response {
+    let Some(base) = st.optimized_assets_url.get() else {
+        // No sidecar (or not ready yet). 503 rather than 404: the route exists,
+        // the upstream for it does not, and a 404 would read as "this bundle
+        // does not exist" to a client that is asking for a manifest.
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "asset-bundle sidecar is not running (--no-asset-bundles?)",
+        )
+            .into_response();
+    };
+    let query = raw_query.0.map(|q| format!("?{q}")).unwrap_or_default();
+    passthrough(method, &format!("{base}/{path}{query}")).await
+}
+
+/// Forward a request and hand back status + content type + body unchanged.
+async fn passthrough(method: Method, url: &str) -> Response {
     let client = match proxy_client() {
         Ok(c) => c,
         Err(resp) => return resp,
     };
-    match client.get(url).send().await {
+    match client.request(method, url).send().await {
         Ok(resp) => {
-            let status = resp.status();
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let ct = resp
                 .headers()
                 .get(header::CONTENT_TYPE)

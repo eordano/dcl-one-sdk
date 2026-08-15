@@ -10,30 +10,12 @@ pub enum SortingField {
     EntityTimestamp,
 }
 
-impl SortingField {
-    pub fn as_sql_column(&self) -> &'static str {
-        match self {
-            SortingField::LocalTimestamp => "local_timestamp",
-            SortingField::EntityTimestamp => "entity_timestamp",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SortingOrder {
     #[serde(rename = "ASC")]
     Ascending,
     #[serde(rename = "DESC")]
     Descending,
-}
-
-impl SortingOrder {
-    pub fn as_sql(&self) -> &'static str {
-        match self {
-            SortingOrder::Ascending => "ASC",
-            SortingOrder::Descending => "DESC",
-        }
-    }
 }
 
 pub type DeploymentSortingField = SortingField;

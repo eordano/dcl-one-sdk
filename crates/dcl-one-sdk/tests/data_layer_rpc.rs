@@ -70,7 +70,10 @@ async function* stream() {
 
 const incoming = service.crdtStream(stream())
 const first = await incoming.next()
-console.log('INITIAL_STATE_BYTES', first.value?.data?.length ?? 0)
+// One string argument on purpose: a second, numeric argument goes through
+// util.inspect, which wraps it in ANSI colour codes whenever FORCE_COLOR is
+// set in the environment — and then the Rust side parses `\e[33m202\e[39m`.
+console.log('INITIAL_STATE_BYTES ' + (first.value?.data?.length ?? 0))
 
 queue(new Uint8Array(crdtPutTransform(515, 1, 7.5)))
 await new Promise((r) => setTimeout(r, 500))
@@ -81,9 +84,16 @@ process.exit(0)
 "#;
 
 fn sandbox_node_modules() -> Option<PathBuf> {
-    std::env::var_os("DCL_ONE_SDK_TEST_NODE_MODULES")
+    match std::env::var_os("DCL_ONE_SDK_TEST_NODE_MODULES")
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
+    {
+        Some(p) => Some(p),
+        None => catalyrst_testgate::unavailable(
+            "DCL_ONE_SDK_TEST_NODE_MODULES",
+            "point it at a scene node_modules dir on the same filesystem",
+        ),
+    }
 }
 
 fn write(path: &Path, contents: &str) {
@@ -143,13 +153,14 @@ fn wait_for_file(path: &Path, timeout: Duration) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_layer_rpc_edit_saves_composite_and_reloads() {
     let Some(node_modules) = sandbox_node_modules() else {
-        eprintln!(
-            "skipping data-layer e2e: set DCL_ONE_SDK_TEST_NODE_MODULES to a scene node_modules dir (same filesystem) to run it"
-        );
         return;
     };
-    let Some(node) = dcl_one_sdk::build::find_node() else {
-        eprintln!("skipping data-layer e2e: node not on PATH");
+    let Some(node) = dcl_one_sdk::build::find_node().or_else(|| {
+        catalyrst_testgate::unavailable(
+            "node on PATH",
+            "the data-layer e2e drives a real node process",
+        )
+    }) else {
         return;
     };
 
@@ -206,28 +217,50 @@ async fn data_layer_rpc_edit_saves_composite_and_reloads() {
     wait_for_about(&base, &client).await;
     eprintln!("phase: server up on {base}");
 
+    // The editor's browser bundle is a separate npm package and is NOT in the
+    // blob — the blob ships the data-layer host and no UI. Both outcomes are
+    // correct and both are asserted; which one applies depends on whether the
+    // node_modules under test happens to carry `@dcl/inspector/public`.
+    //
+    // Everything below this block is the part that must hold either way: the
+    // data layer itself.
+    let has_ui = scene
+        .join("node_modules/@dcl/inspector/public/index.html")
+        .is_file();
     let index = client
         .get(format!("{base}/inspector/"))
         .send()
         .await
         .unwrap();
-    assert!(index.status().is_success());
-    let html = index.text().await.unwrap();
-    assert!(
-        html.contains(&format!(
-            "const config = '{{\"dataLayerRpcWsUrl\":\"ws://127.0.0.1:{port}/data-layer\"}}'"
-        )),
-        "config not injected: {html}"
-    );
-    let bundle = client
-        .get(format!("{base}/inspector/bundle.js"))
-        .send()
-        .await
-        .unwrap();
-    assert!(bundle.status().is_success());
-    assert_eq!(
-        bundle.headers()["content-type"].to_str().unwrap(),
-        "application/javascript"
+    if has_ui {
+        assert!(index.status().is_success());
+        let html = index.text().await.unwrap();
+        assert!(
+            html.contains(&format!(
+                "const config = '{{\"dataLayerRpcWsUrl\":\"ws://127.0.0.1:{port}/data-layer\"}}'"
+            )),
+            "config not injected: {html}"
+        );
+        let bundle = client
+            .get(format!("{base}/inspector/bundle.js"))
+            .send()
+            .await
+            .unwrap();
+        assert!(bundle.status().is_success());
+        assert_eq!(
+            bundle.headers()["content-type"].to_str().unwrap(),
+            "application/javascript"
+        );
+    } else {
+        // A 404 that names the missing package, not a dead server: the point
+        // is that `--data-layer` came up at all without the UI installed.
+        assert_eq!(index.status(), reqwest::StatusCode::NOT_FOUND);
+        let body = index.text().await.unwrap();
+        assert!(body.contains("@dcl/inspector"), "unhelpful 404: {body}");
+    }
+    eprintln!(
+        "phase: inspector UI {}",
+        if has_ui { "served" } else { "absent" }
     );
 
     let composite = scene.join("assets/scene/main.composite");

@@ -1,0 +1,41 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __exportStar = (this && this.__exportStar) || function(m, exports) {
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ColorRange = void 0;
+var colors_gen_1 = require("./pb/decentraland/common/colors.gen");
+Object.defineProperty(exports, "ColorRange", { enumerable: true, get: function () { return colors_gen_1.ColorRange; } });
+__exportStar(require("./pb/decentraland/sdk/components/common/avatar_mask.gen"), exports);
+// export { PbAvatarMask }
+__exportStar(require("./pb/decentraland/sdk/components/common/camera_transition.gen"), exports);
+// export { PbCameraTransition }
+__exportStar(require("./pb/decentraland/sdk/components/common/camera_type.gen"), exports);
+// export { PbCameraType }
+__exportStar(require("./pb/decentraland/sdk/components/common/input_action.gen"), exports);
+// export { PbInputAction }
+__exportStar(require("./pb/decentraland/sdk/components/common/loading_state.gen"), exports);
+// export { PbLoadingState }
+__exportStar(require("./pb/decentraland/sdk/components/common/media_state.gen"), exports);
+// export { PbMediaState }
+__exportStar(require("./pb/decentraland/sdk/components/common/raycast_hit.gen"), exports);
+// export { PbRaycastHit }
+__exportStar(require("./pb/decentraland/sdk/components/common/texts.gen"), exports);
+// export { PbTexts }
+__exportStar(require("./pb/decentraland/common/border_rect.gen"), exports);
+// export { PbBorderRect }
+__exportStar(require("./pb/decentraland/common/floats.gen"), exports);
+// export { PbFloats }
+__exportStar(require("./pb/decentraland/common/texture.gen"), exports);
+// export { PbTexture }

@@ -561,6 +561,22 @@ impl CompositeNormalizer {
 mod tests {
     use super::*;
 
+    #[test]
+    fn schema_table_tracks_ecs_7_26_0() {
+        let raw = include_str!("../docs/composite-component-schemas.json");
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed["ecsVersion"], serde_json::json!("7.26.0"));
+        let table = static_core_table();
+        for name in [
+            "core::ExplorerUiEventsResult",
+            "core::TouchScreenControls",
+            "core::UiInputBinding",
+            "core::AvatarEmoteCommand",
+        ] {
+            assert!(table.contains(name), "missing {name}");
+        }
+    }
+
     fn edge_cases() -> Vec<(String, String)> {
         let raw = include_str!("../docs/composite-tojson-edge-cases.json");
         let parsed: Json = serde_json::from_str(raw).expect("edge cases parse");

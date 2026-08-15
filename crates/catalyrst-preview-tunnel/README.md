@@ -32,6 +32,6 @@ Text frames are JSON control messages (discriminator `t`; unknown `t` ignored): 
 | `TUNNEL_OPEN_TIMEOUT_SECS` | 15 | `open` -> `open_ok` deadline (504 past it) |
 | `TUNNEL_BODY_MAX_BYTES` | 67108864 | public request-body cap (413 past it); responses stream unbounded |
 
-Deploying: one ws-capable nginx location on any https vhost is enough - everything, including the agent trunk at `/t/_connect`, lives under `/t/`. Load-bearing directives: `proxy_http_version 1.1` + Upgrade/Connection passthrough, `proxy_read_timeout 1h`, `proxy_buffering off`, `client_max_body_size 0`.
+Deploying: one ws-capable nginx location on any https vhost is enough - everything, including the agent trunk at `/t/_connect`, lives under `/t/`. A ready vhost snippet + systemd unit template exist in the reference deployment's nginx conf.d / systemd config. Load-bearing directives: `proxy_http_version 1.1` + Upgrade/Connection passthrough, `proxy_read_timeout 1h`, `proxy_buffering off`, `client_max_body_size 0`.
 
 Tests: `cargo test -p catalyrst-preview-tunnel` - protocol grammar + codec units, plus `tests/tunnel_flow.rs` integration (http multiplexing, ws subprotocol negotiation + text/binary preservation, 404/502/504 mapping, `open_err` -> 502, token 4401, resume-keeps-id, allow-ids pinning + 4409). Cross-crate end-to-end (real agent, real comms relay, real service): `dcl-one-sdk/tests/tunnel_e2e.rs`.

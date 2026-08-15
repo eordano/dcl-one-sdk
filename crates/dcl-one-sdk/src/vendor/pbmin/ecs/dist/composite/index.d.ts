@@ -1,0 +1,54 @@
+import { IEngine } from '../engine';
+import { CompositeRootType, getCompositeRootComponent } from './components';
+import { CompositeProvider, CompositeResource, EntityMappingMode, InstanceCompositeOptions } from './instance';
+import type { ComponentData, CompositeComponent, CompositeComponent_DataEntry } from './proto/gen/composite.gen';
+import { CompositeDefinition } from './proto/gen/composite.gen';
+export type { CompositeDefinition, ComponentData, CompositeComponent, CompositeComponent_DataEntry, InstanceCompositeOptions, CompositeProvider, CompositeRootType, CompositeResource };
+export { EntityMappingMode };
+export { getCompositeRootComponent };
+export { setCompositeProvider, getCompositeProvider } from './provider-registry';
+/**
+ * @public
+ * @deprecated composite is not being supported so far, please do not use this feature
+ */
+export type Composite = CompositeDefinition;
+/**
+ * @public
+ * @deprecated composite is not being supported so far, please do not use this feature
+ */
+export declare namespace Composite {
+    /** @public */
+    type Definition = CompositeDefinition;
+    /** @public */
+    type Resource = CompositeResource;
+    /** @public */
+    type Provider = CompositeProvider;
+    /** @public */
+    function fromJson(object: any): Composite.Definition;
+    /** @public */
+    function fromBinary(buffer: Uint8Array): Composite.Definition;
+    /** @public */
+    function toJson(composite: Composite.Definition): any;
+    /** @public */
+    function toBinary(composite: Composite.Definition): Uint8Array;
+    /**
+     * Instance a composite and return its root entity.
+     * @param engine - the engine that will own the new entities
+     * @param compositeData - the composite resource to instance
+     * @param compositeProvider - provider used to resolve nested composite references
+     * @param options - instancing options (`rootEntity`, `entityMapping`, `alreadyRequestedSrc`)
+     * @returns the root entity of the instanced composite
+     *
+     * @public
+     */
+    function instance(engine: IEngine, compositeData: Composite.Resource, compositeProvider: CompositeProvider, options?: InstanceCompositeOptions): import("../engine").Entity;
+    /**
+     * Resolve and normalize a composite path
+     * @param src - the source path
+     * @param cwd - the directory from the resolve should start to resolve
+     *
+     * @returns the absolute resolved path without slash at the beginning
+     * @public
+     */
+    function resolveAndNormalizePath(src: string, cwd?: string): string;
+}

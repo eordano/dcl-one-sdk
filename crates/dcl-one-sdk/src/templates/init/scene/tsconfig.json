@@ -4,7 +4,7 @@
     "allowJs": true,
     "resolveJsonModule": true,
     "strict": true,
-    "baseUrl": "."
+    "moduleResolution": "bundler"
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["src/**/*.test.ts"],

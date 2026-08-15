@@ -16,15 +16,6 @@ pub fn verify_auth_chain(
     verify_chain_inner(chain, expected_address, now_ms)
 }
 
-pub fn verify_auth_chain_with_validator(
-    chain: &AuthChain,
-    expected_address: &str,
-    now_ms: Option<i64>,
-    _eip1654_validator: Option<&dyn Eip1654Validator>,
-) -> Result<(), AuthError> {
-    verify_chain_inner(chain, expected_address, now_ms)
-}
-
 pub async fn verify_auth_chain_async(
     chain: &AuthChain,
     expected_address: &str,
@@ -251,17 +242,16 @@ fn verify_chain_inner(
 }
 
 fn decode_hex_signature(hex_str: &str) -> Result<Vec<u8>, AuthError> {
-    let hex = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    if !hex.len().is_multiple_of(2) {
-        return Err(AuthError::RecoveryFailed("Odd-length signature hex".into()));
-    }
-    for i in (0..hex.len()).step_by(2) {
-        let byte = u8::from_str_radix(&hex[i..i + 2], 16)
-            .map_err(|e| AuthError::RecoveryFailed(format!("Hex decode: {}", e)))?;
-        bytes.push(byte);
-    }
-    Ok(bytes)
+    use catalyrst_types::HexDecodeError;
+    catalyrst_types::decode_hex_0x(hex_str).map_err(|e| match e {
+        HexDecodeError::OddLength => AuthError::RecoveryFailed("Odd-length signature hex".into()),
+        HexDecodeError::InvalidChar { c, .. } if !c.is_ascii() => {
+            AuthError::RecoveryFailed("Non-ASCII signature hex".into())
+        }
+        HexDecodeError::InvalidChar { .. } => {
+            AuthError::RecoveryFailed("Hex decode: invalid digit found in string".into())
+        }
+    })
 }
 
 fn require_signature(link: &crate::AuthLink, index: usize) -> Result<String, AuthError> {

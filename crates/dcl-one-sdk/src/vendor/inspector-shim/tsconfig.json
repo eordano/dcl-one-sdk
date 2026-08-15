@@ -1,0 +1,39 @@
+{
+  "//": [
+    "Type check for the editor's data-layer host. Run it with",
+    "scripts/check-editor-host.sh, which supplies the node_modules: @dcl/ecs and",
+    "@dcl/rpc reach this package through a scene's install, and the blob beside",
+    "it ships them stripped of declarations, so their types cannot come from",
+    "there.",
+    "",
+    "checkJs rather than a TS port on purpose. This directory IS the shipped",
+    "npm package -- build-base-blob.py copies these files into",
+    "node_modules/@dcl/inspector verbatim -- so a build step between source and",
+    "artifact would be a new way for the two to disagree. JSDoc types cost the",
+    "artifact nothing.",
+    "",
+    "strict stays off -- the host is a port that must keep upstream's shape, and",
+    "noImplicitAny over vendored types whose declarations are already incomplete",
+    "(see ECS.components in engine.js) reports the vendor, not us -- but",
+    "strictNullChecks is ON and carries its weight twice over. It cost two fixes",
+    "in the whole shim, and without it NO return type can hold the rule the host",
+    "header states: undefined is assignable to everything, so a stub that forgets",
+    "its object literal type-checks against any signature you write."
+  ],
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "strictNullChecks": true,
+    "noImplicitAny": false,
+    "types": ["node"]
+  },
+  "include": ["host.js", "engine.js", "engine-to-composite.js", "index.js"]
+}

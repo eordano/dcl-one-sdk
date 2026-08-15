@@ -1,0 +1,8 @@
+# Everything `tests/setup.sh` builds. All of it is a copy of something already in the
+# tree (the blob, or a scene's node_modules) — regenerate, never commit.
+/node_modules/
+/ref/
+/ecs/
+/rpc/
+/pbmin/
+/mutant/

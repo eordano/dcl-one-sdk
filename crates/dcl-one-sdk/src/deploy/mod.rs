@@ -1,12 +1,14 @@
 mod net;
 mod run;
+mod unpublish;
 
 pub use net::{
-    build_delete_payload, encode_segment, enforce_world_permission, jump_in_url,
+    build_delete_payload, encode_segment, enforce_world_permission, jump_in_url, non_upstream_note,
     sanitize_catalyst_url, scenes_on_other_parcels, send_world_delete, simple_auth_chain,
     upload_entity, WorldScene,
 };
 pub use run::{deploy, load_signer};
+pub use unpublish::{unpublish, UnpublishOptions};
 
 use crate::jsjson::{self, JsValue};
 use crate::scene::Project;
@@ -36,7 +38,11 @@ pub struct DeployOptions {
 
 const MAX_FILE_SIZE_BYTES: usize = 50_000_000;
 
-pub const CATALYST_ROTATION: [&str; 8] = [
+/// The hosts that make up the public Genesis City network: both the classifier
+/// behind `non_upstream_note` and the rotation `deploy` falls back to, because
+/// publishing a scene there is what this CLI is for.
+pub const UPSTREAM_CATALYST_HOSTS: [&str; 8] = [
+    "https://interconnected.online",
     "https://peer-ec2.decentraland.org",
     "https://peer.melonwave.com",
     "https://peer-ec1.decentraland.org",
@@ -44,8 +50,32 @@ pub const CATALYST_ROTATION: [&str; 8] = [
     "https://peer.uadevops.com",
     "https://peer.dclnodes.io",
     "https://peer-eu1.decentraland.org",
-    "https://interconnected.online",
 ];
+
+/// The rotation named by DCL_ONE_SDK_CATALYST_ROTATION (comma-separated), or
+/// `None` when the caller never named one. Callers that must not reach a
+/// public catalyst on their own read this rather than `catalyst_rotation`.
+pub fn configured_catalyst_rotation() -> Option<Vec<String>> {
+    let rotation: Vec<String> = std::env::var("DCL_ONE_SDK_CATALYST_ROTATION")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!rotation.is_empty()).then_some(rotation)
+}
+
+/// Catalysts `deploy` picks from when given no target. Defaults to the public
+/// network; the implicit choice is announced and confirmed at the call site,
+/// so it is never silent.
+pub fn catalyst_rotation() -> Vec<String> {
+    configured_catalyst_rotation().unwrap_or_else(|| {
+        UPSTREAM_CATALYST_HOSTS
+            .iter()
+            .map(|h| h.to_string())
+            .collect()
+    })
+}
 
 const DEFAULT_DCL_IGNORE: [&str; 21] = [
     ".*",
@@ -577,6 +607,71 @@ mod tests {
         assert_eq!(parts.len(), 4);
         assert!(parts[2].chars().all(|c| c.is_ascii_digit()));
         assert_eq!(p, p.to_lowercase());
+    }
+
+    #[test]
+    fn rotation_defaults_to_the_public_network_and_yields_to_the_env() {
+        let public: Vec<String> = UPSTREAM_CATALYST_HOSTS
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+
+        std::env::remove_var("DCL_ONE_SDK_CATALYST_ROTATION");
+        assert_eq!(configured_catalyst_rotation(), None);
+        assert_eq!(catalyst_rotation(), public);
+
+        std::env::set_var(
+            "DCL_ONE_SDK_CATALYST_ROTATION",
+            " https://catalyst.example.com/ , ,https://second.example.com ",
+        );
+        let configured = configured_catalyst_rotation().unwrap();
+        assert_eq!(
+            configured,
+            vec![
+                "https://catalyst.example.com".to_string(),
+                "https://second.example.com".to_string()
+            ]
+        );
+        assert_eq!(catalyst_rotation(), configured);
+
+        std::env::set_var("DCL_ONE_SDK_CATALYST_ROTATION", "  ");
+        assert_eq!(configured_catalyst_rotation(), None);
+        assert_eq!(catalyst_rotation(), public);
+
+        std::env::remove_var("DCL_ONE_SDK_CATALYST_ROTATION");
+    }
+
+    #[test]
+    fn network_scope_note_fires_only_off_the_upstream_rotation() {
+        assert_eq!(
+            non_upstream_note("https://peer-ec2.decentraland.org/content"),
+            None
+        );
+        assert_eq!(
+            non_upstream_note("https://interconnected.online/content"),
+            None
+        );
+        let dclone = non_upstream_note("https://catalyst.example.com/content").unwrap();
+        assert!(
+            dclone.contains("publishing to catalyst.example.com"),
+            "{dclone}"
+        );
+        assert!(
+            dclone.contains("not Genesis City on decentraland.org"),
+            "{dclone}"
+        );
+        let local = non_upstream_note("http://127.0.0.1:5198/content").unwrap();
+        assert!(local.contains("127.0.0.1:5198"), "{local}");
+    }
+
+    #[test]
+    fn base_url_path_extraction() {
+        assert_eq!(net::url_path("http://127.0.0.1:5198/content"), "/content");
+        assert_eq!(net::url_path("http://127.0.0.1:5142"), "");
+        assert_eq!(
+            net::url_path("https://catalyst.example.com/content"),
+            "/content"
+        );
     }
 
     #[test]

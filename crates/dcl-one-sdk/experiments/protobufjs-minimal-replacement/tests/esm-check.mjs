@@ -1,0 +1,13 @@
+import pb, { Reader, Writer, util, configure } from "../pbmin/index.mjs";
+import ref from "protobufjs/minimal.js";
+const mk = (impl) => { const w = impl.Writer.create();
+  w.uint32(10).string("héllo 😀"); w.uint32(21).float(-0); w.uint32(24).int32(-7);
+  w.uint32(34).fork(); w.uint32(8).uint64("18446744073709551615"); w.ldelim();
+  return Buffer.from(w.finish()); };
+const a = mk(ref), b = mk(pb);
+console.log("esm default export, identical bytes:", a.equals(b), a.toString("hex"));
+console.log("named exports present:", !!Reader, !!Writer, !!util, typeof configure === "function");
+console.log("default === named:", pb.Reader === Reader && pb.Writer === Writer);
+const r = pb.Reader.create(b), rr = ref.Reader.create(a);
+r.uint32(); rr.uint32();
+console.log("string round-trip equal:", r.string() === rr.string());

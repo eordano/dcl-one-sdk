@@ -28,22 +28,68 @@ struct TreeNode {
 }
 
 fn hash_chunked(data: &[u8]) -> String {
-    let leaves: Vec<TreeNode> = data
-        .chunks(CHUNK_SIZE)
-        .map(|chunk| {
-            let digest = Sha256::digest(chunk);
-            let cid_bytes = encode_cid_v1(0x55, &digest);
-            TreeNode {
-                cid_bytes,
-                file_size: chunk.len() as u64,
-                tsize: chunk.len() as u64,
-            }
-        })
-        .collect();
+    let leaves: Vec<TreeNode> = data.chunks(CHUNK_SIZE).map(leaf_node).collect();
 
     let root = balanced_reduce(leaves);
 
     cid_v1_to_string_from_bytes(&root.cid_bytes)
+}
+
+fn leaf_node(chunk: &[u8]) -> TreeNode {
+    let digest = Sha256::digest(chunk);
+    TreeNode {
+        cid_bytes: encode_cid_v1(0x55, &digest),
+        file_size: chunk.len() as u64,
+        tsize: chunk.len() as u64,
+    }
+}
+
+/// [`hash_bytes_v1`] over content that arrives in pieces, for callers that cannot hold it all.
+///
+/// The CID depends only on the byte string, never on how it was fed: leaf boundaries are fixed at
+/// `CHUNK_SIZE` and this buffers across `update` calls to honour them. So a verifier streaming a
+/// 768 MB snapshot in 64 KB reads gets the same answer as `hash_bytes_v1` on the whole file, which
+/// is the only reason it can be trusted to contradict a stored key.
+#[derive(Default)]
+pub struct HashV1Writer {
+    leaves: Vec<TreeNode>,
+    pending: Vec<u8>,
+    total: u64,
+}
+
+impl HashV1Writer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.total += data.len() as u64;
+
+        while !data.is_empty() {
+            // Flushed only once more data is known to follow, so a file that is exactly one chunk
+            // long still finishes as the single raw block `hash_bytes_v1` would produce.
+            if self.pending.len() == CHUNK_SIZE {
+                self.leaves.push(leaf_node(&self.pending));
+                self.pending.clear();
+            }
+            let take = (CHUNK_SIZE - self.pending.len()).min(data.len());
+            self.pending.extend_from_slice(&data[..take]);
+            data = &data[take..];
+        }
+    }
+
+    pub fn finish(mut self) -> String {
+        if self.total <= CHUNK_SIZE as u64 {
+            let digest = Sha256::digest(&self.pending);
+            return cid_v1_to_string(0x55, &digest);
+        }
+
+        if !self.pending.is_empty() {
+            self.leaves.push(leaf_node(&self.pending));
+        }
+
+        cid_v1_to_string_from_bytes(&balanced_reduce(self.leaves).cid_bytes)
+    }
 }
 
 fn balanced_reduce(mut nodes: Vec<TreeNode>) -> TreeNode {
@@ -93,6 +139,56 @@ fn cid_v1_to_string_from_bytes(cid_bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn streamed(data: &[u8], piece: usize) -> String {
+        let mut w = HashV1Writer::new();
+        for part in data.chunks(piece.max(1)) {
+            w.update(part);
+        }
+        w.finish()
+    }
+
+    /// The streaming writer is only useful if it can be trusted to contradict a stored key, and it
+    /// can only be trusted if it never disagrees with `hash_bytes_v1` for a reason as incidental as
+    /// read size. The sizes straddle every boundary that changes the shape of the tree: the raw/
+    /// chunked switch at one chunk, the single-level fanout limit at 174 leaves, and the point past
+    /// it where interior nodes gain a level.
+    #[test]
+    fn streaming_matches_whole_buffer_at_every_tree_shape() {
+        let sizes = [
+            0,
+            1,
+            CHUNK_SIZE - 1,
+            CHUNK_SIZE,
+            CHUNK_SIZE + 1,
+            CHUNK_SIZE * 2,
+            CHUNK_SIZE * MAX_CHILDREN,
+            CHUNK_SIZE * MAX_CHILDREN + 1,
+            CHUNK_SIZE * (MAX_CHILDREN + 3),
+        ];
+
+        for size in sizes {
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let want = hash_bytes_v1(&data);
+
+            for piece in [1usize, 7, 4096, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 5] {
+                if piece > size.max(1) {
+                    continue;
+                }
+                assert_eq!(
+                    streamed(&data, piece),
+                    want,
+                    "size {size} streamed in {piece}-byte reads"
+                );
+            }
+
+            assert_eq!(
+                streamed(&data, size.max(1)),
+                want,
+                "size {size} in one read"
+            );
+        }
+    }
 
     #[test]
     fn cidv0_empty() {

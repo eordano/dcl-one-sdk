@@ -1,6 +1,8 @@
 node_modules/
 bin/
 .dcl-one/
+.dcl-optimized-assets/
+.dcl-cache/
 dclcontext/
 .DS_Store
 *.log

@@ -6,6 +6,7 @@ use axum::routing::get;
 use axum::Router;
 use catalyrst_crypto::sign::verify_signed_message;
 use catalyrst_crypto::AuthChain;
+use catalyrst_types::is_eth_address;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use prost::Message as _;
@@ -73,10 +74,6 @@ fn craft(message: ws_packet::Message) -> Vec<u8> {
     let mut buf = Vec::with_capacity(packet.encoded_len());
     packet.encode(&mut buf).expect("WsPacket encodes");
     buf
-}
-
-fn is_eth_address(addr: &str) -> bool {
-    addr.len() == 42 && addr.starts_with("0x") && addr[2..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 async fn recv_packet(socket: &mut WebSocket, timeout_error: &str) -> Result<WsPacket> {

@@ -1,9 +1,9 @@
 {
   "source": "@dcl/ecs dist-cjs engine component definitions (schema.jsonSchema)",
-  "ecsVersion": "7.24.5",
-  "generatedAt": "2026-07-20T10:21:14.144Z",
+  "ecsVersion": "7.26.0",
+  "generatedAt": "2026-08-13T22:08:29.196Z",
   "registrationErrors": [],
-  "componentCount": 65,
+  "componentCount": 68,
   "components": [
     {
       "name": "composite::root",
@@ -352,6 +352,18 @@
       }
     },
     {
+      "name": "core::ExplorerUiEventsResult",
+      "componentId": 1220,
+      "componentType": 1,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBExplorerUiEventsResult"
+      }
+    },
+    {
       "name": "core::GltfContainer",
       "componentId": 1041,
       "componentType": 0,
@@ -628,6 +640,18 @@
       }
     },
     {
+      "name": "core::TouchScreenControls",
+      "componentId": 1218,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBTouchScreenControls"
+      }
+    },
+    {
       "name": "core::Transform",
       "componentId": 1,
       "componentType": 0,
@@ -805,6 +829,18 @@
         "properties": {},
         "serializationType": "protocol-buffer",
         "protocolBuffer": "PBUiInput"
+      }
+    },
+    {
+      "name": "core::UiInputBinding",
+      "componentId": 1219,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBUiInputBinding"
       }
     },
     {

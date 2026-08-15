@@ -1,6 +1,8 @@
+mod content_cache;
 mod editor;
 mod http;
-mod proxy;
+mod landing;
+pub(crate) mod proxy;
 
 use crate::build::{self, BuildOptions};
 use crate::data_layer::{self, DataLayerState};
@@ -24,10 +26,10 @@ use editor::{data_layer_ws, inspector_asset, inspector_index, inspector_redirect
 use http::{about, contents, entities_active, entities_scene, root, scene_id_for, scenes};
 use proxy::{
     entities_deploy_proxy, explorer_proxy, lambdas_contracts_servers, lambdas_explore_realms,
-    lambdas_proxy,
+    lambdas_proxy, world_about, world_content,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -36,13 +38,27 @@ use tokio::sync::broadcast;
 
 pub struct StartOptions {
     pub dir: PathBuf,
-    pub port: u16,
+    /// None picks 8000, or the next free port when 8000 is taken.
+    pub port: Option<u16>,
     pub skip_build: bool,
+    /// Type checking runs beside the watch loop, not in front of it, so it never
+    /// delays a reload; this turns it off entirely.
+    pub skip_type_check: bool,
     pub no_watch: bool,
     pub ignore_composite: bool,
     pub offline_comms: bool,
     pub mobile: bool,
-    pub asset_bundles: bool,
+    /// Run the local abgen conversion sidecar (the default). Off under
+    /// --no-asset-bundles, and under --asset-bundles too: that flag hands
+    /// conversion to the Explorer itself via `local-ab=true`, as upstream.
+    pub ab_sidecar: bool,
+    /// Forward `local-ab=true` in the desktop deep link (--asset-bundles).
+    pub local_ab: bool,
+    pub mcp: bool,
+    pub mcp_port: Option<u16>,
+    /// Raw tokens after a standalone `--`, forwarded into the desktop deep
+    /// link as query params.
+    pub explorer_params: Vec<String>,
     pub data_layer: bool,
     pub tunnel: Option<String>,
     pub tunnel_token: Option<String>,
@@ -57,7 +73,17 @@ struct AppState {
     base: (i64, i64),
     data_layer: Option<DataLayerState>,
     entity_cache: Mutex<HashMap<PathBuf, (Instant, Value)>>,
+    /// Set once the abgen sidecar reports ready; the landing page's desktop
+    /// deep link carries it so the explorer uses locally converted bundles.
+    optimized_assets_url: std::sync::OnceLock<String>,
+    /// Pre-encoded `&key=value...` appended to every desktop deep link
+    /// (--asset-bundles/--mcp/--mcp-port and `--` passthrough params).
+    deep_link_extra: String,
+    /// Ring buffer of the latest requests, shown on the landing page.
+    recent_requests: Mutex<VecDeque<(String, u16, Instant)>>,
 }
+
+const RECENT_REQUESTS_CAP: usize = 32;
 
 const ENTITY_CACHE_TTL: Duration = Duration::from_millis(500);
 
@@ -75,9 +101,23 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .transpose()?;
     let workspace = Workspace::load(&opts.dir)?;
     let first = workspace.projects[0].clone();
+    // Bind before the build steps: a taken port fails fast (explicit --port)
+    // or silently moves to the next free one, and holding the listener keeps
+    // the chosen port ours through the whole build.
+    let (port, listener) = bind_preview_port(opts.port).await?;
 
     let data_layer = if opts.data_layer {
+        // Serving the UI and hosting the data layer are separate concerns, and
+        // the host is the one we can always provide: it is in the blob. A
+        // scene with no `@dcl/inspector` gets the protocol anyway, which is
+        // what a Creator-Hub-style external editor connects to.
         let public_dir = data_layer::locate_inspector_public(&first.root)?;
+        if public_dir.is_none() {
+            tracing::info!(
+                "no @dcl/inspector UI installed \u{2014} serving the data layer on /data-layer only \
+                 (npm install --save-dev @dcl/inspector to get /inspector/ too)"
+            );
+        }
         let port_rx = data_layer::spawn(&first.root).await?;
         Some(DataLayerState {
             port_rx,
@@ -93,10 +133,18 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         machine: machine_id(),
         reload_tx: reload_tx.clone(),
         offline_comms: opts.offline_comms,
-        port: opts.port,
+        port,
         base: joinblock::base_coords(&first.scene_json),
         data_layer,
         entity_cache: Mutex::new(HashMap::new()),
+        optimized_assets_url: std::sync::OnceLock::new(),
+        deep_link_extra: joinblock::deep_link_extra(
+            opts.local_ab,
+            opts.mcp,
+            opts.mcp_port,
+            &opts.explorer_params,
+        ),
+        recent_requests: Mutex::new(VecDeque::new()),
     });
     let comms_state = Arc::new(crate::comms::CommsState::default());
 
@@ -118,6 +166,11 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .route("/lambdas/contracts/servers", get(lambdas_contracts_servers))
         .route("/lambdas/{*path}", any(lambdas_proxy))
         .route("/explorer/{*path}", any(explorer_proxy))
+        .route("/world/{name}/about", get(world_about))
+        .route(
+            "/world-content/{name}/contents/{hash}",
+            get(world_content).head(world_content),
+        )
         .route("/mobile-preview", get(mobile_preview))
         .route("/data-layer", get(data_layer_ws))
         .route("/inspector", get(inspector_redirect))
@@ -125,16 +178,11 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .route("/inspector/{*path}", get(inspector_asset))
         .with_state(state.clone())
         .merge(crate::comms::routes(comms_state))
-        .layer(middleware::from_fn(access_log))
+        .layer(middleware::from_fn_with_state(state.clone(), access_log))
         .layer(tower_http::cors::CorsLayer::permissive());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], opts.port));
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => return Err(bind_error(opts.port, addr, e)),
-    };
-    let mut sidecar = if opts.asset_bundles {
-        crate::asset_bundles::spawn_sidecar(opts.port, &first.root)
+    let mut sidecar = if opts.ab_sidecar {
+        crate::asset_bundles::spawn_sidecar(port, &first.root)
     } else {
         None
     };
@@ -142,7 +190,6 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     let scene_count = workspace.projects.len();
     let is_multi = workspace.is_multi();
     let scene_json = first.scene_json.clone();
-    let port = opts.port;
     let mobile = opts.mobile;
     let tunnel_token = opts.tunnel_token.clone();
     tokio::spawn(async move {
@@ -150,6 +197,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
             Some(s) => {
                 if s.wait_ready().await {
                     ux::note(format!("Serving asset bundles (abgen JIT): {}", s.url));
+                    let _ = banner_state.optimized_assets_url.set(s.url.clone());
                     Some(s.url.clone())
                 } else {
                     None
@@ -170,6 +218,8 @@ pub async fn start(opts: StartOptions) -> Result<()> {
             tunnel_hint: trunk_url.is_none(),
             editor: banner_state.data_layer.is_some(),
             optimized_assets_url,
+            deep_link_extra: banner_state.deep_link_extra.clone(),
+            native_hud: true,
         };
         if is_multi {
             ux::note(format!(
@@ -177,7 +227,11 @@ pub async fn start(opts: StartOptions) -> Result<()> {
             ));
         }
         steps.done(block.heading());
-        println!("{}", block.body());
+        if ux::verbose() {
+            println!("{}", block.body());
+        } else {
+            println!("{}", block.compact_body());
+        }
         if let Some(trunk_url) = trunk_url {
             let events = crate::tunnel::spawn(crate::tunnel::AgentConfig {
                 trunk_url,
@@ -187,7 +241,41 @@ pub async fn start(opts: StartOptions) -> Result<()> {
             spawn_tunnel_printer(events, block.clone());
         }
     });
-    axum::serve(listener, app).await.context("serving")
+    let result = tokio::select! {
+        r = axum::serve(listener, app) => r.context("serving"),
+        _ = shutdown_signal() => Ok(()),
+    };
+    // Never orphan abgen: it runs in its own process group (so the
+    // terminal's ctrl-c no longer reaches it) and kill_on_drop cannot fire
+    // when the SDK dies by signal — kill the whole group explicitly on
+    // every exit path.
+    crate::asset_bundles::kill_sidecar_group();
+    result
+}
+
+/// Resolves on SIGINT (ctrl-c) or, on unix, SIGTERM.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        let term = async {
+            match term.as_mut() {
+                Some(t) => {
+                    t.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn spawn_tunnel_printer(
@@ -236,19 +324,25 @@ fn spawn_tunnel_printer(
     });
 }
 
+/// The `BuildOptions` every preview build uses: never production/minified, entry point always
+/// generated (never the scene's own `main`), differing only in which project dir to build.
+fn preview_build_opts(opts: &StartOptions, dir: PathBuf) -> BuildOptions {
+    BuildOptions {
+        dir,
+        production: false,
+        ignore_composite: opts.ignore_composite,
+        custom_entry_point: false,
+        skip_type_check: opts.skip_type_check,
+    }
+}
+
 async fn prepare_single(
     opts: &StartOptions,
     project: Project,
     state: &Arc<AppState>,
     reload_tx: &broadcast::Sender<ReloadFrame>,
 ) -> Result<ux::Steps> {
-    let build_opts = BuildOptions {
-        dir: opts.dir.clone(),
-        production: false,
-        ignore_composite: opts.ignore_composite,
-        custom_entry_point: false,
-        skip_type_check: true,
-    };
+    let build_opts = preview_build_opts(opts, opts.dir.clone());
 
     let total = if opts.no_watch {
         1
@@ -263,15 +357,18 @@ async fn prepare_single(
             build::build(&build_opts).await?;
         }
     } else {
-        let fs = FsWatcher::new(&project.root)?;
         let root = project.root.clone();
-        let session =
-            WatchSession::create(project, &build_opts, !opts.skip_build, &mut steps).await?;
-        if !opts.skip_build {
-            ux::note("type check skipped (--skip-type-check)");
-        }
         let scene = b64_hash(&root.display().to_string(), &state.machine);
-        spawn_watch(session, fs, root, scene, state.clone(), reload_tx.clone());
+        watch_or_retry(
+            project,
+            build_opts,
+            !opts.skip_build,
+            &mut steps,
+            scene,
+            state.clone(),
+            reload_tx.clone(),
+        )
+        .await?;
         steps.done("Watching for changes");
     }
     Ok(steps)
@@ -287,13 +384,7 @@ async fn prepare_members(
         if let Some(header) = workspace.member_header(i) {
             ux::note(header);
         }
-        let build_opts = BuildOptions {
-            dir: project.root.clone(),
-            production: false,
-            ignore_composite: opts.ignore_composite,
-            custom_entry_point: false,
-            skip_type_check: true,
-        };
+        let build_opts = preview_build_opts(opts, project.root.clone());
         if opts.no_watch {
             if !opts.skip_build {
                 build::build(&build_opts).await?;
@@ -302,33 +393,122 @@ async fn prepare_members(
         }
         let chunk = if opts.skip_build { 0 } else { 3 };
         let mut steps = ux::Steps::new(chunk);
-        let fs = FsWatcher::new(&project.root)?;
-        let session =
-            WatchSession::create(project.clone(), &build_opts, !opts.skip_build, &mut steps)
-                .await?;
         let scene = scene_id_for(project, &state.machine);
-        spawn_watch(
-            session,
-            fs,
-            project.root.clone(),
+        watch_or_retry(
+            project.clone(),
+            build_opts,
+            !opts.skip_build,
+            &mut steps,
             scene,
             state.clone(),
             reload_tx.clone(),
-        );
+        )
+        .await?;
     }
     if opts.no_watch {
         Ok(ux::Steps::new(1))
     } else {
-        if !opts.skip_build {
-            ux::note("type check skipped (--skip-type-check)");
-        }
         let mut steps = ux::Steps::new(2);
         steps.done("Watching for changes");
         Ok(steps)
     }
 }
 
-fn spawn_watch(
+/// Start the watch loop for one project. A failed INITIAL build must not kill
+/// `start`: the server can still serve and the watcher is what picks up the
+/// fix, so scene-content errors get the same report-and-recover contract
+/// re-builds have always had. Config errors (scene.json main, tsconfig) stay
+/// fatal, pre-checked here — upstream dies on those before bundling too.
+async fn watch_or_retry(
+    project: Project,
+    build_opts: BuildOptions,
+    initial_build: bool,
+    steps: &mut ux::Steps,
+    scene: String,
+    state: Arc<AppState>,
+    tx: broadcast::Sender<ReloadFrame>,
+) -> Result<()> {
+    project.main_output()?;
+    project.tsconfig()?;
+    let fs = FsWatcher::new(&project.root)?;
+    let root = project.root.clone();
+    match WatchSession::create(project.clone(), &build_opts, initial_build, steps).await {
+        Ok(session) => {
+            tokio::spawn(run_watch(session, fs, root, scene, state, tx));
+        }
+        Err(e) => {
+            report_initial_failure(&e);
+            tokio::spawn(retry_initial_build(
+                project,
+                build_opts,
+                initial_build,
+                fs,
+                root,
+                scene,
+                state,
+                tx,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reports the build error itself (matching the re-build loop, so the compiler
+/// diagnostic in the inner UserError's `why` is preserved) before noting that
+/// the session survived it.
+fn report_initial_failure(e: &anyhow::Error) {
+    ux::report_watch(e);
+    ux::note(
+        "the preview server and watcher are still running \u{2014} save any file to retry the initial build",
+    );
+}
+
+/// The recover half of the initial-build contract: every watch batch retries
+/// the initial build (with the same skip-build choice the session started
+/// with) until one succeeds, then hands the watcher to the normal re-build
+/// loop.
+#[allow(clippy::too_many_arguments)]
+async fn retry_initial_build(
+    project: Project,
+    build_opts: BuildOptions,
+    initial_build: bool,
+    mut fs: FsWatcher,
+    root: PathBuf,
+    scene: String,
+    state: Arc<AppState>,
+    tx: broadcast::Sender<ReloadFrame>,
+) {
+    loop {
+        if fs.next_batch().await.is_none() {
+            return;
+        }
+        let mut steps = ux::Steps::new(if initial_build { 3 } else { 0 });
+        match WatchSession::create(project.clone(), &build_opts, initial_build, &mut steps).await {
+            Ok(session) => {
+                notify_reload(&root, &scene, &state, &tx, ReloadEvent::Scene);
+                run_watch(session, fs, root, scene, state, tx).await;
+                return;
+            }
+            Err(e) => report_initial_failure(&e),
+        }
+    }
+}
+
+fn notify_reload(
+    root: &std::path::Path,
+    scene: &str,
+    state: &AppState,
+    tx: &broadcast::Sender<ReloadFrame>,
+    event: ReloadEvent,
+) {
+    lock_cache(state).remove(root);
+    for frame in live_reload::reload_frames(root, scene, &state.machine, &event) {
+        let _ = tx.send(frame);
+    }
+    tracing::info!("scene update pushed");
+}
+
+async fn run_watch(
     session: WatchSession,
     fs: FsWatcher,
     root: PathBuf,
@@ -336,28 +516,23 @@ fn spawn_watch(
     state: Arc<AppState>,
     tx: broadcast::Sender<ReloadFrame>,
 ) {
-    tokio::spawn(async move {
-        let notify = move |event: ReloadEvent| {
-            lock_cache(&state).remove(&root);
-            for frame in live_reload::reload_frames(&root, &scene, &state.machine, &event) {
-                let _ = tx.send(frame);
-            }
-            tracing::info!("scene update pushed");
-        };
-        if let Err(e) = session.run(fs, notify).await {
-            tracing::error!("watch loop stopped: {e:#}");
-            ux::report_watch(
-                &UserError::new(
-                    "live reload stopped",
-                    TrySteps::one(
-                        "restart dcl-one-sdk start to resume hot reload (the server is still serving the last build)",
-                    ),
-                )
-                .why(format!("{e:#}"))
-                .into(),
-            );
-        }
-    });
+    let notify = {
+        let root = root.clone();
+        move |event: ReloadEvent| notify_reload(&root, &scene, &state, &tx, event)
+    };
+    if let Err(e) = session.run(fs, notify).await {
+        tracing::error!("watch loop stopped: {e:#}");
+        ux::report_watch(
+            &UserError::new(
+                "live reload stopped",
+                TrySteps::one(
+                    "restart dcl-one-sdk start to resume hot reload (the server is still serving the last build)",
+                ),
+            )
+            .why(format!("{e:#}"))
+            .into(),
+        );
+    }
 }
 
 async fn probe_unreachable(ifaces: &[Iface], port: u16) -> Vec<std::net::Ipv4Addr> {
@@ -378,6 +553,46 @@ async fn probe_unreachable(ifaces: &[Iface], port: u16) -> Vec<std::net::Ipv4Add
         }
     }
     out
+}
+
+/// Bind the preview listener. An explicit port must bind exactly (the error
+/// explains the conflict); the default scans 8000 upward and falls back to an
+/// ephemeral port, so `start` never dies just because 8000 is taken.
+async fn bind_preview_port(
+    requested: Option<u16>,
+) -> Result<(u16, tokio::net::TcpListener), anyhow::Error> {
+    const DEFAULT_PORT: u16 = 8000;
+    const SCAN: u16 = 20;
+    if let Some(port) = requested {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        return match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => Ok((port, l)),
+            Err(e) => Err(bind_error(port, addr, e)),
+        };
+    }
+    for port in DEFAULT_PORT..DEFAULT_PORT + SCAN {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                if port != DEFAULT_PORT {
+                    ux::note(format!("port {DEFAULT_PORT} is busy — serving on {port}"));
+                }
+                return Ok((port, l));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) => return Err(bind_error(port, addr, e)),
+        }
+    }
+    let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| bind_error(0, addr, e))?;
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    ux::note(format!(
+        "ports {DEFAULT_PORT}\u{2013}{} are busy — serving on {port}",
+        DEFAULT_PORT + SCAN - 1
+    ));
+    Ok((port, listener))
 }
 
 fn bind_error(port: u16, addr: SocketAddr, e: std::io::Error) -> anyhow::Error {
@@ -405,7 +620,11 @@ fn bind_error(port: u16, addr: SocketAddr, e: std::io::Error) -> anyhow::Error {
     }
 }
 
-async fn access_log(req: Request, next: Next) -> Response {
+async fn access_log(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let resp = next.run(req).await;
@@ -417,6 +636,12 @@ async fn access_log(req: Request, next: Next) -> Response {
         .unwrap_or("-")
         .to_string();
     tracing::info!(target: "access", "{method} {path} {status} {len}");
+    if let Ok(mut recent) = st.recent_requests.lock() {
+        recent.push_back((format!("{method} {path}"), status, Instant::now()));
+        while recent.len() > RECENT_REQUESTS_CAP {
+            recent.pop_front();
+        }
+    }
     resp
 }
 
@@ -552,6 +777,9 @@ mod tests {
             base: (0, 0),
             data_layer: None,
             entity_cache: Mutex::new(HashMap::new()),
+            optimized_assets_url: std::sync::OnceLock::new(),
+            deep_link_extra: String::new(),
+            recent_requests: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -674,6 +902,74 @@ mod tests {
         assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/about");
     }
 
+    #[tokio::test]
+    async fn root_serves_a_landing_page_to_browsers() {
+        let tmp = Tmp::new("landing");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let st = Arc::new(state(vec![a]));
+        let req = axum::extract::Request::builder()
+            .uri("/")
+            .header("host", "127.0.0.1:8000")
+            .header("accept", "text/html,application/xhtml+xml")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = root(State(st.clone()), req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("dcl-one-sdk"));
+        assert!(body.contains("decentraland://realm=http%3A%2F%2F127.0.0.1%3A8000"));
+        assert!(body.contains(
+            "https://decentraland.org/bevy-web/?preview=true&amp;realm=http://127.0.0.1:8000"
+        ));
+    }
+
+    #[tokio::test]
+    async fn landing_page_honors_forwarded_headers_and_escapes_titles() {
+        let tmp = Tmp::new("landing-fwd");
+        let root_dir = tmp.0.join("scene-x");
+        std::fs::create_dir_all(root_dir.join("bin")).unwrap();
+        std::fs::write(root_dir.join("bin/index.js"), "module.exports={}").unwrap();
+        let scene_json = json!({
+            "main": "bin/index.js",
+            "display": { "title": "a <script> title" },
+            "scene": { "parcels": ["0,0"], "base": "0,0" }
+        });
+        std::fs::write(root_dir.join("scene.json"), scene_json.to_string()).unwrap();
+        let project = Project {
+            root: root_dir.canonicalize().unwrap(),
+            scene_json,
+        };
+        let st = Arc::new(state(vec![project]));
+        let req = axum::extract::Request::builder()
+            .uri("/")
+            .header("host", "127.0.0.1:8000")
+            .header("accept", "text/html")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-host", "tunnel.example")
+            .header("x-forwarded-prefix", "/t/abc123defg/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = root(State(st), req).await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("https://tunnel.example/t/abc123defg"));
+        assert!(body.contains("https%3A%2F%2Ftunnel.example%2Ft%2Fabc123defg"));
+        assert!(!body.contains("<script>"));
+        assert!(body.contains("a &lt;script&gt; title"));
+    }
+
     fn state_with_data_layer(public_dir: PathBuf) -> AppState {
         let (reload_tx, _) = broadcast::channel(4);
         let (_tx, port_rx) = tokio::sync::watch::channel(1234u16);
@@ -687,9 +983,12 @@ mod tests {
             base: (0, 0),
             data_layer: Some(DataLayerState {
                 port_rx,
-                public_dir,
+                public_dir: Some(public_dir),
             }),
             entity_cache: Mutex::new(HashMap::new()),
+            optimized_assets_url: std::sync::OnceLock::new(),
+            deep_link_extra: String::new(),
+            recent_requests: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -764,6 +1063,53 @@ mod tests {
         )
         .await;
         assert_eq!(dotdot.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn inspector_serves_the_gzipped_bundle_both_ways() {
+        use std::io::Write;
+        let tmp = Tmp::new("inspector-gz");
+        let public = tmp.0.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        let plain = b"globalThis.InspectorConfig\n".repeat(40);
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&plain).unwrap();
+        std::fs::write(public.join("bundle.js.gz"), enc.finish().unwrap()).unwrap();
+        let st = Arc::new(state_with_data_layer(public.clone()));
+
+        let mut gz_headers = HeaderMap::new();
+        gz_headers.insert(header::ACCEPT_ENCODING, "gzip, deflate".parse().unwrap());
+        let compressed = inspector_asset(
+            State(st.clone()),
+            AxPath("bundle.js".to_string()),
+            gz_headers,
+        )
+        .await;
+        assert_eq!(compressed.status(), StatusCode::OK);
+        assert_eq!(
+            compressed.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+        assert_eq!(
+            compressed.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/javascript",
+            "the mime must come from the request path, not the .gz on disk"
+        );
+        let body = axum::body::to_bytes(compressed.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.len() < plain.len());
+        assert_eq!(crate::data_layer::gunzip(&body).unwrap(), plain);
+
+        // No Accept-Encoding: the editor still has to load.
+        let expanded =
+            inspector_asset(State(st), AxPath("bundle.js".to_string()), HeaderMap::new()).await;
+        assert_eq!(expanded.status(), StatusCode::OK);
+        assert!(expanded.headers().get(header::CONTENT_ENCODING).is_none());
+        let body = axum::body::to_bytes(expanded.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), plain.as_slice());
     }
 
     #[test]

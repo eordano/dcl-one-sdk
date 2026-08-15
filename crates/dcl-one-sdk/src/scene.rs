@@ -197,7 +197,7 @@ pub fn min_cli_warning(root: &Path) -> Option<String> {
     let tracked = parse_semver(TRACKED_MIN_CLI)?;
     if min > tracked {
         Some(format!(
-            "this project asks for CLI version >= {declared}, newer than the {TRACKED_MIN_CLI} level dcl-one-sdk tracks (@dcl/sdk-commands 7.24.5) \u{2014} if a command misbehaves, cross-check with npx @dcl/sdk-commands"
+            "this project asks for CLI version >= {declared}, newer than the {TRACKED_MIN_CLI} level dcl-one-sdk tracks (@dcl/sdk-commands 7.26.0) \u{2014} if a command misbehaves, cross-check with npx @dcl/sdk-commands"
         ))
     } else {
         None

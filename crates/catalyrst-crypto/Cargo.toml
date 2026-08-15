@@ -1,8 +1,11 @@
 [package]
 name = "catalyrst-crypto"
-version = "0.11.1"
+version = "0.16.5"
 edition = "2021"
 description = "Rust port of the Decentraland @dcl/crypto auth chain verification"
+
+[features]
+test-signer = []
 
 [dependencies]
 catalyrst-types = { path = "../catalyrst-types", default-features = false }
@@ -15,6 +18,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
+http = "1"
 tokio = { workspace = true, features = ["sync"] }
 reqwest = { workspace = true }
 parking_lot = { workspace = true }

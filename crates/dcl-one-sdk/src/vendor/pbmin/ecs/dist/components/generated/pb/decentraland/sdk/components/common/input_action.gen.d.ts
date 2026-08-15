@@ -1,0 +1,40 @@
+/**
+ * @public
+ */
+export declare const enum InputAction {
+    IA_POINTER = 0,
+    IA_PRIMARY = 1,
+    IA_SECONDARY = 2,
+    IA_ANY = 3,
+    IA_FORWARD = 4,
+    IA_BACKWARD = 5,
+    IA_RIGHT = 6,
+    IA_LEFT = 7,
+    IA_JUMP = 8,
+    IA_WALK = 9,
+    IA_ACTION_3 = 10,
+    IA_ACTION_4 = 11,
+    IA_ACTION_5 = 12,
+    IA_ACTION_6 = 13,
+    /** IA_MODIFIER - Modifier key (Shift on desktop) */
+    IA_MODIFIER = 14
+}
+/** PointerEventType is a kind of interaction that can be detected. */
+/**
+ * @public
+ */
+export declare const enum PointerEventType {
+    PET_UP = 0,
+    PET_DOWN = 1,
+    PET_HOVER_ENTER = 2,
+    PET_HOVER_LEAVE = 3,
+    PET_PROXIMITY_ENTER = 4,
+    PET_PROXIMITY_LEAVE = 5
+}
+/**
+ * @public
+ */
+export declare const enum InteractionType {
+    CURSOR = 0,
+    PROXIMITY = 1
+}

@@ -38,7 +38,7 @@ pub fn generate(
         format!(";\"use strict\";export * from {safe_entry}")
     } else {
         write_all_composites(project, &dir, ignore_composite)?;
-        write_script_utils(project, &dir)?;
+        write_script_utils(project, &dir, ignore_composite)?;
         entrypoint_code(&safe_entry, project.is_editor_scene(), split)
     };
     std::fs::write(&entry_path, content).map_err(|e| write_error(&entry_path, e))?;
@@ -154,7 +154,20 @@ fn write_all_composites(project: &Project, dir: &Path, ignore: bool) -> Result<(
                 .and_then(|raw| normalizer.normalize(&raw));
             match normalized {
                 Ok(json) => lines.push(format!("'{rel}':{json}")),
-                Err(err) => tracing::warn!("composite '{rel}' skipped: {err:#}"),
+                // Not a warning: everything placed in the Creator Hub lives in
+                // this file, so skipping it emits an empty compositeFromLoader
+                // and the scene builds green, deploys, and renders as bare
+                // ground. Failing here is the only way the author finds out
+                // before players do.
+                Err(err) => {
+                    return Err(UserError::new(
+                        format!("{rel} could not be loaded, so the scene would build with no content from the editor"),
+                        TrySteps::one(format!("fix {rel} — the underlying error is below"))
+                            .and("or build without it on purpose: dcl-one-sdk build --ignoreComposite"),
+                    )
+                    .why(format!("{err:#}"))
+                    .into());
+                }
             }
         }
     }
@@ -192,23 +205,115 @@ pub fn scan_max_composite_entity(root: &Path) -> u32 {
     max
 }
 
-fn write_script_utils(project: &Project, dir: &Path) -> Result<()> {
-    let runtime = project
+/// The `~sdk/script-utils` no-op: what a scene *without* the smart-item runtime
+/// links against. The generated entrypoint calls `_initializeScripts`
+/// unconditionally, so the symbol has to exist either way. Same export surface
+/// and semantics as upstream's `generateScriptStubModuleContent`.
+pub const SCRIPT_UTILS_STUB: &str = "export function _initializeScripts(_engine) {}\nexport function getScriptInstance(_entity, _scriptPath) { return null }\nexport function getScriptInstancesByPath(_scriptPath) { return [] }\nexport function getAllScriptInstances(_entity) { return [] }\nexport function callScriptMethod(entity, scriptPath, methodName, ..._args) {\n  console.error(`Method ${methodName} not found on script ${scriptPath} for entity ${entity}`)\n  return undefined\n}\n";
+
+/// The real `~sdk/script-utils`: `@dcl/sdk-commands`' compiled smart-item script
+/// runtime, de-CommonJS'd so rolldown can bundle it as an ES module.
+///
+/// `None` unless *both* `@dcl/asset-packs` and `@dcl/sdk-commands` are on disk
+/// — that is the npm flow. The vendored blob ships neither as source: it ships
+/// this same transformed code already bundled into the prebuilt smart-item
+/// chunk, which is why `prebuilt::build_chunks` calls this function directly at
+/// blob-build time.
+pub fn script_utils_source(project: &Project) -> Option<String> {
+    let code = project
         .node_module("@dcl/asset-packs")
         .and_then(|_| project.node_module("@dcl/sdk-commands/dist/logic/runtime-script.js"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|code| {
-            rewrite_requires(&strip_cjs(&code.replace(
-                "@dcl/inspector/node_modules/@dcl/asset-packs",
-                "@dcl/asset-packs",
-            )))
-        });
-    let content = match runtime {
-        Some(code) => format!(
-            "{code}\n\nexport function _initializeScripts(engine) {{\n  const scriptsArray = []\n  return runScripts(engine, scriptsArray)\n}}\n\nexport {{ getScriptInstance, getScriptInstancesByPath, getAllScriptInstances, callScriptMethod }}\n"
-        ),
-        None => "export function _initializeScripts(_engine) {}\nexport function getScriptInstance() { return null }\nexport function getScriptInstancesByPath() { return [] }\nexport function getAllScriptInstances() { return [] }\nexport function callScriptMethod() {}\n".to_string(),
-    };
+        .and_then(|p| std::fs::read_to_string(p).ok())?;
+    let runtime = rewrite_requires(&strip_cjs(&code.replace(
+        "@dcl/inspector/node_modules/@dcl/asset-packs",
+        "@dcl/asset-packs",
+    )));
+    Some(format!(
+        "{runtime}\n\nexport function _initializeScripts(engine) {{\n  const scriptsArray = []\n  return runScripts(engine, scriptsArray)\n}}\n\nexport {{ getScriptInstance, getScriptInstancesByPath, getAllScriptInstances, callScriptMethod }}\n"
+    ))
+}
+
+/// Upstream skips the embedded script runtime for scenes that author no
+/// scripts and are not editor scenes; only the rest inline the real runtime
+/// (when its sources are installed).
+pub fn script_utils_content(project: &Project, ignore_composite: bool) -> String {
+    let has_scripts = !ignore_composite && composites_have_scripts(&project.root);
+    if !has_scripts && !project.is_editor_scene() {
+        return SCRIPT_UTILS_STUB.to_string();
+    }
+    script_utils_source(project).unwrap_or_else(|| SCRIPT_UTILS_STUB.to_string())
+}
+
+/// Does any composite author a smart-item script? The Rust side of upstream's
+/// `compositeData.scripts.size > 0`: an `asset-packs::Script` component with
+/// at least one instance in its `value` array (upstream keys its Map by
+/// `script.path`, so any entry — usable path or not — flips the gate).
+/// Composites that would fail to instance contribute nothing, as in
+/// upstream's per-composite try/catch: `CompositeNormalizer` enforces the
+/// same rules `getComponentDefinition` throws on (unknown `core::`
+/// components; non-core components with no schema in scope), and shares
+/// schema definitions across the sorted files the way upstream's single
+/// engine does.
+pub fn composites_have_scripts(root: &Path) -> bool {
+    let (has_scripts, skipped) = composites_script_scan(root);
+    for message in skipped {
+        crate::ux::note_stderr(message);
+    }
+    has_scripts
+}
+
+fn composites_script_scan(root: &Path) -> (bool, Vec<String>) {
+    let mut normalizer = crate::composite_norm::CompositeNormalizer::new();
+    let mut skipped = Vec::new();
+    let has_scripts = find_composites(root).into_iter().any(|path| {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        if let Err(err) = normalizer.normalize(&raw) {
+            skipped.push(format!(
+                "composite {} can't be instanced, so its components are ignored: {err:#}",
+                crate::ux::rel_to(root, &path)
+            ));
+            return false;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return false;
+        };
+        json.get("components")
+            .and_then(|c| c.as_array())
+            .is_some_and(|comps| {
+                comps
+                    .iter()
+                    .filter(|c| {
+                        c.get("name").and_then(|n| n.as_str()) == Some("asset-packs::Script")
+                    })
+                    .any(script_component_has_instances)
+            })
+    });
+    (has_scripts, skipped)
+}
+
+fn script_component_has_instances(comp: &serde_json::Value) -> bool {
+    comp.get("data")
+        .and_then(|d| d.as_object())
+        .is_some_and(|data| {
+            data.values().any(|entry| match entry.get("json") {
+                Some(json) => json
+                    .get("value")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|v| !v.is_empty()),
+                // Upstream schema-deserializes a binary entry and reads its
+                // decoded `value`; nothing here can run a jsonSchema-driven
+                // deserializer (crdt_gen rejects binary composites outright),
+                // so assume a binary entry carries instances rather than
+                // silently stubbing the runtime out of a scene that needs it.
+                None => entry.get("binary").is_some(),
+            })
+        })
+}
+
+fn write_script_utils(project: &Project, dir: &Path, ignore_composite: bool) -> Result<()> {
+    let content = script_utils_content(project, ignore_composite);
     let path = dir.join("script-utils.js");
     std::fs::write(&path, content).map_err(|e| write_error(&path, e))?;
     Ok(())
@@ -309,7 +414,129 @@ fn top_level_require(line: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{rewrite_requires, scan_max_composite_entity, strip_cjs};
+    use super::{
+        composites_have_scripts, composites_script_scan, rewrite_requires,
+        scan_max_composite_entity, script_utils_content, strip_cjs, SCRIPT_UTILS_STUB,
+    };
+    use crate::scene::Project;
+
+    #[test]
+    fn composites_have_scripts_requires_script_instances() {
+        let dir =
+            std::env::temp_dir().join(format!("dcl-one-sdk-hasscripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
+        assert!(!composites_have_scripts(&dir));
+        std::fs::write(
+            dir.join("assets/scene/main.composite"),
+            r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[]}}}},{"name":"asset-packs::Actions","jsonSchema":{"type":"object"},"data":{"512":{"json":{}}}}]}"#,
+        )
+        .unwrap();
+        assert!(!composites_have_scripts(&dir));
+        std::fs::write(
+            dir.join("assets/scene/main.composite"),
+            r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[{"path":"src/counter.ts","priority":0}]}}}}]}"#,
+        )
+        .unwrap();
+        assert!(composites_have_scripts(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn composites_have_scripts_counts_binary_entries_in_instanceable_composites() {
+        let dir =
+            std::env::temp_dir().join(format!("dcl-one-sdk-binscripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
+        std::fs::write(
+            dir.join("assets/scene/main.composite"),
+            r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"binary":"AQID"}}}]}"#,
+        )
+        .unwrap();
+        assert!(composites_have_scripts(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_instanceable_composites_do_not_flip_the_script_gate() {
+        let dir =
+            std::env::temp_dir().join(format!("dcl-one-sdk-badscripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
+        std::fs::write(
+            dir.join("assets/scene/main.composite"),
+            r#"{"version":1,"components":[{"name":"core::NotAThing","data":{}},{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
+        )
+        .unwrap();
+        assert!(!composites_have_scripts(&dir));
+        std::fs::write(
+            dir.join("assets/scene/other.composite"),
+            r#"{"version":1,"components":[{"name":"asset-packs::Script","data":{"512":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
+        )
+        .unwrap();
+        assert!(!composites_have_scripts(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_instanceable_composite_skip_is_reported() {
+        let dir = std::env::temp_dir().join(format!("dcl-one-sdk-skipnote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
+        std::fs::write(
+            dir.join("assets/scene/main.composite"),
+            r#"{"version":1,"components":[{"name":"core::NotAThing","data":{}},{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
+        )
+        .unwrap();
+        let (has_scripts, skipped) = composites_script_scan(&dir);
+        assert!(!has_scripts);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("can't be instanced"), "{}", skipped[0]);
+        assert!(skipped[0].contains("main.composite"), "{}", skipped[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn script_utils_stub_for_scriptless_scenes_even_with_the_runtime_installed() {
+        let dir =
+            std::env::temp_dir().join(format!("dcl-one-sdk-scriptgate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("node_modules/@dcl/asset-packs")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/@dcl/sdk-commands/dist/logic")).unwrap();
+        std::fs::write(
+            dir.join("node_modules/@dcl/sdk-commands/dist/logic/runtime-script.js"),
+            "\"use strict\";\nexports.runScripts = runScripts;\nfunction runScripts(engine, scripts) {}\n",
+        )
+        .unwrap();
+        let project = Project {
+            root: dir.clone(),
+            scene_json: serde_json::json!({"main": "bin/index.js"}),
+        };
+        assert_eq!(script_utils_content(&project, false), SCRIPT_UTILS_STUB);
+        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
+        std::fs::write(
+            dir.join("assets/scene/main.composite"),
+            r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"0":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
+        )
+        .unwrap();
+        assert!(script_utils_content(&project, false).contains("runScripts"));
+        assert_eq!(script_utils_content(&project, true), SCRIPT_UTILS_STUB);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stub_matches_upstreams_export_surface() {
+        for export in [
+            "_initializeScripts",
+            "getScriptInstance",
+            "getScriptInstancesByPath",
+            "getAllScriptInstances",
+            "callScriptMethod",
+        ] {
+            assert!(SCRIPT_UTILS_STUB.contains(&format!("export function {export}")));
+        }
+        assert!(SCRIPT_UTILS_STUB.contains("not found on script"));
+    }
 
     #[test]
     fn max_composite_entity_scans_every_parseable_composite() {

@@ -166,7 +166,7 @@ async fn sign(State(st): State<Arc<LinkerState>>, Json(req): Json<SignReq>) -> J
             )
             .await
             {
-                let msg = format!("{e:#}");
+                let msg = crate::ux::render(&e, false, false);
                 finish(&st, Err(e));
                 return Json(json!({ "ok": false, "fatal": true, "error": msg }));
             }
@@ -188,7 +188,7 @@ async fn sign(State(st): State<Arc<LinkerState>>, Json(req): Json<SignReq>) -> J
         )
         .await
         {
-            let msg = format!("{e:#}");
+            let msg = crate::ux::render(&e, false, false);
             finish(&st, Err(e));
             return Json(json!({ "ok": false, "fatal": true, "error": msg }));
         }
@@ -213,7 +213,7 @@ async fn sign(State(st): State<Arc<LinkerState>>, Json(req): Json<SignReq>) -> J
             Json(json!({ "ok": true, "message": message }))
         }
         Err(e) => {
-            let msg = format!("{e:#}");
+            let msg = crate::ux::render(&e, false, false);
             finish(&st, Err(e));
             Json(json!({ "ok": false, "fatal": true, "error": msg }))
         }
@@ -234,7 +234,7 @@ fn finish(st: &Arc<LinkerState>, result: Result<String>) {
     }
 }
 
-fn spawn_browser(url: &str) {
+pub(crate) fn spawn_browser(url: &str) {
     let program = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(target_os = "windows") {
@@ -253,7 +253,7 @@ fn spawn_browser(url: &str) {
     }
 }
 
-fn fmt_wait(timeout: Duration) -> String {
+pub(crate) fn fmt_wait(timeout: Duration) -> String {
     let secs = timeout.as_secs();
     if secs >= 60 && secs.is_multiple_of(60) {
         let mins = secs / 60;

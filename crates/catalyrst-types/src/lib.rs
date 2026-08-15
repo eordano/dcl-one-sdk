@@ -1,15 +1,19 @@
+pub mod deploy_form;
 pub mod deployment;
+pub mod duration_fmt;
 pub mod entity;
 pub mod error;
+pub mod hex0x;
 pub mod pagination;
+pub mod pointer;
 pub mod snapshot;
 pub mod sorting;
 
 pub use entity::{
-    is_eth_address, naive_to_timestamp_ms, parse_eth_address, timestamp_ms_to_naive,
-    ContentFileHash, ContentMapping, DeploymentField, DeploymentId, Entity, EntityId, EntityType,
-    EntityVersion, EthAddress, Pagination, Pointer, StatusProbeResult, Timestamp,
-    PROFILE_DURATION_MS,
+    is_eth_address, naive_to_timestamp_ms, normalize_eth_address, parse_eth_address,
+    timestamp_ms_to_naive, ContentFileHash, ContentMapping, DeploymentField, DeploymentId, Entity,
+    EntityId, EntityType, EntityVersion, EthAddress, Pagination, Pointer, StatusProbeResult,
+    Timestamp, PROFILE_DURATION_MS,
 };
 
 pub use deployment::{
@@ -26,8 +30,14 @@ pub use sorting::{
 };
 
 pub use error::{
-    ContentError, ContentResult, FailedDeploymentReason, HttpError, InvalidParameterError,
-    MarketplaceApiError,
+    ApiError, ApiErrorBody, ContentError, ContentResult, FailedDeploymentReason, HttpError,
+    InvalidParameterError, MarketplaceApiError,
 };
 
-pub use pagination::{PageInput, PaginatedResponse};
+pub use pagination::{
+    clamp_limit, get_pagination_params, limit_or_max, PageInput, PaginatedResponse,
+};
+
+pub use duration_fmt::fmt_elapsed;
+
+pub use hex0x::{decode_hex_0x, HexDecodeError};

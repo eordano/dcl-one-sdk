@@ -3,6 +3,18 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
+static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record the CLI-wide --verbose / RUST_LOG choice so far-flung output paths
+/// (sidecar relays, banners) can consult it without threading a flag through.
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn verbose() -> bool {
+    VERBOSE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct TrySteps(Vec<String>);
 
 impl TrySteps {
@@ -193,6 +205,76 @@ impl Steps {
     }
 }
 
+/// A step that may be slow. Stays silent while it is quick, and once it passes
+/// [`SLOW_AFTER`] starts redrawing a single line with the elapsed time, so a
+/// long step is visibly alive without scrolling anything away. `done()` on the
+/// parent `Steps` prints the real result over it.
+///
+/// Only draws on a terminal: piped output and CI logs get nothing, because a
+/// carriage-return spinner in a log file is noise, not progress.
+pub struct Slow {
+    label: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Below this, a step finishes fast enough that announcing it is just churn.
+const SLOW_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl Slow {
+    pub fn start(label: impl Into<String>) -> Self {
+        let label = label.into();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if !stdout_color() {
+            return Slow {
+                label,
+                stop,
+                handle: None,
+            };
+        }
+        let l = label.clone();
+        let s = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            let mut drawn = false;
+            while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let waited = began.elapsed();
+                if waited < SLOW_AFTER {
+                    continue;
+                }
+                use std::io::Write;
+                print!("\r\x1b[2K  {l} {}s", waited.as_secs());
+                let _ = std::io::stdout().flush();
+                drawn = true;
+            }
+            if drawn {
+                use std::io::Write;
+                print!("\r\x1b[2K");
+                let _ = std::io::stdout().flush();
+            }
+        });
+        Slow {
+            label,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stops the redraw and clears the line. Idempotent via Drop.
+    pub fn finish(self) {}
+}
+
+impl Drop for Slow {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        let _ = &self.label;
+    }
+}
+
 pub fn note(message: impl AsRef<str>) {
     if stdout_color() {
         println!("\x1b[2m{}\x1b[0m", message.as_ref());
@@ -210,7 +292,47 @@ pub fn note_stderr(message: impl AsRef<str>) {
 }
 
 pub fn fmt_elapsed(d: Duration) -> String {
-    format!("{:.1}s", d.as_secs_f64())
+    // Both grouped tiers cap at 9,999, so grouping is at most one comma.
+    fn grouped(n: u32, unit: &str) -> String {
+        if n < 1_000 {
+            format!("{n}{unit}")
+        } else {
+            format!("{},{:03}{unit}", n / 1_000, n % 1_000)
+        }
+    }
+    let secs = d.as_secs();
+    if secs < 10 {
+        let micros = secs as u32 * 1_000_000 + d.subsec_micros();
+        if micros < 10_000 {
+            grouped(micros, "\u{00b5}s")
+        } else {
+            grouped(micros / 1_000, "ms")
+        }
+    } else if secs < 600 || (secs == 600 && d.subsec_nanos() == 0) {
+        format!("{:.2}s", d.as_secs_f64())
+    } else {
+        // Work in rounded centiseconds so 11m59.999s carries to 12m rather
+        // than printing "11m:60.00s".
+        let cs = (d.as_secs_f64() * 100.0).round() as u64;
+        let h = cs / 360_000;
+        let m = (cs % 360_000) / 6_000;
+        let s = (cs % 6_000) as f64 / 100.0;
+        format!("{h}h:{m:02}m:{s:05.2}s")
+    }
+}
+
+pub fn fmt_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    let v = n as f64;
+    if v < KB {
+        format!("{n}b")
+    } else if v < KB * KB {
+        format!("{:.1}kb", v / KB)
+    } else if v < KB * KB * KB {
+        format!("{:.1}mb", v / (KB * KB))
+    } else {
+        format!("{:.1}gb", v / (KB * KB * KB))
+    }
 }
 
 pub fn rel_to(root: &Path, path: &Path) -> String {
@@ -266,6 +388,34 @@ fn loc_file(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_elapsed_tiers() {
+        assert_eq!(fmt_elapsed(Duration::from_micros(320)), "320\u{00b5}s");
+        assert_eq!(fmt_elapsed(Duration::from_micros(1_234)), "1,234\u{00b5}s");
+        assert_eq!(fmt_elapsed(Duration::from_micros(9_999)), "9,999\u{00b5}s");
+        assert_eq!(fmt_elapsed(Duration::from_micros(9_999_999)), "9,999ms");
+        assert_eq!(fmt_elapsed(Duration::from_millis(10)), "10ms");
+        assert_eq!(fmt_elapsed(Duration::from_millis(2_321)), "2,321ms");
+        assert_eq!(fmt_elapsed(Duration::from_millis(9_999)), "9,999ms");
+        assert_eq!(fmt_elapsed(Duration::from_millis(10_000)), "10.00s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(600)), "600.00s");
+        assert_eq!(fmt_elapsed(Duration::from_millis(683_450)), "0h:11m:23.45s");
+        assert_eq!(
+            fmt_elapsed(Duration::from_millis(3_723_400)),
+            "1h:02m:03.40s"
+        );
+        assert_eq!(fmt_elapsed(Duration::from_millis(719_999)), "0h:12m:00.00s");
+    }
+
+    #[test]
+    fn fmt_bytes_tiers() {
+        assert_eq!(fmt_bytes(0), "0b");
+        assert_eq!(fmt_bytes(512), "512b");
+        assert_eq!(fmt_bytes(33866), "33.1kb");
+        assert_eq!(fmt_bytes(1_258_291), "1.2mb");
+        assert_eq!(fmt_bytes(2_684_354_560), "2.5gb");
+    }
 
     #[test]
     fn user_error_renders_try_line() {

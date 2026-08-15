@@ -1,6 +1,9 @@
-use super::{now_ms, DeployOptions, CATALYST_ROTATION};
+use super::{
+    catalyst_rotation, configured_catalyst_rotation, now_ms, DeployOptions, UPSTREAM_CATALYST_HOSTS,
+};
 use crate::ux::{self, TrySteps, UserError};
 use anyhow::{bail, Context, Result};
+use catalyrst_crypto::Wallet;
 use serde_json::json;
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
@@ -21,12 +24,41 @@ fn upload_client() -> Result<reqwest::Client> {
         .context("building the upload http client")
 }
 
+/// How far the caller has already consented to a target being chosen for it.
+/// Only consulted when nothing named one, which is the single path on which
+/// this CLI can reach the public network without being asked to.
+#[derive(Clone, Copy, Default)]
+pub(super) struct TargetConsent {
+    pub assume_yes: bool,
+    pub non_interactive: bool,
+}
+
 pub(super) async fn resolve_target(
     opts: &DeployOptions,
     world: Option<&str>,
     headless: bool,
 ) -> Result<String> {
-    match (&opts.target, &opts.target_content) {
+    resolve_target_from(
+        opts.target.as_deref(),
+        opts.target_content.as_deref(),
+        world,
+        headless,
+        TargetConsent {
+            assume_yes: opts.yes,
+            non_interactive: opts.ci,
+        },
+    )
+    .await
+}
+
+pub(super) async fn resolve_target_from(
+    target: Option<&str>,
+    target_content: Option<&str>,
+    world: Option<&str>,
+    headless: bool,
+    consent: TargetConsent,
+) -> Result<String> {
+    match (target, target_content) {
         (Some(_), Some(_)) => Err(UserError::new(
             "pass either --target or --target-content, not both",
             TrySteps::one("--target <catalyst-domain> resolves the content server via /about")
@@ -59,8 +91,40 @@ pub(super) async fn resolve_target(
                 .why("key-signed deploys never pick a server implicitly")
                 .into());
             }
-            rotation_content_url().await
+            rotation_content_url(consent).await
         }
+    }
+}
+
+pub fn non_upstream_note(target: &str) -> Option<String> {
+    let host = host_of(target)?;
+    let upstream = UPSTREAM_CATALYST_HOSTS
+        .iter()
+        .any(|r| host_of(r).is_some_and(|h| h.eq_ignore_ascii_case(&host)));
+    if upstream {
+        None
+    } else {
+        Some(format!(
+            "publishing to {host}: this updates that network only, not Genesis City on decentraland.org"
+        ))
+    }
+}
+
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+pub(super) fn url_path(base: &str) -> String {
+    let rest = base.split_once("://").map_or(base, |(_, r)| r);
+    match rest.find('/') {
+        Some(i) => rest[i..].to_string(),
+        None => String::new(),
     }
 }
 
@@ -141,9 +205,44 @@ async fn default_env_target(t: &str) -> Result<String> {
     Ok(base)
 }
 
-async fn rotation_content_url() -> Result<String> {
+/// Nothing named a target, so one is about to be picked, and the built-in
+/// rotation publishes to Genesis City: say so and get a yes before uploading.
+fn consent_to_public_deploy(base: &str, consent: TargetConsent) -> Result<()> {
+    let host = host_of(base).unwrap_or_else(|| base.to_string());
+    ux::note(format!(
+        "no --target given \u{2014} publishing to the public Genesis City network via {host}"
+    ));
+    if consent.assume_yes {
+        return Ok(());
+    }
+    if consent.non_interactive || !std::io::stdin().is_terminal() {
+        return Err(UserError::new(
+            format!("this deploy would publish to the public Genesis City network via {base}"),
+            TrySteps::one(
+                "pass --target <catalyst-domain> or --target-content <url> to publish elsewhere",
+            )
+            .and("or set DCL_ONE_SDK_DEFAULT_TARGET=<catalyst-or-content-url>")
+            .and("or pass --yes to confirm the public deploy non-interactively"),
+        )
+        .why("no target was given, so the target was chosen for you")
+        .into());
+    }
+    if prompt_continue()? {
+        Ok(())
+    } else {
+        Err(UserError::new(
+            "deployment cancelled",
+            TrySteps::one("pass --target <catalyst-domain> to publish somewhere else"),
+        )
+        .into())
+    }
+}
+
+async fn rotation_content_url(consent: TargetConsent) -> Result<String> {
+    let configured = configured_catalyst_rotation();
+    let rotation = configured.clone().unwrap_or_else(catalyst_rotation);
     let client = probe_client()?;
-    for base in CATALYST_ROTATION {
+    for base in &rotation {
         match fetch_about(&client, base).await {
             Ok(about) => {
                 let healthy = about
@@ -154,7 +253,13 @@ async fn rotation_content_url() -> Result<String> {
                     continue;
                 }
                 if let Some(content) = about_content_url(&about, base) {
-                    ux::note(format!("deploying via the public catalyst {base}"));
+                    if configured.is_some() {
+                        ux::note(format!(
+                            "deploying via {base} from DCL_ONE_SDK_CATALYST_ROTATION"
+                        ));
+                    } else {
+                        consent_to_public_deploy(base, consent)?;
+                    }
                     return Ok(content);
                 }
             }
@@ -162,7 +267,7 @@ async fn rotation_content_url() -> Result<String> {
         }
     }
     Err(UserError::new(
-        "no public catalyst answered healthy",
+        "no catalyst in the rotation answered healthy",
         TrySteps::one("check your network connection")
             .and("or pass --target <catalyst-domain> / --target-content <url> explicitly"),
     )
@@ -215,6 +320,10 @@ async fn fetch_world_scenes(target: &str, world: &str) -> Result<Vec<WorldScene>
 pub struct PermissionCheck {
     pub allowed: bool,
     pub denied_parcels: Vec<String>,
+    /// The permissions document the decision was made from. Carried so a
+    /// refusal can show who owns the world and who was granted what, instead
+    /// of leaving the user to go and ask.
+    pub doc: serde_json::Value,
 }
 
 async fn check_world_deployment_permission(
@@ -236,6 +345,7 @@ async fn check_world_deployment_permission(
     let granted = PermissionCheck {
         allowed: true,
         denied_parcels: Vec::new(),
+        doc: body.clone(),
     };
     if body
         .get("owner")
@@ -285,11 +395,11 @@ async fn check_world_deployment_permission(
     if !status.is_success() {
         bail!("GET {url} returned HTTP {}", status.as_u16());
     }
-    let body: serde_json::Value = resp
+    let parcel_body: serde_json::Value = resp
         .json()
         .await
         .context("parsing the parcel permissions")?;
-    let allowed: HashSet<&str> = body
+    let allowed: HashSet<&str> = parcel_body
         .get("parcels")
         .and_then(|p| p.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
@@ -302,6 +412,7 @@ async fn check_world_deployment_permission(
     Ok(PermissionCheck {
         allowed: denied_parcels.is_empty(),
         denied_parcels,
+        doc: body,
     })
 }
 
@@ -324,15 +435,24 @@ pub async fn enforce_world_permission(
             } else {
                 format!(" (parcels: {})", check.denied_parcels.join(", "))
             };
+            let owner = check
+                .doc
+                .get("owner")
+                .and_then(|o| o.as_str())
+                .unwrap_or("(unknown)");
             Err(UserError::new(
                 format!(
                     "wallet {address} has no permission to deploy to world \"{world}\"{denied}"
                 ),
                 TrySteps::one(format!(
-                    "ask the world owner to grant it: dcl-one-sdk world permissions grant {world} deployment {address}"
+                    "ask {owner} to grant it: dcl-one-sdk world permissions grant {world} deployment {address}"
                 ))
-                .and("or sign with a wallet that owns the world"),
+                .and("or sign with a wallet listed below"),
             )
+            // Who owns it and who already holds each permission — the same
+            // view `world permissions list` prints. The refusal is only
+            // actionable if the user can see whom to ask.
+            .why(crate::world::render_permissions(world, &check.doc))
             .into())
         }
         Err(e) => {
@@ -449,7 +569,11 @@ pub fn encode_segment(s: &str) -> String {
     out
 }
 
-pub async fn send_world_delete(target: &str, world: &str, chain: &serde_json::Value) -> Result<()> {
+async fn world_delete_request(
+    target: &str,
+    world: &str,
+    chain: &serde_json::Value,
+) -> Result<(u16, String)> {
     let links = chain.as_array().cloned().unwrap_or_default();
     let payload = links
         .last()
@@ -472,31 +596,89 @@ pub async fn send_world_delete(target: &str, world: &str, chain: &serde_json::Va
         Ok(resp) => resp,
         Err(e) => return Err(unreachable_server(&url, e)),
     };
-    let status = resp.status();
+    let status = resp.status().as_u16();
     let body = resp.text().await.unwrap_or_default();
-    if status.is_success() {
+    Ok((status, body))
+}
+
+fn world_delete_refused(world: &str, status: u16, body: &str) -> anyhow::Error {
+    let mut u = UserError::new(
+        format!(
+            "the content server refused to delete the existing scenes in {world} (HTTP {status})"
+        ),
+        TrySteps::one(
+            "use --multi-scene to deploy alongside existing scenes without deleting them",
+        )
+        .and("check the signing wallet has permission on the world"),
+    );
+    let body = body.trim();
+    if !body.is_empty() {
+        u = u.why(body);
+    }
+    u.into()
+}
+
+pub async fn send_world_delete(target: &str, world: &str, chain: &serde_json::Value) -> Result<()> {
+    let (status, body) = world_delete_request(target, world, chain).await?;
+    if (200..300).contains(&status) {
         ux::note(format!(
-            "removed the existing scenes in {world} (HTTP {})",
-            status.as_u16()
+            "removed the existing scenes in {world} (HTTP {status})"
         ));
         Ok(())
     } else {
-        let mut u = UserError::new(
-            format!(
-                "the content server refused to delete the existing scenes in {world} (HTTP {})",
-                status.as_u16()
-            ),
-            TrySteps::one(
-                "use --multi-scene to deploy alongside existing scenes without deleting them",
-            )
-            .and("check the signing wallet has permission on the world"),
-        );
-        let body = body.trim();
-        if !body.is_empty() {
-            u = u.why(body);
-        }
-        Err(u.into())
+        Err(world_delete_refused(world, status, &body))
     }
+}
+
+pub(super) async fn delete_world_scenes(target: &str, world: &str, wallet: &Wallet) -> Result<()> {
+    let payload = build_delete_payload(world);
+    let chain = catalyrst_crypto::create_simple_auth_chain(wallet, &payload)
+        .context("EIP-191 sign of the scene-removal payload")?;
+    let (status, body) = world_delete_request(target, world, &chain).await?;
+    if (200..300).contains(&status) {
+        ux::note(format!(
+            "removed the existing scenes in {world} (HTTP {status})"
+        ));
+        return Ok(());
+    }
+    if status == 404 || status == 405 {
+        return delete_scenes_per_coord(target, world, wallet).await;
+    }
+    Err(world_delete_refused(world, status, &body))
+}
+
+async fn delete_scenes_per_coord(target: &str, world: &str, wallet: &Wallet) -> Result<()> {
+    let scenes = fetch_world_scenes(target, world)
+        .await
+        .context("listing the world scenes for per-scene removal")?;
+    let client = upload_client()?;
+    let mut removed = 0usize;
+    for scene in &scenes {
+        let Some(parcel) = scene.parcels.first() else {
+            continue;
+        };
+        let suffix = format!("/world/{}/scenes/{parcel}", encode_segment(world));
+        let path = format!("{}{suffix}", url_path(target));
+        let url = format!("{target}{suffix}");
+        let mut req = client.delete(&url);
+        for (k, v) in crate::world::signed_headers(wallet, "delete", &path)? {
+            req = req.header(k, v);
+        }
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(e) => return Err(unreachable_server(&url, e)),
+        };
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(world_delete_refused(world, status.as_u16(), &body));
+        }
+        removed += 1;
+    }
+    ux::note(format!(
+        "removed {removed} existing scene(s) in {world} via the per-scene route"
+    ));
+    Ok(())
 }
 
 pub async fn upload_entity(

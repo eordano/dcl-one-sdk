@@ -169,6 +169,11 @@ pub fn parse_eth_address(value: &str) -> Option<EthAddress> {
     }
 }
 
+pub fn normalize_eth_address(value: &str) -> Option<EthAddress> {
+    let lowered = value.trim().to_lowercase();
+    is_eth_address(&lowered).then_some(lowered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +249,23 @@ mod tests {
     #[test]
     fn parse_eth_address_returns_none_on_invalid() {
         assert!(parse_eth_address("not-an-address").is_none());
+    }
+
+    #[test]
+    fn normalize_eth_address_trims_and_lowercases() {
+        assert_eq!(
+            normalize_eth_address(" 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 ").unwrap(),
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
+        assert!(normalize_eth_address("not-an-address").is_none());
+        assert!(normalize_eth_address("0x1234").is_none());
+    }
+
+    #[test]
+    fn normalize_eth_address_accepts_uppercase_prefix() {
+        assert_eq!(
+            normalize_eth_address("0Xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap(),
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
     }
 }

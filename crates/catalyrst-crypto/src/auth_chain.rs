@@ -1,5 +1,7 @@
 pub use catalyrst_types::{AuthChain, AuthLink, AuthLinkType, MAX_AUTH_CHAIN_LINKS};
 
+use catalyrst_types::is_eth_address;
+
 pub const MAX_AUTH_LINK_FIELD_LEN: usize = 100_000;
 
 pub fn is_valid_auth_chain(chain: &AuthChain) -> bool {
@@ -30,10 +32,6 @@ pub fn is_valid_auth_chain(chain: &AuthChain) -> bool {
     true
 }
 
-fn is_valid_eth_address(addr: &str) -> bool {
-    addr.len() == 42 && addr.starts_with("0x") && addr[2..].chars().all(|c| c.is_ascii_hexdigit())
-}
-
 pub fn parse_ephemeral_payload(payload: &str) -> Result<(String, String, i64), crate::AuthError> {
     let message = payload.replace('\r', "");
     let parts: Vec<&str> = message.split('\n').collect();
@@ -53,7 +51,7 @@ pub fn parse_ephemeral_payload(payload: &str) -> Result<(String, String, i64), c
 
     let ephemeral_address = parts[1][ephemeral_prefix.len()..].to_string();
 
-    if !is_valid_eth_address(&ephemeral_address) {
+    if !is_eth_address(&ephemeral_address) {
         return Err(crate::AuthError::InvalidEphemeralPayload(
             "invalid ephemeral address format".into(),
         ));
@@ -180,21 +178,15 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_eth_address() {
-        assert!(is_valid_eth_address(
-            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        ));
-        assert!(is_valid_eth_address(
-            "0x0000000000000000000000000000000000000000"
-        ));
-        assert!(!is_valid_eth_address(
-            "f39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        ));
-        assert!(!is_valid_eth_address("0x1234"));
-        assert!(!is_valid_eth_address(
+    fn test_is_eth_address() {
+        assert!(is_eth_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"));
+        assert!(is_eth_address("0x0000000000000000000000000000000000000000"));
+        assert!(!is_eth_address("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266"));
+        assert!(!is_eth_address("0x1234"));
+        assert!(!is_eth_address(
             "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb922660"
         ));
-        assert!(!is_valid_eth_address(
+        assert!(!is_eth_address(
             "0xZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
         ));
     }

@@ -6,6 +6,7 @@ members = [
     "crates/catalyrst-hashing",
     "crates/catalyrst-crypto",
     "crates/catalyrst-preview-tunnel",
+    "crates/catalyrst-testgate",
     "crates/dcl-one-sdk",
 ]
 
@@ -32,13 +33,16 @@ futures = "0.3"
 async-trait = "0.1"
 parking_lot = "0.12"
 tokio-tungstenite = "=0.29.0"
-# sqlx is an OPTIONAL dep of catalyrst-types (DB-facing types); the SDK does not
-# use them, so catalyrst-types is pulled with default-features off — sqlx is
-# defined here only so the crate's `sqlx = { workspace = true, optional = true }`
-# inheritance resolves, and is never actually compiled.
+# sqlx (DB-facing types) and utoipa (OpenAPI derives) are OPTIONAL deps of
+# catalyrst-types, behind its `sqlx` and `openapi` features. The SDK uses
+# neither, so catalyrst-types is pulled with default-features off — these are
+# defined here only so the crate's `{ workspace = true, optional = true }`
+# inheritance resolves, and neither is ever actually compiled.
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "json", "chrono"] }
+utoipa = { version = "5", features = ["chrono"] }
 catalyrst-envcfg = { path = "crates/catalyrst-envcfg" }
 catalyrst-types = { path = "crates/catalyrst-types", default-features = false }
 catalyrst-hashing = { path = "crates/catalyrst-hashing" }
 catalyrst-crypto = { path = "crates/catalyrst-crypto" }
 catalyrst-preview-tunnel = { path = "crates/catalyrst-preview-tunnel" }
+catalyrst-testgate = { path = "crates/catalyrst-testgate" }

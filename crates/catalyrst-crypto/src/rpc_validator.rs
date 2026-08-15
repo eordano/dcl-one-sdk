@@ -94,13 +94,6 @@ impl RpcEip1654Validator {
         }
     }
 
-    pub fn with_client(rpc_url: impl Into<String>, client: Client) -> Self {
-        Self {
-            rpc_url: rpc_url.into(),
-            client,
-        }
-    }
-
     async fn eth_call(&self, to: &str, data: &[u8]) -> Result<String, AuthError> {
         let call_data = format!("0x{}", hex::encode(data));
 

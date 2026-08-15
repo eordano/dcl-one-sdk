@@ -126,6 +126,10 @@ async function dumpCrdtFallback() {
     }
   }
   const engine = Engine()
+  // NOTE: the crdt this produces carries every component the composites
+  // define, but not the editor's own composite::root marker — the
+  // @dcl/sdk-commands path sets that when its data layer opens a composite.
+  // Scene content is identical; only that bookkeeping entry is absent.
   for (const src of Object.keys(composites)) {
     Composite.instance(engine, provider.getCompositeOrNull(src), provider, {
       entityMapping: {

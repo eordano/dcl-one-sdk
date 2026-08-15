@@ -1,0 +1,8 @@
+{
+  "name": "@dcl/inspector",
+  "version": "0.0.0-dcl-one-sdk-shim",
+  "description": "Stand-in for @dcl/inspector: dumpEngineToCrdtCommands so composite scenes build offline, plus a minimal data-layer host (4 of 22 rpc methods live) so the editor protocol works without the 119 MB browser UI",
+  "main": "index.js",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}

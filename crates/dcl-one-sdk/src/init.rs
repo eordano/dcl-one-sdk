@@ -110,6 +110,15 @@ fn install_vendored_node_modules(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Is a full `@dcl/inspector` (the one with the editor UI) already present?
+///
+/// The base blob ships a small stand-in that only implements the crdt dump, so
+/// presence of the directory is not enough — the UI bundle is what decides.
+pub fn has_full_inspector(root: &Path) -> bool {
+    root.join("node_modules/@dcl/inspector/public/index.html")
+        .is_file()
+}
+
 fn prepare_dir(dir: &Path, yes: bool) -> Result<PathBuf> {
     if dir.is_file() {
         return Err(UserError::new(
@@ -448,5 +457,56 @@ mod tests {
             let body = String::from_utf8_lossy(&f.body).into_owned();
             assert!(!body.contains("{{"), "{} still has a placeholder", f.rel);
         }
+    }
+
+    /// The blob must carry a working data layer, not just the crdt dumper.
+    ///
+    /// Each of these is a silent failure if a rebuild drops it: no `host.js`
+    /// and `start --data-layer` cannot boot; no descriptor and
+    /// `registerService` has nothing to register; a descriptor short of 22
+    /// methods is a `TypeError` that kills the whole rpc connection rather
+    /// than the one call; no `component-schemas.json` and the engine silently
+    /// drops every crdt message for a component it does not know.
+    #[test]
+    fn blob_carries_the_data_layer_host() {
+        let cursor = std::io::Cursor::new(VENDORED_NODE_MODULES);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+        for rel in [
+            "node_modules/@dcl/inspector/host.js",
+            "node_modules/@dcl/inspector/engine.js",
+            "node_modules/@dcl/inspector/engine-to-composite.js",
+            "node_modules/@dcl/inspector/data-layer.gen.js",
+            "node_modules/@dcl/inspector/component-schemas.json",
+            "node_modules/@dcl/inspector/minimal-composite.json",
+            "node_modules/@dcl/rpc/dist/index.js",
+            "node_modules/@dcl/rpc/dist/codegen.js",
+            "node_modules/@dcl/rpc/dist/push-channel.js",
+            "node_modules/@dcl/rpc/dist/transports/WebSocket.js",
+            "node_modules/mitt/dist/mitt.js",
+        ] {
+            assert!(names.iter().any(|n| n == rel), "blob is missing {rel}");
+        }
+        // The descriptor's `.ts` source and its `.proto` are checked in beside
+        // the shim on purpose, and must never ship: 79 KB nothing loads.
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.ends_with(".gen.ts") || n.ends_with(".proto")),
+            "the descriptor source leaked into the blob"
+        );
+
+        use std::io::Read;
+        let mut descriptor = String::new();
+        archive
+            .by_name("node_modules/@dcl/inspector/data-layer.gen.js")
+            .unwrap()
+            .read_to_string(&mut descriptor)
+            .unwrap();
+        assert_eq!(
+            descriptor.matches("requestStream:").count(),
+            22,
+            "the DataService descriptor must declare all 22 methods"
+        );
     }
 }

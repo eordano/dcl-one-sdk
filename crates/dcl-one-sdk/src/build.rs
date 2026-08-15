@@ -1,6 +1,6 @@
 use crate::ux::{self, TrySteps, UserError};
 use crate::workspace::Workspace;
-use crate::{entrypoint, esbuild, scene::Project, split};
+use crate::{entrypoint, esbuild, prebuilt, scene::Project, split};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -45,7 +45,17 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
     let tsconfig = project.tsconfig()?;
     let outfile = project.root.join(&main);
     let (sdk_rel, scene_rel) = split::chunk_rel_paths(&main);
-    let mut steps = ux::Steps::new(if opts.skip_type_check { 4 } else { 5 });
+    let smart_rel = split::smart_chunk_rel_path(&main);
+    // Collected before the step count so the entity-names step can be counted
+    // only when it will actually report — a scene whose composite names nothing
+    // must not be told it has a step it never runs.
+    let entity_names = if opts.ignore_composite {
+        Default::default()
+    } else {
+        crate::entity_names::collect(&project.root)
+    };
+    let base_steps = if opts.skip_type_check { 4 } else { 5 };
+    let mut steps = ux::Steps::new(base_steps + usize::from(!entity_names.is_empty()));
 
     let generated = entrypoint::generate(
         &project,
@@ -56,31 +66,29 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
     split::write_generated(&project, &generated.dir)?;
     split::write_marker(&generated.dir)?;
 
-    let mut sdk_aliases = esbuild::resolve_aliases(&project)?;
-    sdk_aliases.push((
-        "~sdk/all-composites".to_string(),
-        generated.dir.join("composite-slot.js"),
-    ));
-    sdk_aliases.push((
-        "~sdk/script-utils".to_string(),
-        generated.dir.join("script-utils.js"),
-    ));
-    let sdk_opts = esbuild::EsbuildOptions {
-        production: opts.production,
-        entrypoint: generated.dir.join("sdk-runtime-entry.js"),
-        outfile: project.root.join(&sdk_rel),
-        tsconfig: tsconfig.clone(),
-        aliases: sdk_aliases,
-        externals: vec![],
-    };
+    // The vendored toolchain ships the SDK runtime chunk prebuilt: it is
+    // scene-independent, so re-deriving it here would spend seconds of rolldown
+    // to reproduce bytes we already have. An npm-installed scene has no
+    // prebuilt chunk and takes the source path below, unchanged.
     let started = Instant::now();
-    esbuild::bundle(&project, &sdk_opts).await?;
-    tracing::info!("sdk chunk saved {}", sdk_opts.outfile.display());
-    steps.done(format!(
-        "SDK chunk saved {} ({})",
-        ux::rel_to(&project.root, &sdk_opts.outfile),
-        ux::fmt_elapsed(started.elapsed())
-    ));
+    let prebuilt = prebuilt::locate(&project);
+    match &prebuilt {
+        Some(chunks) => {
+            prebuilt::install(&chunks.core, &project.root.join(&sdk_rel))?;
+            tracing::info!("prebuilt sdk chunk installed {sdk_rel}");
+            steps.done(format!("SDK chunk installed {sdk_rel} (prebuilt)"));
+        }
+        None => {
+            let sdk_opts = sdk_chunk_options(&project, &generated, &sdk_rel, &tsconfig, opts)?;
+            esbuild::bundle(&project, &sdk_opts).await?;
+            tracing::info!("sdk chunk saved {}", sdk_opts.outfile.display());
+            steps.done(format!(
+                "SDK chunk saved {} ({})",
+                ux::rel_to(&project.root, &sdk_opts.outfile),
+                ux::fmt_elapsed(started.elapsed())
+            ));
+        }
+    }
 
     let scene_opts = esbuild::EsbuildOptions {
         production: opts.production,
@@ -99,35 +107,186 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
         ux::fmt_elapsed(started.elapsed())
     ));
 
+    let smart_installed = install_smart_chunk(&project, prebuilt.as_ref(), &scene_rel, &smart_rel)?;
     split::write_loader_stub(
         &outfile,
         &sdk_rel,
+        smart_installed.then_some(smart_rel.as_str()),
         &scene_rel,
         generated.max_composite_entity,
     )?;
     tracing::info!("loader stub saved {}", outfile.display());
-    steps.done(format!(
-        "Loader stub saved {}",
-        ux::rel_to(&project.root, &outfile)
-    ));
+    steps.done(if smart_installed {
+        format!(
+            "Loader stub saved {} (core + smart-item chunks)",
+            ux::rel_to(&project.root, &outfile)
+        )
+    } else {
+        format!("Loader stub saved {}", ux::rel_to(&project.root, &outfile))
+    });
+
+    // Ahead of main.crdt on purpose. The names are read straight out of the
+    // composite JSON and owe nothing to the crdt encoder, so a Hub scene whose
+    // composite the native generator cannot encode — an asset-packs component
+    // with its own jsonSchema is enough — still gets a correct enum instead of
+    // a stale one. It also has to land before the type check below, which is
+    // what fails when a scene imports EntityNames and the file is out of date.
+    if !opts.ignore_composite {
+        match crate::entity_names::write(&project.root, &entity_names) {
+            Ok(Some(n)) => steps.done(format!(
+                "{} regenerated ({n} name{})",
+                crate::entity_names::OUTPUT_PATH,
+                if n == 1 { "" } else { "s" }
+            )),
+            Ok(None) => {}
+            // Never fail the build over the names file: a scene that does not
+            // import it does not care, and one that does gets a clear error
+            // from the type check a few lines below.
+            Err(e) => ux::note(&format!(
+                "could not write {}: {e}",
+                crate::entity_names::OUTPUT_PATH
+            )),
+        }
+    }
 
     match crate::data_layer::regenerate_main_crdt(&project.root, opts.ignore_composite).await? {
-        Some(n) => steps.done(format!(
+        Some(crate::data_layer::CrdtRegen::Native(n)) => steps.done(format!(
             "main.crdt regenerated ({n} composite{})",
             if n == 1 { "" } else { "s" }
         )),
+        Some(crate::data_layer::CrdtRegen::NodeDataLayer) => {
+            steps.done("main.crdt regenerated via the node data-layer")
+        }
         None => steps.done("main.crdt skipped (no composite)"),
     }
 
     if opts.skip_type_check {
         ux::note("type check skipped (--skip-type-check)");
     } else {
-        type_check(&project).await?;
+        // The slowest step by far on a real scene, and the only one that used
+        // to run with no output at all — several seconds of dead terminal read
+        // as a hang.
+        let progress = ux::Slow::start("type checking");
+        let checked = type_check(&project).await;
+        progress.finish();
+        checked?;
         tracing::info!("type checking completed without errors");
         steps.done("Type check passed");
     }
 
     Ok(Built { project, outfile })
+}
+
+/// The source-path SDK chunk: one rolldown pass over the registry of everything
+/// installed. Only reached when the scene has no prebuilt chunk — an npm
+/// install, or a vendored tree from before the prebuilt split.
+pub fn sdk_chunk_options(
+    project: &Project,
+    generated: &entrypoint::Generated,
+    sdk_rel: &str,
+    tsconfig: &std::path::Path,
+    opts: &BuildOptions,
+) -> Result<esbuild::EsbuildOptions> {
+    let mut aliases = esbuild::resolve_aliases(project)?;
+    aliases.push((
+        "~sdk/all-composites".to_string(),
+        generated.dir.join("composite-slot.js"),
+    ));
+    aliases.push((
+        "~sdk/script-utils".to_string(),
+        generated.dir.join("script-utils.js"),
+    ));
+    Ok(esbuild::EsbuildOptions {
+        production: opts.production,
+        entrypoint: generated.dir.join("sdk-runtime-entry.js"),
+        outfile: project.root.join(sdk_rel),
+        tsconfig: tsconfig.to_path_buf(),
+        aliases,
+        externals: vec![],
+    })
+}
+
+/// Install the prebuilt smart-item chunk if this scene uses smart items, and
+/// clear a stale one if it no longer does. Returns whether the loader should
+/// name it.
+///
+/// Only the prebuilt path has a smart chunk: on the source path
+/// `@dcl/asset-packs` is bundled into the single SDK chunk, exactly as before.
+pub fn install_smart_chunk(
+    project: &Project,
+    prebuilt: Option<&prebuilt::Prebuilt>,
+    scene_rel: &str,
+    smart_rel: &str,
+) -> Result<bool> {
+    let Some(chunks) = prebuilt else {
+        return Ok(false);
+    };
+    let scene_chunk = project.root.join(scene_rel);
+    if !prebuilt::scene_needs_smart_chunk(project, &scene_chunk) {
+        prebuilt::remove_stale_smart_chunk(&project.root, smart_rel);
+        return Ok(false);
+    }
+    let Some(smart) = &chunks.smart else {
+        return Err(UserError::new(
+            "this scene uses smart items but the vendored toolchain has no smart-item chunk",
+            TrySteps::one(
+                "re-install the vendored toolchain with dcl-one-sdk init --node-modules-only",
+            ),
+        )
+        .why(format!(
+            "{} does not exist",
+            project
+                .root
+                .join("node_modules")
+                .join(prebuilt::SMART_FILE)
+                .display()
+        ))
+        .into());
+    };
+    prebuilt::install(smart, &project.root.join(smart_rel))?;
+    tracing::info!("prebuilt smart-item chunk installed {smart_rel}");
+    Ok(true)
+}
+
+/// A type check that runs beside the watch loop instead of in front of it, so a
+/// rebuild reloads the scene immediately and type errors arrive as soon as tsc
+/// has an answer. Only the newest edit's check matters, so starting one aborts
+/// any still running; `type_check` spawns tsc with `kill_on_drop`, so the abort
+/// reaches the process rather than orphaning it.
+#[derive(Default)]
+pub struct BackgroundCheck {
+    running: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl BackgroundCheck {
+    pub fn restart(&mut self, project: Project) {
+        if let Some(previous) = self.running.take() {
+            previous.abort();
+        }
+        self.running = Some(tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            match type_check(&project).await {
+                // Silence is the pass signal; only a check slow enough to have
+                // been felt is worth a line of its own.
+                Ok(()) if started.elapsed() >= std::time::Duration::from_secs(1) => {
+                    crate::ux::note(format!(
+                        "type check passed ({})",
+                        crate::ux::fmt_elapsed(started.elapsed())
+                    ));
+                }
+                Ok(()) => {}
+                Err(e) => crate::ux::report_watch(&e),
+            }
+        }));
+    }
+}
+
+impl Drop for BackgroundCheck {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.take() {
+            running.abort();
+        }
+    }
 }
 
 pub async fn type_check(project: &Project) -> Result<()> {

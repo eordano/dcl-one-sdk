@@ -14,15 +14,30 @@ const DUMP_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Clone)]
 pub struct DataLayerState {
     pub port_rx: watch::Receiver<u16>,
-    pub public_dir: PathBuf,
+    /// Where the editor's browser bundle lives — when there is one.
+    ///
+    /// `None` is a normal state, not a failure. The data layer and the UI are
+    /// separable: the blob ships a working host (`src/vendor/inspector-shim`)
+    /// and no UI, so `--data-layer` on a scene without `@dcl/inspector` serves
+    /// the protocol on `/data-layer` and answers `/inspector/*` with a 404
+    /// naming what to install. Treating a missing UI as fatal — which is what
+    /// this used to do — meant the vendored host could only ever start in the
+    /// one case where a real `@dcl/inspector` was installed, and in that case
+    /// the real one wins at `require()` time. The fallback was unreachable.
+    pub public_dir: Option<PathBuf>,
 }
 
-pub fn locate_inspector_public(root: &Path) -> Result<PathBuf> {
+/// The editor UI for this scene, if one is installed.
+///
+/// `Ok(None)` means "no UI here" and is not an error. An explicit
+/// `DCL_ONE_INSPECTOR_DIR` pointing at something that is not an inspector
+/// build still is: the user named a path and got it wrong.
+pub fn locate_inspector_public(root: &Path) -> Result<Option<PathBuf>> {
     if let Ok(dir) = std::env::var("DCL_ONE_INSPECTOR_DIR") {
         let d = PathBuf::from(&dir);
         for candidate in [d.join("public"), d.clone()] {
             if candidate.join("index.html").is_file() {
-                return Ok(candidate);
+                return Ok(Some(candidate));
             }
         }
         return Err(UserError::new(
@@ -39,20 +54,19 @@ pub fn locate_inspector_public(root: &Path) -> Result<PathBuf> {
     while let Some(d) = dir {
         let candidate = d.join("node_modules/@dcl/inspector/public");
         if candidate.join("index.html").is_file() {
-            return Ok(candidate);
+            return Ok(Some(candidate));
         }
         dir = d.parent();
     }
-    Err(UserError::new(
-        "the visual editor UI (@dcl/inspector) is not installed in this scene",
-        TrySteps::one("run npm install in the scene directory (@dcl/sdk-commands ships it)")
-            .and("or set DCL_ONE_INSPECTOR_DIR=<path-to-an-@dcl/inspector-package>"),
-    )
-    .why(format!(
-        "no node_modules/@dcl/inspector/public/index.html at or above {}",
-        root.display()
-    ))
-    .into())
+    // The editor UI is no longer vendored. `@dcl/inspector` ships a pre-built
+    // browser bundle we cannot slim from here — 18 MB of it, ~60% a
+    // non-tree-shaken Babylon (2,037 re-exported symbols, including 359
+    // NodeMaterial blocks and 61 WebXR symbols that an editor panel never
+    // calls) plus 2,967 Font Awesome icons. Carrying 7.4 MB of that in every
+    // binary, for a path most scenes never take, was the wrong trade. The
+    // *protocol* half is vendored and still runs; only the browser bundle has
+    // to come from npm now.
+    Ok(None)
 }
 
 pub fn inject_config(html: &str, config_json: &str) -> String {
@@ -64,6 +78,62 @@ pub fn inject_config(html: &str, config_json: &str) -> String {
 
 pub fn inspector_config_json(ws_url: &str) -> String {
     json!({ "dataLayerRpcWsUrl": ws_url }).to_string()
+}
+
+/// Where an inspector asset actually lives on disk.
+///
+/// The vendored blob stores `bundle.js` (18 MB) and `bundle.css` (5.6 MB) as
+/// `.gz`, which is most of the reason the editor unpacks to 11 MB instead of
+/// 73 MB. A scene with its own npm-installed `@dcl/inspector` has them plain,
+/// so the plain name always wins and the `.gz` is only a fallback.
+pub enum Asset {
+    Plain(PathBuf),
+    Gzipped(PathBuf),
+}
+
+/// Resolve `rel` under `public_dir`, refusing anything that escapes it.
+pub fn resolve_asset(public_dir: &Path, rel: &str) -> Option<Asset> {
+    if rel.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    let base = dunce::canonicalize(public_dir).unwrap_or_else(|_| public_dir.to_path_buf());
+    let found = match dunce::canonicalize(public_dir.join(rel)) {
+        Ok(p) => Asset::Plain(p),
+        Err(_) => Asset::Gzipped(dunce::canonicalize(public_dir.join(format!("{rel}.gz"))).ok()?),
+    };
+    let path = match &found {
+        Asset::Plain(p) | Asset::Gzipped(p) => p,
+    };
+    // canonicalize resolves symlinks, so this catches a link out of the tree
+    // as well as a `..` that slipped past the segment check.
+    path.starts_with(&base).then_some(found)
+}
+
+/// Does the client take gzip? `identity` and `gzip;q=0` both mean no.
+pub fn accepts_gzip(accept_encoding: Option<&str>) -> bool {
+    let Some(value) = accept_encoding else {
+        return false;
+    };
+    value.split(',').any(|part| {
+        let mut bits = part.split(';');
+        let coding = bits.next().unwrap_or("").trim();
+        if !coding.eq_ignore_ascii_case("gzip") && coding != "*" {
+            return false;
+        }
+        !bits.any(|p| {
+            let p = p.trim();
+            p.strip_prefix("q=")
+                .and_then(|q| q.trim().parse::<f32>().ok())
+                .is_some_and(|q| q <= 0.0)
+        })
+    })
+}
+
+pub fn gunzip(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes).read_to_end(&mut out)?;
+    Ok(out)
 }
 
 pub fn inspector_mime(path: &Path) -> &'static str {
@@ -189,9 +259,11 @@ async fn launch(node: &Path, driver: &Path, root: &Path) -> Result<Driver> {
             };
             Err(UserError::new(
                 "the data-layer host did not come up",
-                TrySteps::one("run npm install in the scene directory (@dcl/inspector, @dcl/rpc and ws must resolve)")
-                    .and("or set DCL_ONE_INSPECTOR_DIR=<path-to-an-@dcl/inspector-package>")
-                    .and("re-run with --verbose for the full driver log"),
+                TrySteps::one(
+                    "run dcl-one-sdk init --node-modules-only \u{2014} the host, @dcl/rpc and ws are vendored",
+                )
+                .and("or npm install in the scene (@dcl/inspector, @dcl/rpc and ws must resolve)")
+                .and("re-run with --verbose for the full driver log"),
             )
             .why(why)
             .into())
@@ -255,6 +327,9 @@ pub async fn spawn(root: &Path) -> Result<watch::Receiver<u16>> {
 pub async fn dump_crdt(root: &Path) -> Result<u64> {
     let node = node_bin()?;
     let driver = write_driver(root)?;
+    // Spawning node to walk every composite is the slowest step of a save, and
+    // it has a multi-minute timeout: without this the editor looks hung.
+    let _progress = crate::ux::Slow::start("regenerating main.crdt");
     let out = tokio::time::timeout(
         DUMP_TIMEOUT,
         tokio::process::Command::new(&node)
@@ -314,16 +389,58 @@ pub async fn dump_crdt(root: &Path) -> Result<u64> {
         .unwrap_or(0))
 }
 
-pub async fn regenerate_main_crdt(root: &Path, ignore_composite: bool) -> Result<Option<u64>> {
+/// Which generator produced main.crdt. The distinction is user-visible: the
+/// native path is in-process, while the fallback shells out to node and needs
+/// `@dcl/inspector` resolvable, so it is slower and has more ways to fail.
+pub enum CrdtRegen {
+    /// Generated in-process, from this many composite files.
+    Native(u64),
+    /// The native generator did not cover this scene. The node data-layer's
+    /// summary does not carry a composite count we can trust, so none is
+    /// reported rather than printing a zero that reads as "nothing included".
+    NodeDataLayer,
+}
+
+pub async fn regenerate_main_crdt(
+    root: &Path,
+    ignore_composite: bool,
+) -> Result<Option<CrdtRegen>> {
     if ignore_composite {
         return Ok(None);
     }
-    if crate::entrypoint::find_composites(root).is_empty() {
-        return Ok(None);
+    // The native generator is the fast path and usually finishes well inside
+    // the threshold; a scene with enough composites to be slow says so, and the
+    // fallback below starts its own for the node round trip.
+    let progress = crate::ux::Slow::start("regenerating main.crdt");
+    let generated = crate::crdt_gen::generate(root);
+    progress.finish();
+    match generated {
+        Ok(None) => Ok(None),
+        Ok(Some(generated)) => {
+            tokio::fs::write(root.join("main.crdt"), &generated.bytes)
+                .await
+                .context("writing main.crdt")?;
+            tracing::info!(
+                "main.crdt regenerated natively from {} composite(s)",
+                generated.composites
+            );
+            Ok(Some(CrdtRegen::Native(generated.composites)))
+        }
+        Err(crate::crdt_gen::GenError::Unsupported(why)) => {
+            tracing::info!(
+                "native main.crdt generation does not cover this scene ({why}); using the node data-layer"
+            );
+            let n = dump_crdt(root).await?;
+            tracing::info!("main.crdt regenerated from {n} composite(s)");
+            Ok(Some(CrdtRegen::NodeDataLayer))
+        }
+        Err(crate::crdt_gen::GenError::Invalid(why)) => Err(UserError::new(
+            "main.crdt regeneration failed \u{2014} keeping the existing main.crdt",
+            TrySteps::one("check the composite files named below"),
+        )
+        .why(why)
+        .into()),
     }
-    let n = dump_crdt(root).await?;
-    tracing::info!("main.crdt regenerated from {n} composite(s)");
-    Ok(Some(n))
 }
 
 #[cfg(test)]
@@ -376,8 +493,12 @@ mod tests {
         );
         t.write("ws/member/scene.json", "{}");
         let found = locate_inspector_public(&t.0.join("ws/member")).unwrap();
-        assert_eq!(found, t.0.join("node_modules/@dcl/inspector/public"));
-        assert!(locate_inspector_public(Path::new("/nonexistent-dcl1")).is_err());
+        assert_eq!(found, Some(t.0.join("node_modules/@dcl/inspector/public")));
+        // No UI is not an error: the data layer runs without one.
+        assert_eq!(
+            locate_inspector_public(Path::new("/nonexistent-dcl1")).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -385,6 +506,67 @@ mod tests {
         assert!(DRIVER_TEMPLATE.contains("createDataLayerHost"));
         assert!(DRIVER_TEMPLATE.contains("dump-crdt"));
         assert!(DRIVER_TEMPLATE.contains("DataServiceDefinition"));
+    }
+
+    #[test]
+    fn resolve_prefers_a_plain_asset_and_falls_back_to_the_gzipped_one() {
+        let t = Tmp::new("resolve");
+        t.write("public/index.html", "<html></html>");
+        t.write("public/bundle.js.gz", "not really gzip");
+        t.write("public/plain.js", "console.log(1)");
+        let dir = t.0.join("public");
+        assert!(matches!(
+            resolve_asset(&dir, "plain.js"),
+            Some(Asset::Plain(_))
+        ));
+        assert!(matches!(
+            resolve_asset(&dir, "bundle.js"),
+            Some(Asset::Gzipped(_))
+        ));
+        // A scene with its own npm install has the plain file; it must win so
+        // we never serve a gzip body without the header.
+        t.write("public/bundle.js", "plain wins");
+        assert!(matches!(
+            resolve_asset(&dir, "bundle.js"),
+            Some(Asset::Plain(_))
+        ));
+        assert!(resolve_asset(&dir, "missing.js").is_none());
+    }
+
+    #[test]
+    fn resolve_refuses_paths_that_escape_the_public_dir() {
+        let t = Tmp::new("escape");
+        t.write("public/index.html", "<html></html>");
+        t.write("secret.txt", "nope");
+        let dir = t.0.join("public");
+        assert!(resolve_asset(&dir, "../secret.txt").is_none());
+        assert!(resolve_asset(&dir, "a/../../secret.txt").is_none());
+        // `..` hidden behind the .gz fallback must be refused too.
+        assert!(resolve_asset(&dir, "../secret.txt.gz").is_none());
+    }
+
+    #[test]
+    fn accepts_gzip_reads_the_q_value() {
+        assert!(accepts_gzip(Some("gzip, deflate, br")));
+        assert!(accepts_gzip(Some("br;q=1.0, gzip;q=0.8")));
+        assert!(accepts_gzip(Some("GZIP")));
+        assert!(accepts_gzip(Some("*")));
+        assert!(!accepts_gzip(None));
+        assert!(!accepts_gzip(Some("identity")));
+        assert!(!accepts_gzip(Some("deflate, gzip;q=0")));
+        assert!(!accepts_gzip(Some("")));
+    }
+
+    #[test]
+    fn gunzip_round_trips_the_blobs_own_encoding() {
+        use std::io::Write;
+        let payload = b"globalThis.InspectorConfig = {}\n".repeat(64);
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&payload).unwrap();
+        let gz = enc.finish().unwrap();
+        assert!(gz.len() < payload.len(), "the fixture must actually shrink");
+        assert_eq!(gunzip(&gz).unwrap(), payload);
+        assert!(gunzip(b"not gzip at all").is_err());
     }
 
     #[test]

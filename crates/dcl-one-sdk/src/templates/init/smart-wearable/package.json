@@ -9,12 +9,12 @@
     "pack": "dcl-one-sdk pack"
   },
   "devDependencies": {
-    "@dcl/js-runtime": "7.24.5",
-    "@dcl/sdk": "7.24.5",
-    "typescript": "5.9.3"
+    "@dcl/js-runtime": "7.26.0",
+    "@dcl/sdk": "7.26.0",
+    "typescript": "6.0.3"
   },
   "engines": {
-    "node": ">=16",
-    "npm": ">=6"
+    "node": ">=24",
+    "npm": ">=11"
   }
 }

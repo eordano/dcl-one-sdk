@@ -1,0 +1,14 @@
+{
+  "name": "@dcl/pbmin",
+  "version": "1.0.0",
+  "description": "Dependency-free drop-in replacement for protobufjs/minimal (Reader/Writer wire codec only)",
+  "main": "index.js",
+  "module": "index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./index.mjs", "require": "./index.js", "default": "./index.js" },
+    "./minimal": { "types": "./index.d.ts", "import": "./index.mjs", "require": "./index.js", "default": "./index.js" }
+  },
+  "sideEffects": false,
+  "license": "BSD-3-Clause"
+}

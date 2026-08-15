@@ -6,12 +6,13 @@ use crate::joinblock;
 use crate::netinfo;
 use axum::{
     extract::{ws::Message, Path as AxPath, Request, State, WebSocketUpgrade},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
     Json,
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
+use std::path::Path;
 use std::sync::Arc;
 
 pub(super) async fn mobile_preview(State(st): State<Arc<AppState>>) -> Response {
@@ -41,6 +42,20 @@ fn editor_disabled() -> Response {
     (
         StatusCode::NOT_FOUND,
         "the visual editor is off \u{2014} restart with: dcl-one-sdk start --data-layer",
+    )
+        .into_response()
+}
+
+/// The data layer is up but there is no browser bundle to serve from it.
+///
+/// This is the default state now: the blob ships the data-layer host and not
+/// the 18 MB editor UI. `/data-layer` works; only `/inspector/*` does not.
+fn editor_ui_missing() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        "the data layer is running on /data-layer, but the editor UI (@dcl/inspector) \
+         is not installed \u{2014} npm install --save-dev @dcl/inspector, or set \
+         DCL_ONE_INSPECTOR_DIR=<path-to-an-@dcl/inspector-package>",
     )
         .into_response()
 }
@@ -152,7 +167,10 @@ pub(super) async fn inspector_index(
     let Some(dl) = &st.data_layer else {
         return editor_disabled();
     };
-    let index = dl.public_dir.join("index.html");
+    let Some(public_dir) = &dl.public_dir else {
+        return editor_ui_missing();
+    };
+    let index = public_dir.join("index.html");
     let html = match tokio::fs::read_to_string(&index).await {
         Ok(html) => html,
         Err(_) => {
@@ -183,31 +201,50 @@ pub(super) async fn inspector_asset(
     let Some(dl) = &st.data_layer else {
         return editor_disabled();
     };
-    if path.split('/').any(|seg| seg == "..") {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
     if path.is_empty() || path == "index.html" {
         return inspector_index(State(st.clone()), headers).await;
     }
-    let base = dunce::canonicalize(&dl.public_dir).unwrap_or_else(|_| dl.public_dir.clone());
-    let Ok(full) = dunce::canonicalize(dl.public_dir.join(&path)) else {
+    let Some(public_dir) = &dl.public_dir else {
+        return editor_ui_missing();
+    };
+    let Some(asset) = data_layer::resolve_asset(public_dir, &path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    if !full.starts_with(&base) {
+    let (full, stored_gzipped) = match asset {
+        data_layer::Asset::Plain(p) => (p, false),
+        data_layer::Asset::Gzipped(p) => (p, true),
+    };
+    let Ok(mut bytes) = tokio::fs::read(&full).await else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    // The mime comes from the request path, not the file: `bundle.js.gz` on
+    // disk is still `application/javascript` on the wire.
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(data_layer::inspector_mime(Path::new(&path))),
+    );
+    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if stored_gzipped {
+        out.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+        let accepted = data_layer::accepts_gzip(
+            headers
+                .get(header::ACCEPT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+        );
+        if accepted {
+            out.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        } else {
+            // Rare, but a client that will not take gzip must still get the
+            // editor rather than a broken bundle.
+            match data_layer::gunzip(&bytes) {
+                Ok(plain) => bytes = plain,
+                Err(e) => {
+                    tracing::warn!("could not decompress {}: {e}", full.display());
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "asset unreadable").into_response();
+                }
+            }
+        }
     }
-    match tokio::fs::read(&full).await {
-        Ok(bytes) => (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    data_layer::inspector_mime(&full).to_string(),
-                ),
-                (header::CACHE_CONTROL, "no-cache".to_string()),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
-    }
+    (out, bytes).into_response()
 }

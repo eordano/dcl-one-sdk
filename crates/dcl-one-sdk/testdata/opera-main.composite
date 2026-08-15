@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "components": [
+    {
+      "name": "core::Transform",
+      "data": {
+        "512": {
+          "json": {
+            "position": { "x": 16, "y": 0.01, "z": 16 },
+            "rotation": { "x": 0, "y": 0, "z": 0, "w": 1 },
+            "scale": { "x": 32, "y": 0.02, "z": 32 },
+            "parent": 0
+          }
+        },
+        "513": {
+          "json": {
+            "position": { "x": 16, "y": 3, "z": 16 },
+            "rotation": { "x": 0, "y": 0, "z": 0, "w": 1 },
+            "scale": { "x": 1, "y": 1, "z": 1 },
+            "parent": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "core::MeshRenderer",
+      "data": {
+        "512": { "json": { "mesh": { "$case": "box", "box": { "uvs": [] } } } }
+      }
+    },
+    {
+      "name": "core::MeshCollider",
+      "data": {
+        "512": { "json": { "mesh": { "$case": "box", "box": {} }, "collisionMask": 3 } }
+      }
+    },
+    {
+      "name": "core::Material",
+      "data": {
+        "512": {
+          "json": {
+            "material": {
+              "$case": "pbr",
+              "pbr": {
+                "albedoColor": { "r": 0.02, "g": 0.03, "b": 0.05, "a": 1 },
+                "emissiveColor": { "r": 0.01, "g": 0.02, "b": 0.03 },
+                "emissiveIntensity": 0.2,
+                "metallic": 0,
+                "roughness": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "core::AvatarModifierArea",
+      "data": {
+        "513": {
+          "json": {
+            "area": { "x": 14, "y": 6, "z": 14 },
+            "excludeIds": [],
+            "modifiers": [0, 1]
+          }
+        }
+      }
+    }
+  ]
+}

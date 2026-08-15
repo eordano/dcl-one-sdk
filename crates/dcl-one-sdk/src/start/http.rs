@@ -25,6 +25,16 @@ pub(super) async fn root(State(st): State<Arc<AppState>>, req: axum::extract::Re
         .map(|v| v.eq_ignore_ascii_case("websocket"))
         .unwrap_or(false);
     if !is_ws {
+        // Browsers get a human-readable landing page; everything else (curl,
+        // explorer probes) keeps the historical redirect to the realm manifest.
+        let accepts_html = req
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|a| a.contains("text/html"));
+        if accepts_html {
+            return super::landing::page(&st, req.headers());
+        }
         let prefix = forwarded_prefix(req.headers());
         return Redirect::temporary(&format!("{prefix}/about")).into_response();
     }
@@ -141,7 +151,15 @@ pub(super) async fn contents(
     headers: HeaderMap,
 ) -> Response {
     let Some(path_str) = b64_unhash(&hash, &st.machine) else {
-        return (StatusCode::NOT_FOUND, "unknown hash format").into_response();
+        // Not a local preview hash (Qm…/bafy… from wearables, emotes, profile
+        // snapshots): back-up fetch from the upstream catalyst, LRU-cached in
+        // the scene's .dcl-cache.
+        let cache_dir = st
+            .projects
+            .first()
+            .map(|p| p.root.join(".dcl-cache").join("contents"));
+        return super::proxy::contents_upstream(method, &hash, &headers, cache_dir.as_deref())
+            .await;
     };
     let path = PathBuf::from(&path_str);
     let Ok(canonical) = dunce::canonicalize(&path) else {
@@ -348,7 +366,43 @@ pub(super) async fn entities_active(
                 .collect()
         })
         .unwrap_or_default();
-    Json(Value::Array(entities_for(&st, &pointers)))
+    let mut entities = entities_for(&st, &pointers);
+    let missing = unmatched_pointers(&entities, &pointers);
+    if !missing.is_empty() {
+        entities.extend(super::proxy::entities_active_upstream(&missing).await);
+    }
+    Json(Value::Array(entities))
+}
+
+/// Requested pointers no local entity covers; these resolve upstream.
+/// Parcel pointers never go upstream — they would resolve to the production
+/// scene at those coordinates (Genesis Plaza) instead of the local preview.
+fn unmatched_pointers(entities: &[Value], pointers: &[String]) -> Vec<String> {
+    pointers
+        .iter()
+        .filter(|q| !is_parcel_pointer(q))
+        .filter(|q| {
+            !entities.iter().any(|e| {
+                e.get("pointers")
+                    .and_then(|p| p.as_array())
+                    .is_some_and(|arr| {
+                        arr.iter()
+                            .any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(q)))
+                    })
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn is_parcel_pointer(p: &str) -> bool {
+    let mut it = p.split(',');
+    match (it.next(), it.next(), it.next()) {
+        (Some(x), Some(y), None) => {
+            x.trim().parse::<i32>().is_ok() && y.trim().parse::<i32>().is_ok()
+        }
+        _ => false,
+    }
 }
 
 pub(super) async fn entities_scene(
@@ -364,4 +418,45 @@ pub(super) async fn entities_scene(
         })
         .unwrap_or_default();
     Json(Value::Array(entities_for(&st, &pointers)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmatched_pointers_splits_local_from_upstream() {
+        let local = vec![json!({ "pointers": ["0,0", "0,1"] })];
+        let asked = vec![
+            "0,0".to_string(),
+            "0,1".to_string(),
+            "urn:decentraland:off-chain:base-avatars:BaseMale".to_string(),
+        ];
+        assert_eq!(
+            unmatched_pointers(&local, &asked),
+            vec!["urn:decentraland:off-chain:base-avatars:BaseMale".to_string()]
+        );
+        assert!(unmatched_pointers(&local, &["0,0".to_string()]).is_empty());
+        // Catalysts lowercase pointers; matching must be case-insensitive.
+        assert!(unmatched_pointers(&local, &[]).is_empty());
+        let mixed = vec![json!({ "pointers": ["urn:x:Y"] })];
+        assert!(unmatched_pointers(&mixed, &["urn:x:y".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn parcel_pointers_never_go_upstream() {
+        let local = vec![json!({ "pointers": ["0,0"] })];
+        // A parcel the local scene does not cover must NOT resolve upstream:
+        // it would return the production scene at those coordinates.
+        assert!(unmatched_pointers(&local, &["5,-12".to_string()]).is_empty());
+        assert!(unmatched_pointers(&local, &[" -3 , 4 ".to_string()]).is_empty());
+        // URNs are not parcels.
+        assert!(is_parcel_pointer("0,0"));
+        assert!(is_parcel_pointer("-73,50"));
+        assert!(!is_parcel_pointer(
+            "urn:decentraland:off-chain:base-avatars:BaseMale"
+        ));
+        assert!(!is_parcel_pointer("0,0,0"));
+        assert!(!is_parcel_pointer("main.crdt"));
+    }
 }

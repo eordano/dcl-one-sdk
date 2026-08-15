@@ -1,8 +1,11 @@
 [package]
 name = "dcl-one-sdk"
-version = "0.11.1"
+version = "0.16.5"
 edition = "2021"
 description = "Binary-compatible Rust replacement for @dcl/sdk-commands: bundle (rolldown, in-process), preview-serve, and deploy Decentraland SDK7 scenes"
+# Same dual terms as abgen, so embedding the converter in-process later is a
+# licensing no-op rather than a relicensing event.
+license = "Apache-2.0 OR AGPL-3.0-or-later"
 
 [[bin]]
 name = "dcl-one-sdk"
@@ -11,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 catalyrst-hashing = { workspace = true }
 catalyrst-crypto = { workspace = true }
+catalyrst-types = { workspace = true }
 catalyrst-preview-tunnel = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
@@ -20,6 +24,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 dunce = "1"
+flate2 = "1"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
@@ -27,18 +32,22 @@ futures = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }
 if-addrs = "=0.15.0"
-ignore = "0.4.23"
+ignore = "0.4.32"
 notify = "8"
 prost = "0.14"
 qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 rand = "0.10"
 tokio-tungstenite = { workspace = true }
-rolldown = { version = "=1.2.0", optional = true }
-rolldown_common = { version = "=1.2.0", optional = true }
-rolldown_utils = { version = "=1.2.0", optional = true }
+rolldown = { version = "=1.2.2", optional = true }
+rolldown_common = { version = "=1.2.2", optional = true }
+rolldown_utils = { version = "=1.2.2", optional = true }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+catalyrst-testgate = { workspace = true }
 hex = "0.4"
 
 [features]
@@ -47,3 +56,5 @@ rolldown = ["dep:rolldown", "dep:rolldown_common", "dep:rolldown_utils"]
 
 [build-dependencies]
 prost-build = "0.14"
+prost = "0.14"
+prost-types = "0.14"

@@ -6,6 +6,10 @@
 'use strict'
 
 var __dclOneSdkChunkPath = '__DCL_ONE_SDK_CHUNK__'
+// Empty unless this scene uses smart items. The smart-item runtime is a second
+// registry chunk layered over the first, so a scene without smart items never
+// ships, reads, decodes or evaluates it.
+var __dclOneSmartChunkPath = '__DCL_ONE_SMART_CHUNK__'
 var __dclOneSceneChunkPath = '__DCL_ONE_SCENE_CHUNK__'
 var __dclOneSceneModule = null
 
@@ -47,6 +51,32 @@ function __dclOneMakeRequire(__dclOneRegistry, __dclOneHostRequire) {
   }
 }
 
+// Layer one registry over another, later wins. Property *descriptors* are copied,
+// not values: registry entries are lazy getters (`@dcl/sdk/platform` calls the
+// host at module scope, so reading one eagerly here would run it before the scene
+// starts), and the generated registries mark them configurable so the second
+// defineProperty of the same key is legal. The one key that is deliberately in
+// both chunks is '~sdk/script-utils' — core has the no-op stub, smart has the
+// real runScripts runtime — so this shadowing is what makes smart items run.
+function __dclOneOverlay(__dclOneBase, __dclOneTop) {
+  var __dclOneOut = {}
+  __dclOneCopyDescriptors(__dclOneOut, __dclOneBase)
+  __dclOneCopyDescriptors(__dclOneOut, __dclOneTop)
+  return __dclOneOut
+}
+
+function __dclOneCopyDescriptors(__dclOneTarget, __dclOneSource) {
+  var __dclOneKeys = Object.keys(__dclOneSource)
+  for (var __dclOneI = 0; __dclOneI < __dclOneKeys.length; __dclOneI++) {
+    var __dclOneKey = __dclOneKeys[__dclOneI]
+    Object.defineProperty(
+      __dclOneTarget,
+      __dclOneKey,
+      Object.getOwnPropertyDescriptor(__dclOneSource, __dclOneKey)
+    )
+  }
+}
+
 // DIRECT eval, never new Function: the web sandbox provides console/fetch/Deno/etc.
 // as lexical preamble consts of the stub wrapper, and only direct eval keeps them
 // on the chunk's scope chain (hazard 8.4). The sourceURL suffix names the chunk in
@@ -80,11 +110,26 @@ module.exports.onStart = async function () {
   var __dclOneSceneSrc = __dclOneDecode(
     (await __dclOneRuntime.readFile({ fileName: __dclOneSceneChunkPath })).content
   )
+  var __dclOneSmartSrc = __dclOneSmartChunkPath
+    ? __dclOneDecode(
+        (await __dclOneRuntime.readFile({ fileName: __dclOneSmartChunkPath })).content
+      )
+    : null
   var __dclOneRegistry = __dclOneEvalChunk(
     __dclOneSdkSrc,
     __dclOneSdkChunkPath,
     __dclOneMakeRequire({}, require)
   )
+  if (__dclOneSmartSrc !== null) {
+    __dclOneRegistry = __dclOneOverlay(
+      __dclOneRegistry,
+      __dclOneEvalChunk(
+        __dclOneSmartSrc,
+        __dclOneSmartChunkPath,
+        __dclOneMakeRequire(__dclOneRegistry, require)
+      )
+    )
+  }
   var __dclOneScene = __dclOneEvalChunk(
     __dclOneSceneSrc,
     __dclOneSceneChunkPath,

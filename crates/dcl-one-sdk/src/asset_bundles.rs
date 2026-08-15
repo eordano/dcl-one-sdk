@@ -3,8 +3,10 @@ use std::time::{Duration, Instant};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// abgen ships inside this binary, so a failure here is the sidecar itself
+/// misbehaving, not a missing install — say what to do about that instead.
 const INSTALL_HINT: &str =
-    "install the @dcl/abgen npm package or set ABGEN_BIN; --no-asset-bundles silences this";
+    "ABGEN_BIN overrides the embedded copy; --no-asset-bundles silences this";
 
 fn env_or(name: &str, default: String) -> String {
     match std::env::var(name) {
@@ -53,51 +55,26 @@ fn three_quarter_cpus() -> usize {
     (n * 3).div_ceil(4).max(1)
 }
 
-fn npm_bin(project_root: &Path) -> Option<PathBuf> {
-    let platform = if cfg!(target_os = "windows") {
-        "win32"
-    } else if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        return None;
-    };
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x64"
-    } else if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        return None;
-    };
-    let bin = if cfg!(target_os = "windows") {
-        "abgen.exe"
-    } else {
-        "abgen"
-    };
-    let p = project_root
-        .join("node_modules")
-        .join("@dcl")
-        .join(format!("abgen-{platform}-{arch}"))
-        .join(bin);
-    p.is_file().then_some(p)
-}
-
-fn pick_bin(env_bin: Option<String>, embedded: Option<PathBuf>, npm: Option<PathBuf>) -> String {
+fn pick_bin(env_bin: Option<String>, embedded: Option<PathBuf>) -> String {
     if let Some(v) = env_bin.filter(|v| !v.is_empty()) {
         return v;
     }
-    if let Some(p) = embedded.or(npm) {
-        return p.display().to_string();
+    match embedded {
+        Some(p) => p.display().to_string(),
+        // Only reachable if the embed failed to unpack (a full or read-only
+        // temp dir), which already printed why. PATH is the last thing left to
+        // try before giving up on asset bundles for this run.
+        None => "abgen".to_string(),
     }
-    "abgen".to_string()
 }
 
-pub fn resolve_bin(project_root: &Path) -> String {
+/// The abgen the sidecar runs. Every dcl-one-sdk binary embeds one, so this
+/// needs no install step and has no per-scene lookup; ABGEN_BIN overrides it
+/// for advanced use — a locally built abgen, a bisect, a test.
+pub fn resolve_bin() -> String {
     pick_bin(
         std::env::var("ABGEN_BIN").ok(),
         crate::abgen_embed::ensure_extracted(),
-        npm_bin(project_root),
     )
 }
 
@@ -207,7 +184,7 @@ fn looks_like_problem(line: &str) -> bool {
 }
 
 pub fn spawn_sidecar(preview_port: u16, project_root: &Path) -> Option<Sidecar> {
-    let bin = resolve_bin(project_root);
+    let bin = resolve_bin();
     let port = sidecar_port()?;
     let url = format!("http://127.0.0.1:{port}");
     // Conversion output lives next to scene.json: watcher-ignored (or hot
@@ -435,26 +412,39 @@ mod tests {
     }
 
     #[test]
-    fn pick_bin_precedence_is_env_then_embedded_then_npm_then_path() {
+    fn abgen_bin_overrides_the_embedded_copy() {
         let embedded = PathBuf::from("/tmp/embedded/abgen");
-        let npm = PathBuf::from("/scene/node_modules/@dcl/abgen-linux-x64/abgen");
         assert_eq!(
-            pick_bin(
-                Some("/custom/abgen".into()),
-                Some(embedded.clone()),
-                Some(npm.clone())
-            ),
+            pick_bin(Some("/custom/abgen".into()), Some(embedded.clone())),
             "/custom/abgen"
         );
+        // An empty ABGEN_BIN is the same as unset, not a request to run "".
         assert_eq!(
-            pick_bin(None, Some(embedded.clone()), Some(npm.clone())),
+            pick_bin(Some(String::new()), Some(embedded.clone())),
             embedded.display().to_string()
         );
         assert_eq!(
-            pick_bin(Some(String::new()), None, Some(npm.clone())),
-            npm.display().to_string()
+            pick_bin(None, Some(embedded.clone())),
+            embedded.display().to_string()
         );
-        assert_eq!(pick_bin(None, None, None), "abgen");
+        assert_eq!(pick_bin(None, None), "abgen");
+    }
+
+    #[test]
+    fn resolve_bin_lands_on_the_embedded_abgen_without_any_install() {
+        // Guards the whole point of the embed: no scene, no PATH entry, no npm
+        // package, and `start` still has an executable to run.
+        let prev = std::env::var("ABGEN_BIN").ok();
+        std::env::remove_var("ABGEN_BIN");
+        let bin = resolve_bin();
+        if let Some(v) = prev {
+            std::env::set_var("ABGEN_BIN", v);
+        }
+        assert_ne!(
+            bin, "abgen",
+            "resolved to bare PATH; the embed did not unpack"
+        );
+        assert!(Path::new(&bin).is_file(), "{bin} is not a file");
     }
 
     #[cfg(unix)]
@@ -490,38 +480,33 @@ mod tests {
         kill_process_group(pgid);
     }
 
+    /// The scene's own `@dcl/abgen` platform package used to be part of the
+    /// lookup chain. It no longer is: the binary carries abgen, so a scene that
+    /// happens to have that package installed must not silently swap the
+    /// sidecar for a different version.
     #[test]
-    fn npm_bin_finds_the_platform_package_binary() {
+    fn an_npm_abgen_in_the_scene_is_ignored() {
         let root = std::env::temp_dir().join(format!(
-            "dcl-one-sdk-npm-bin-test-{}-{:x}",
+            "dcl-one-sdk-npm-abgen-{}-{:x}",
             std::process::id(),
             rand::random::<u64>()
         ));
-        assert_eq!(npm_bin(&root), None);
-        let platform = if cfg!(target_os = "windows") {
-            "win32"
-        } else if cfg!(target_os = "macos") {
-            "darwin"
-        } else {
-            "linux"
-        };
-        let arch = if cfg!(target_arch = "x86_64") {
-            "x64"
-        } else {
-            "arm64"
-        };
-        let bin_name = if cfg!(target_os = "windows") {
-            "abgen.exe"
-        } else {
-            "abgen"
-        };
         let pkg = root
             .join("node_modules")
             .join("@dcl")
-            .join(format!("abgen-{platform}-{arch}"));
+            .join("abgen-darwin-arm64");
         std::fs::create_dir_all(&pkg).unwrap();
-        std::fs::write(pkg.join(bin_name), b"").unwrap();
-        assert_eq!(npm_bin(&root), Some(pkg.join(bin_name)));
+        std::fs::write(pkg.join("abgen"), b"").unwrap();
+        let prev = std::env::var("ABGEN_BIN").ok();
+        std::env::remove_var("ABGEN_BIN");
+        let bin = resolve_bin();
+        if let Some(v) = prev {
+            std::env::set_var("ABGEN_BIN", v);
+        }
+        assert!(
+            !bin.contains("node_modules"),
+            "resolved to the scene's npm abgen: {bin}"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

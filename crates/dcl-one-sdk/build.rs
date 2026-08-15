@@ -216,35 +216,48 @@ fn camel_case(snake: &str) -> String {
     }
 }
 
+/// Embed the abgen sidecar. Unconditional: every dcl-one-sdk binary carries a
+/// working asset-bundle server, so `start` never has to tell a user to go
+/// install one. The bytes come from the release pinned in abgen-release.lock
+/// (downloaded into a shared cache and sha256-verified) unless ABGEN_EMBED_BIN
+/// names a different abgen — the escape hatch for offline builds, nix, and
+/// anyone testing an abgen they built themselves.
+///
+/// Files are stored deflate-compressed: the macOS arm64 abgen is 36 MB on disk
+/// and 13 MB compressed, and paying a few ms of inflate on first `start` beats
+/// putting the difference in every binary.
 fn generate_abgen_embed() -> Result<()> {
     println!("cargo:rerun-if-env-changed=ABGEN_EMBED_BIN");
-    let dest =
-        PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("abgen_embed_data.rs");
-    let bin = std::env::var("ABGEN_EMBED_BIN").unwrap_or_default();
-    if bin.is_empty() {
-        return std::fs::write(
-            &dest,
-            "pub static FILES: &[(&str, &[u8])] = &[];\npub const BIN_NAME: &str = \"\";\npub const TAG: &str = \"\";\n",
-        );
-    }
-    let bin_path = PathBuf::from(&bin);
+    println!("cargo:rerun-if-env-changed=ABGEN_EMBED_CACHE");
+    println!("cargo:rerun-if-changed=abgen-release.lock");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let dest = out_dir.join("abgen_embed_data.rs");
+
+    let (bin_path, version) = match std::env::var("ABGEN_EMBED_BIN").unwrap_or_default() {
+        v if v.is_empty() => {
+            let lock = AbgenLock::read()?;
+            (fetch_pinned_abgen(&lock)?, lock.version)
+        }
+        v => {
+            let p = PathBuf::from(&v);
+            if !p.is_file() {
+                panic!("ABGEN_EMBED_BIN={v} is not a file; it must point at an abgen executable");
+            }
+            (p, "custom".to_string())
+        }
+    };
     let bin_name = bin_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .expect("ABGEN_EMBED_BIN has no file name");
     let dir = bin_path.parent().map(Path::to_path_buf).unwrap_or_default();
-    if !bin_path.is_file() || !dir.join("template").is_dir() || !dir.join("shader").is_dir() {
-        panic!(
-            "ABGEN_EMBED_BIN={bin} must point at the abgen binary inside an unpacked abgen release archive (template/ and shader/ next to the binary); unset it to build without the embed"
-        );
-    }
+
+    // A release abgen is one self-contained executable. A source build may sit
+    // beside template/ and shader/ (its ABGEN_ROOT layout) and, on windows,
+    // loose DLLs; carry those along when they happen to be there.
     let mut rels = vec![bin_name.clone()];
     for sub in ["template", "shader"] {
-        for entry in std::fs::read_dir(dir.join(sub))?.flatten() {
-            if entry.path().is_file() {
-                rels.push(format!("{sub}/{}", entry.file_name().to_string_lossy()));
-            }
-        }
+        collect_files(&dir.join(sub), sub, &mut rels)?;
     }
     for entry in std::fs::read_dir(&dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -253,22 +266,232 @@ fn generate_abgen_embed() -> Result<()> {
         }
     }
     rels.sort();
+    rels.dedup();
+
+    let blob_dir = out_dir.join("abgen-embed");
+    std::fs::create_dir_all(&blob_dir)?;
     let mut hash: u64 = 0xcbf29ce484222325;
-    let mut code = String::from("pub static FILES: &[(&str, &[u8])] = &[\n");
-    for rel in &rels {
+    let mut code = String::from(
+        "/// (path relative to the extraction root, deflate stream, uncompressed length)\npub static FILES: &[(&str, &[u8], usize)] = &[\n",
+    );
+    for (i, rel) in rels.iter().enumerate() {
         let abs = dir.join(rel);
         println!("cargo:rerun-if-changed={}", abs.display());
+        let raw = std::fs::read(&abs)?;
         fnv1a64(&mut hash, rel.as_bytes());
-        fnv1a64(&mut hash, &std::fs::read(&abs)?);
+        fnv1a64(&mut hash, &raw);
+        let blob = blob_dir.join(format!("{i}.z"));
+        std::fs::write(&blob, deflate(&raw))?;
         code.push_str(&format!(
-            "    ({rel:?}, include_bytes!({:?})),\n",
-            abs.display().to_string()
+            "    ({rel:?}, include_bytes!({:?}), {}),\n",
+            blob.display().to_string(),
+            raw.len()
         ));
     }
     code.push_str("];\n");
     code.push_str(&format!("pub const BIN_NAME: &str = {bin_name:?};\n"));
+    code.push_str(&format!("pub const VERSION: &str = {version:?};\n"));
     code.push_str(&format!("pub const TAG: &str = \"{hash:016x}\";\n"));
     std::fs::write(&dest, code)
+}
+
+fn deflate(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    e.write_all(raw).expect("deflate");
+    e.finish().expect("deflate")
+}
+
+fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let rel = format!("{prefix}/{name}");
+        if entry.path().is_dir() {
+            collect_files(&entry.path(), &rel, out)?;
+        } else if entry.path().is_file() {
+            out.push(rel);
+        }
+    }
+    Ok(())
+}
+
+struct AbgenLock {
+    version: String,
+    url: String,
+    /// abgen release target -> sha256 of its archive
+    targets: std::collections::BTreeMap<String, String>,
+}
+
+impl AbgenLock {
+    fn read() -> Result<Self> {
+        let text = std::fs::read_to_string("abgen-release.lock")?;
+        let mut version = String::new();
+        let mut url = String::new();
+        let mut targets = std::collections::BTreeMap::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let (k, v) = (k.trim().to_string(), v.trim().to_string());
+            match k.as_str() {
+                "version" => version = v,
+                "url" => url = v,
+                _ => {
+                    targets.insert(k, v);
+                }
+            }
+        }
+        assert!(
+            !version.is_empty() && !url.is_empty() && !targets.is_empty(),
+            "abgen-release.lock is missing version, url or target hashes"
+        );
+        Ok(AbgenLock {
+            version,
+            url,
+            targets,
+        })
+    }
+
+    /// The abgen release target for the crate's build target. abgen ships a
+    /// standalone executable, so *-msvc maps to the -gnu archive: nothing links
+    /// against it.
+    fn release_target(&self) -> String {
+        let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        match (os.as_str(), arch.as_str()) {
+            ("macos", "aarch64") => "aarch64-apple-darwin",
+            ("macos", "x86_64") => "x86_64-apple-darwin",
+            ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+            ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+            ("windows", "aarch64") => "aarch64-pc-windows-gnullvm",
+            ("windows", "x86_64") => "x86_64-pc-windows-gnu",
+            _ => panic!(
+                "abgen publishes no release for {os}/{arch}; build an abgen for it and point ABGEN_EMBED_BIN at the executable"
+            ),
+        }
+        .to_string()
+    }
+}
+
+/// Download (once, into a shared cache) and unpack the pinned abgen release for
+/// this build target, returning the path to its executable.
+fn fetch_pinned_abgen(lock: &AbgenLock) -> Result<PathBuf> {
+    let target = lock.release_target();
+    let sha = lock.targets.get(&target).unwrap_or_else(|| {
+        panic!("abgen-release.lock has no sha256 for target {target}");
+    });
+    let cache = abgen_cache_dir().join(&lock.version).join(&target);
+    let exe = if target.contains("windows") {
+        "abgen.exe"
+    } else {
+        "abgen"
+    };
+    let unpacked = cache.join(exe);
+    if unpacked.is_file() {
+        return Ok(unpacked);
+    }
+    std::fs::create_dir_all(&cache)?;
+
+    let url = lock
+        .url
+        .replace("{version}", &lock.version)
+        .replace("{target}", &target);
+    let archive = cache.join(format!("archive.tar.gz.{}", std::process::id()));
+    // cargo replays a build script's warnings on cached runs, so word this as
+    // what happened once, not as what is happening now.
+    println!(
+        "cargo:warning=downloaded pinned abgen {} for {target} into {}",
+        lock.version,
+        cache.display()
+    );
+    let status = std::process::Command::new("curl")
+        .args(["-fsSL", "--retry", "3", "--retry-delay", "2", "-o"])
+        .arg(&archive)
+        .arg(&url)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        other => {
+            let _ = std::fs::remove_file(&archive);
+            panic!(
+                "could not download the pinned abgen from {url} ({other:?}).\n\
+                 dcl-one-sdk always embeds abgen; to build without network access, unpack that \
+                 archive yourself and set ABGEN_EMBED_BIN=<dir>/{exe}"
+            );
+        }
+    }
+
+    let got = sha256_hex(&std::fs::read(&archive)?);
+    if &got != sha {
+        let _ = std::fs::remove_file(&archive);
+        panic!("{url} hashed to {got}, but abgen-release.lock pins {sha}");
+    }
+
+    // Unpack into a private staging dir, then publish the executable with a
+    // rename so two concurrent cargo builds cannot see a half-written binary.
+    let stage = cache.join(format!("stage.{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)?;
+    let status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&stage)
+        .status()?;
+    assert!(
+        status.success(),
+        "tar failed to unpack {}",
+        archive.display()
+    );
+    let mut found = Vec::new();
+    collect_files(&stage, "", &mut found)?;
+    let rel = found
+        .iter()
+        .find(|r| r.rsplit('/').next() == Some(exe))
+        .unwrap_or_else(|| panic!("no {exe} inside {url}"));
+    let staged = stage.join(rel.trim_start_matches('/'));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&staged, &unpacked)?;
+    let _ = std::fs::remove_dir_all(&stage);
+    let _ = std::fs::remove_file(&archive);
+    Ok(unpacked)
+}
+
+/// Shared across every checkout and target dir on the machine — a 13 MB
+/// download per abgen release, not per `cargo clean`.
+fn abgen_cache_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("ABGEN_EMBED_CACHE") {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    if let Ok(v) = std::env::var("CARGO_HOME") {
+        if !v.is_empty() {
+            return PathBuf::from(v).join("dcl-one-sdk-abgen");
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cache").join("dcl-one-sdk-abgen")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn fnv1a64(hash: &mut u64, bytes: &[u8]) {

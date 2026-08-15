@@ -2,6 +2,14 @@ mod content_cache;
 mod editor;
 mod http;
 mod landing;
+
+/// Whether a worlds host is configured, for callers outside this module.
+///
+/// `joinblock` needs it to decide whether advertising the `/world/…` mirror is
+/// honest: the mirror answers 501 when this is false (see `proxy::world_base`).
+pub fn world_base_configured() -> bool {
+    proxy::world_base().is_some()
+}
 pub(crate) mod proxy;
 
 use crate::build::{self, BuildOptions};
@@ -23,7 +31,10 @@ use axum::{
     Router,
 };
 use editor::{data_layer_ws, inspector_asset, inspector_index, inspector_redirect, mobile_preview};
-use http::{about, contents, entities_active, entities_scene, root, scene_id_for, scenes};
+use http::{
+    about, contents, entities_active, entities_scene, feature_flags, preview_wearables, root,
+    scene_id_for, scene_json, scenes,
+};
 use proxy::{
     entities_deploy_proxy, explorer_proxy, lambdas_contracts_servers, lambdas_explore_realms,
     lambdas_proxy, world_about, world_content,
@@ -158,6 +169,11 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .route("/", get(root))
         .route("/about", get(about))
         .route("/scenes", get(scenes))
+        // Upstream sdk-commands parity (endpoints.js): scene.json off disk, the
+        // deprecated wearables listing, and the feature-flag CORS hop.
+        .route("/scene.json", get(scene_json))
+        .route("/preview-wearables", get(preview_wearables))
+        .route("/feature-flags/{file}", get(feature_flags))
         .route("/content/contents/{hash}", get(contents).head(contents))
         .route("/content/entities/active", post(entities_active))
         .route("/content/entities/scene", get(entities_scene))

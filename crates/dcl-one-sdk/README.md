@@ -56,15 +56,28 @@ backward-compatible with them.
   `--data-layer` enables the visual editor (Creator Hub section). An abgen
   asset-bundle sidecar runs by default on 5147 (abgen's canonical port;
   taken = random fallback — either way the desktop deep link carries
-  `optimized-assets-url=<sidecar>` once `/readyz` passes). The binary
-  resolves in order from `ABGEN_BIN`, the abgen embedded at compile time
-  (`src/abgen_embed.rs`: release builds set `ABGEN_EMBED_BIN` to an
-  unpacked abgen release archive — server binary with `template/` +
-  `shader/` siblings, the exe-dir fallback needs no env; it extracts under
-  `<temp>/dcl-abgen/bin/<content-tag>/`, reused byte-verified across runs —
-  that path holds ONLY the extracted binary, never conversion output; unset
-  at compile time = empty embed, dev builds stay fast), the scene's
-  `@dcl/abgen` npm platform package, then PATH. Conversion output + JIT
+  `optimized-assets-url=<sidecar>` once `/readyz` passes). EVERY build
+  embeds abgen — `cargo build` too, no optionality: `abgen-release.lock`
+  pins an upstream release plus a per-target archive sha256, and build.rs
+  downloads it into `$CARGO_HOME/dcl-one-sdk-abgen` (or
+  `ABGEN_EMBED_CACHE`), verifies the hash, and embeds the executable
+  deflate-compressed (13 MB in-binary for 36 MB on disk). A release abgen is
+  ONE self-contained file — templates and shaders are compiled into it
+  (`/health`: `template_ok: true, templates_missing: []`), so no `template/`
+  or `shader/` siblings are needed. `export-overlay/flake.nix` parses the
+  same lock and `fetchurl`s the same archive, so nix and cargo builds carry
+  identical bytes; `scripts/pin-abgen.sh <tag>` repins from the release's own
+  SHA256SUMS.txt. `ABGEN_EMBED_BIN=<path>` embeds a different abgen instead
+  of downloading (offline builds, musl hosts — the pinned Linux archives are
+  glibc-linked — an abgen from source). At run time only `ABGEN_BIN`
+  overrides the embedded copy; the scene's `@dcl/abgen` npm package and PATH
+  are NOT consulted, so a scene cannot silently swap the sidecar version.
+  Extraction is under `<temp>/dcl-abgen/bin/<content-tag>/`, reused across
+  runs (a length check against the embedded raw size; the tag already pins
+  content) and serialized by a process mutex with a pid+counter staging
+  name — pid alone is not unique between threads, and two callers used to
+  truncate each other's staging file and publish a 0-byte abgen. That path
+  holds ONLY the extracted binary, never conversion output. Conversion output + JIT
   cache live IN the scene: `.dcl-optimized-assets/{out,cache}`
   (watcher-ignored — hot reload would loop on abgen's revalidation writes —
   and never deployed). Every `ABGEN_*` var the SDK sets is env-wins (export
@@ -81,16 +94,24 @@ backward-compatible with them.
   (abgen's auto is right) but exports still pass through. Preview
   back-fill: content hashes the local scene does not own (wearable GLBs,
   emotes, profile snapshots) and unmatched NON-parcel pointers resolve from
-  the upstream catalyst (default `https://interconnected.online`, override
-  `DCL_ONE_SDK_CATALYST`); parcel pointers never go upstream. Fetched
+  `DCL_ONE_SDK_CATALYST`, which defaults to the LOCAL catalyrst content
+  server (`http://127.0.0.1:5141`, `proxy.rs::LOCAL_CATALYST`) — NOT to a
+  public catalyst, so a preview never silently sources its realm from
+  production. Nothing listening there means `/lambdas/profiles` and other
+  back-fill routes return 502 until you name an upstream; that is the
+  intended posture, not a failure. (`https://interconnected.online` is the
+  `deploy` default — `deploy/mod.rs` — and applies to publishing only.)
+  Parcel pointers never go upstream at all. Fetched
   content is LRU-cached in `<scene>/.dcl-cache/contents` (recency = file
   mtime, default 5000 entries, `DCL_ONE_SDK_CONTENT_CACHE_MAX` overrides, 0
   disables), so the next session serves it offline. Sidecar `ABGEN_BUILD`
   json lines are rewritten to
   `abgen build: <file> (<platform>) <ms>, in <size>, out <size>` (the FAIL
-  variant goes to stderr); other sidecar output relays verbatim. A missing
-  or crashing abgen prints a one-line hint and preview starts immediately,
-  and `--no-asset-bundles` turns the sidecar off. `--asset-bundles` (upstream
+  variant goes to stderr); other sidecar output relays verbatim. A crashing
+  abgen prints a one-line hint and preview starts immediately (it can no
+  longer be missing), and `--no-asset-bundles` turns the sidecar off — which
+  is exactly upstream's preview, since upstream has no sidecar at all.
+  `--asset-bundles` (upstream
   7.26.0) hands conversion to the desktop Explorer instead: the sidecar is
   skipped and every desktop deep link carries `local-ab=true`. `--mcp` and
   `--mcp-port N` forward as deep-link params, and anything after a standalone

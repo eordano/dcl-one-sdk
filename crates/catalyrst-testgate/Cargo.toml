@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-testgate"
-version = "0.16.5"
+version = "0.16.6"
 edition = "2021"
 description = "Arms env-gated integration suites: a missing dependency fails the test naming the variable, and skipping requires the explicit ALLOW_SKIPPED_INTEGRATION opt-out"
 

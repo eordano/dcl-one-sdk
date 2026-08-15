@@ -1,6 +1,6 @@
 [package]
 name = "dcl-one-sdk"
-version = "0.16.5"
+version = "0.16.6"
 edition = "2021"
 description = "Binary-compatible Rust replacement for @dcl/sdk-commands: bundle (rolldown, in-process), preview-serve, and deploy Decentraland SDK7 scenes"
 # Same dual terms as abgen, so embedding the converter in-process later is a
@@ -58,3 +58,7 @@ rolldown = ["dep:rolldown", "dep:rolldown_common", "dep:rolldown_utils"]
 prost-build = "0.14"
 prost = "0.14"
 prost-types = "0.14"
+# The abgen embed (see abgen-release.lock): sha2 verifies the pinned release
+# archive, flate2 compresses it before it goes into the binary.
+sha2 = { workspace = true }
+flate2 = "1"

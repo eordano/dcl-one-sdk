@@ -142,7 +142,7 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
             // Never fail the build over the names file: a scene that does not
             // import it does not care, and one that does gets a clear error
             // from the type check a few lines below.
-            Err(e) => ux::note(&format!(
+            Err(e) => ux::note(format!(
                 "could not write {}: {e}",
                 crate::entity_names::OUTPUT_PATH
             )),

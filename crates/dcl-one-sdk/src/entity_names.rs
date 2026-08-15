@@ -43,7 +43,13 @@ const HEADER: &str = "// Auto-generated entity names from the scene\n\n\n/**\n *
 fn enum_key(name: &str) -> Option<String> {
     let mut key: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if key.chars().all(|c| c == '_') {
         return None;
@@ -232,7 +238,10 @@ mod tests {
     #[test]
     fn sanitises_keys_without_touching_values() {
         assert_eq!(enum_key("Admin Tools").as_deref(), Some("Admin_Tools"));
-        assert_eq!(enum_key("base_theatre.glb").as_deref(), Some("base_theatre_glb"));
+        assert_eq!(
+            enum_key("base_theatre.glb").as_deref(),
+            Some("base_theatre_glb")
+        );
         assert_eq!(enum_key("2nd Floor").as_deref(), Some("_2nd_Floor"));
         assert_eq!(enum_key("---"), None);
     }
@@ -247,7 +256,10 @@ mod tests {
     #[test]
     fn no_names_leaves_an_existing_file_alone() {
         let tmp = Tmp::new("empty");
-        tmp.write("assets/scene/main.composite", r#"{"version":1,"components":[]}"#);
+        tmp.write(
+            "assets/scene/main.composite",
+            r#"{"version":1,"components":[]}"#,
+        );
         tmp.write("assets/scene/entity-names.ts", "hand written\n");
         assert_eq!(write_if_changed(&tmp.0).unwrap(), None);
         assert_eq!(
@@ -259,7 +271,10 @@ mod tests {
     #[test]
     fn rewrites_only_when_the_bytes_change() {
         let tmp = Tmp::new("stable");
-        tmp.write("assets/scene/main.composite", &composite_with(&[(512, "Coil")]));
+        tmp.write(
+            "assets/scene/main.composite",
+            &composite_with(&[(512, "Coil")]),
+        );
 
         assert_eq!(write_if_changed(&tmp.0).unwrap(), Some(1));
         let path = tmp.0.join(OUTPUT_PATH);

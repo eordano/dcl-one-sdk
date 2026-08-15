@@ -147,7 +147,7 @@ enum Command {
         mobile: bool,
         #[arg(
             long,
-            help = "Do not run the abgen asset-bundle sidecar. By default start resolves abgen from ABGEN_BIN, then the copy embedded in release binaries, then the scene's @dcl/abgen npm package, then PATH; previews continue with a hint when none is found"
+            help = "Do not run the abgen asset-bundle sidecar. It is on by default and needs no install \u{2014} every dcl-one-sdk binary embeds abgen (ABGEN_BIN runs a different one). Upstream sdk-commands has no sidecar, so this is how to get its unoptimized preview"
         )]
         no_asset_bundles: bool,
         #[arg(

@@ -154,12 +154,25 @@ pub fn deep_link_extra(
 pub const CONTROLLER_WORLD: &str = "basiccontroller.dcl.eth";
 
 pub fn web_join_url(web_explorer: &str, realm: &str, position: (i64, i64)) -> String {
-    format!(
-        "{web_explorer}/?preview=true&realm={realm}&position={},{}&portables={}",
-        position.0,
-        position.1,
-        form_encode(&format!("{realm}/world/{CONTROLLER_WORLD}"))
-    )
+    let base = format!(
+        "{web_explorer}/?preview=true&realm={realm}&position={},{}",
+        position.0, position.1
+    );
+    // Pin the portable only if the mirror can actually serve it. The mirror is
+    // the /world/… proxy, and that proxy answers 501 unless a worlds host is
+    // configured — so pinning unconditionally hands the explorer a URL this
+    // very process knows will fail, and the failure surfaces as a scene with no
+    // movement controller rather than as anything that names the cause.
+    // Unpinned, the engine falls back to its own default portable; that is
+    // CORS-blocked from a foreign origin, which is the behaviour that existed
+    // before the mirror and is no worse than a 501.
+    match crate::start::world_base_configured() {
+        true => format!(
+            "{base}&portables={}",
+            form_encode(&format!("{realm}/world/{CONTROLLER_WORLD}"))
+        ),
+        false => base,
+    }
 }
 
 // No wrapping quotes and a form-encoded realm/position: launcher-rust
@@ -638,6 +651,26 @@ mod tests {
         ));
     }
 
+    /// The pinned form of the portables mirror, for the configured case.
+    ///
+    /// `web_join_url` decides whether to append it by asking the running
+    /// process whether a worlds host is set, which a unit test cannot flip
+    /// without racing every other test in this binary through the environment.
+    /// So pin the STRING the caller builds instead: if the encoding of the
+    /// mirror URL drifts, this fails right next to the code that builds it.
+    #[test]
+    fn portables_pin_grammar() {
+        let realm = "http://10.1.2.20:5600";
+        let pinned = format!(
+            "&portables={}",
+            form_encode(&format!("{realm}/world/{CONTROLLER_WORLD}"))
+        );
+        assert_eq!(
+            pinned,
+            "&portables=http%3A%2F%2F10.1.2.20%3A5600%2Fworld%2Fbasiccontroller.dcl.eth"
+        );
+    }
+
     #[test]
     fn deep_link_grammars_are_pinned() {
         let out = block(full_ifaces(), QrMode::Hint).render();
@@ -656,9 +689,16 @@ mod tests {
         assert!(out.contains(
             "web:      https://decentraland.org/bevy-web/?preview=true&realm=http://10.1.2.20:5600&position=52,-68"
         ));
-        assert!(out.contains(
-            "&portables=http%3A%2F%2F10.1.2.20%3A5600%2Fworld%2Fbasiccontroller.dcl.eth"
-        ));
+        // portables= is pinned to the realm's own /world/… mirror ONLY when a
+        // worlds host is configured, because that is the only time the mirror
+        // can answer; unconfigured it is a 501 and advertising it would hand
+        // the explorer a URL this process knows is dead. Tests run with nothing
+        // configured, so the absence is the case under test here — and the
+        // grammar of the pin itself is covered by `portables_pin_grammar`.
+        assert!(
+            !out.contains("&portables="),
+            "unconfigured worlds host must not advertise the mirror: {out}"
+        );
         assert!(out.contains("same address = kicked"));
     }
 

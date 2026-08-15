@@ -244,10 +244,11 @@ largest contiguous blocks per file (`llvm-cov show` / lcov `DA:` zeros).
 
 ### (d) Platform / build-config specific
 
-- **abgen_embed.rs** 12-48 (~34 lines, 25%): the embedded-abgen unpack path. In
-  dev builds `ABGEN_EMBED_BIN` is unset at compile time, so `FILES` is empty and
-  `extract_into` is dead code — only release builds with an embedded abgen
-  archive execute it. Case 116 covers the external-`ABGEN_BIN` sidecar instead.
+- **abgen_embed.rs**: no longer build-config specific. Every build embeds abgen
+  (see `abgen-release.lock`), so `FILES` is never empty and `extract_into` runs
+  in dev too; `the_binary_carries_an_abgen` and
+  `extraction_yields_a_runnable_binary_and_is_idempotent` cover it directly.
+  Case 116 still covers the external-`ABGEN_BIN` sidecar.
 - **netinfo.rs** / **joinblock.rs** residuals: interface-class branches
   (overlay-VPN, virtual-bridge, NAT-VM guest) that depend on the host's actual
   network interfaces.

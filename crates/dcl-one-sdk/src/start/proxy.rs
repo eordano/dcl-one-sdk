@@ -90,6 +90,32 @@ fn proxy_client() -> Result<reqwest::Client, Response> {
         })
 }
 
+/// GET a configured URL and hand the body back with its content type. For
+/// routes that exist only to lift a fetch onto the preview origin (CORS), where
+/// there is nothing to rewrite and no fallback rotation to walk.
+pub(super) async fn passthrough_get(url: &str) -> Response {
+    let client = match proxy_client() {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            match resp.bytes().await {
+                Ok(body) => (status, [(header::CONTENT_TYPE, ct)], body).into_response(),
+                Err(e) => (StatusCode::BAD_GATEWAY, format!("{url}: {e}")).into_response(),
+            }
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{url}: {e}")).into_response(),
+    }
+}
+
 /// Upstream parity: the realm advertises itself as the only realm.
 pub(super) async fn lambdas_explore_realms(req: Request) -> Json<serde_json::Value> {
     let host = preview_host(req.headers());
@@ -111,6 +137,43 @@ pub(super) async fn lambdas_contracts_servers(req: Request) -> Json<serde_json::
         "owner": "0x0000000000000000000000000000000000000000",
         "id": "0x0000000000000000000000000000000000000000000000000000000000000000"
     }]))
+}
+
+/// Bases already complained about, so a dead upstream is explained once rather
+/// than once per request.
+fn complained_bases() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// An unreachable upstream is not a one-off: the explorer re-asks for profiles
+/// and wearables continuously, so the naive per-request `warn!` printed the same
+/// line dozens of times and buried everything else. Say it ONCE per base, and
+/// say what to do about it — the per-URL detail drops to `info!`, which is the
+/// level `--verbose` selects.
+fn note_upstream_unreachable(base: &str) {
+    let mut seen = complained_bases().lock().unwrap_or_else(|e| e.into_inner());
+    if !seen.insert(base.to_string()) {
+        return;
+    }
+    if base == LOCAL_CATALYST {
+        // The unconfigured default. Nothing is wrong with the scene; the user
+        // just has no content source for avatars, so name the knob.
+        crate::ux::note_stderr(format!(
+            "no upstream catalyst — avatars, wearables and profiles will not load. \
+             DCL_ONE_SDK_CATALYST is unset, so the preview looks for a LOCAL content server at \
+             {LOCAL_CATALYST} and nothing is listening there. Point it at a catalyst to load them \
+             (e.g. DCL_ONE_SDK_CATALYST=https://peer.decentraland.org); this toolchain ships no \
+             default so nothing is fetched from a third party unless you name it. The scene \
+             itself is unaffected."
+        ));
+    } else {
+        crate::ux::note_stderr(format!(
+            "upstream catalyst {base} is unreachable — avatars, wearables and profiles will not \
+             load until it answers. Re-run with --verbose for the per-request detail."
+        ));
+    }
 }
 
 async fn forward_raw(
@@ -162,7 +225,11 @@ async fn forward_raw(
                 return Ok((status, content_type, bytes));
             }
             Err(e) => {
-                tracing::warn!("catalyst proxy {url}: {e}");
+                note_upstream_unreachable(base);
+                // info!, not debug!: --verbose maps to the `info` filter (see
+                // init_tracing), so debug would need RUST_LOG=debug and the
+                // one-time note above promises --verbose is enough.
+                tracing::info!("catalyst proxy {url}: {e}");
                 last_err =
                     Some((StatusCode::BAD_GATEWAY, format!("catalyst proxy: {e}")).into_response());
             }
@@ -560,6 +627,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn an_unreachable_upstream_is_explained_once_per_base_not_once_per_request() {
+        // The explorer re-asks for profiles and wearables continuously; before
+        // this, every one of those printed the same warning line.
+        let base = "http://127.0.0.1:59999";
+        complained_bases().lock().unwrap().remove(&base.to_string());
+        note_upstream_unreachable(base);
+        assert!(complained_bases().lock().unwrap().contains(base));
+        // Subsequent calls for the same base are silent; a different base is not.
+        note_upstream_unreachable(base);
+        note_upstream_unreachable(base);
+        let other = "http://127.0.0.1:59998";
+        complained_bases()
+            .lock()
+            .unwrap()
+            .remove(&other.to_string());
+        note_upstream_unreachable(other);
+        let seen = complained_bases().lock().unwrap();
+        assert!(seen.contains(base) && seen.contains(other));
+    }
+
+    #[test]
+    fn the_unconfigured_default_is_the_local_catalyst_not_a_public_one() {
+        // Guards the posture the hint text explains: with nothing configured the
+        // preview must not silently reach a third party.
+        std::env::remove_var("DCL_ONE_SDK_CATALYST");
+        assert_eq!(catalyst_base(), LOCAL_CATALYST);
+        assert!(LOCAL_CATALYST.starts_with("http://127.0.0.1"));
+    }
+
+    #[test]
     fn scenes_urn_rewrites_to_the_local_mirror_and_keeps_the_entity() {
         let mut about = json!({
             "configurations": { "scenesUrn": [
@@ -609,7 +706,8 @@ mod tests {
             None => assert!(
                 candidates
                     .iter()
-                    .all(|c| c.starts_with("https://worlds.example") || c.starts_with("https://peer.example")),
+                    .all(|c| c.starts_with("https://worlds.example")
+                        || c.starts_with("https://peer.example")),
                 "unconfigured world base must not introduce a candidate host: {candidates:?}"
             ),
         }

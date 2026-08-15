@@ -6,8 +6,8 @@ SDK7 scenes; an alternative to `@dcl/sdk-commands`.
 Measured on the freshly scaffolded template scene (release build; absolute
 times vary with hardware):
 
-- one self-contained binary — 34 MB from `cargo build`, ~32 MB larger from
-  `nix build` or a release, which embed the abgen asset-bundle server — and 280
+- one self-contained binary — 49 MB, the same from `cargo build`, `nix build`
+  or a release, all of which embed the abgen asset-bundle server — and 283
   passing tests (`ALLOW_SKIPPED_INTEGRATION=1 cargo test`; three more need a
   live tunnel, a scene, or a node_modules tree, and fail loudly rather than
   skip silently when you point them at one). The upstream toolchain installs
@@ -85,31 +85,58 @@ most scenes never take was the wrong trade.
 
 ## Asset bundles (abgen)
 
-`start` also runs an [abgen](https://github.com/decentraland/abgen)
-asset-bundle sidecar that serves optimized preview assets. On first use `start`
-extracts the embedded copy (reused across runs while unchanged) and serves
-asset bundles with no extra installs. The sidecar binary resolves in order:
+`start` runs an [abgen](https://github.com/decentraland/abgen) asset-bundle
+sidecar that serves optimized preview assets, and forwards its URL to the
+Explorer as `optimized-assets-url`. There is nothing to install: **every**
+dcl-one-sdk binary embeds abgen, whatever it was built with. On first run it
+unpacks into a temp directory keyed by a content hash and is reused from then
+on.
 
-1. `ABGEN_BIN` — explicit path, always wins
-2. the copy embedded in the dcl-one-sdk binary
-3. the scene's `@dcl/abgen` npm platform package
-   (`node_modules/@dcl/abgen-<platform>-<arch>`)
-4. `abgen` on PATH
+`--no-asset-bundles` turns the sidecar off — that is upstream `sdk-commands`
+behaviour, which has no sidecar at all. `--asset-bundles` matches upstream's
+flag of the same name: it forwards `local-ab=true` in the deep link and lets
+the desktop Explorer do its own conversion, so the sidecar stays down.
 
-When none resolves, preview continues immediately with a one-line hint, and
-`--no-asset-bundles` turns the sidecar off.
+`ABGEN_BIN` overrides the embedded copy at run time. It is for advanced use —
+an abgen you built yourself, a bisect, a test — and nothing else consults the
+environment, PATH, or the scene's `node_modules`.
 
-**Which builds embed it.** `nix build` embeds abgen — the flake takes it as an
-input and assembles the layout the embed needs, so a nix-built binary and a
-released one behave the same. `cargo build` embeds nothing, which keeps a
-source build fast and about 32 MB smaller; that binary still runs the sidecar
-if any of steps 1, 3 or 4 above resolves.
+**Where the bytes come from.** `abgen-release.lock` pins an upstream release
+and the sha256 of its archive per target. `build.rs` downloads that archive
+into a shared cache (`$CARGO_HOME/dcl-one-sdk-abgen`, or `ABGEN_EMBED_CACHE`),
+verifies the hash, and embeds the executable deflate-compressed — 13 MB in the
+binary for 36 MB on disk. `nix build` parses the same lock file and fetches the
+same archive, so a nix-built binary and a `cargo build` one carry identical
+bytes. Repin with `scripts/pin-abgen.sh <tag>`.
 
-To embed by hand, point `ABGEN_EMBED_BIN` at the `abgen` server binary inside
-an unpacked release archive (`abgen-v<ver>-<target>.tar.gz` from
-<https://github.com/decentraland/abgen/releases>) and build. Its `template/`
-and `shader/` directories must sit next to the binary — the build script
-checks all three and fails loudly rather than embedding a half-archive.
+A release abgen is one self-contained file: the Unity templates and shader
+bundles are compiled into it, which `/health` confirms with
+`template_ok: true, templates_missing: []`.
+
+`ABGEN_EMBED_BIN=<path>` embeds a different abgen instead of downloading — the
+escape hatch for building offline, for a musl host (the pinned Linux archives
+are glibc-linked), and for testing an abgen from source.
+
+## Upstream parity notes
+
+`start` serves the same preview surface as `@dcl/sdk-commands` 7.26.0, with two
+deliberate differences, both about not baking in someone else's infrastructure:
+
+- **`/feature-flags/{file}`** — upstream proxies to a hardcoded
+  `https://feature-flags.decentraland.zone`. Here the host comes from
+  `DCL_ONE_SDK_FEATURE_FLAGS`; unset, the route answers 501 and says so.
+  Nothing else is affected.
+- **`/world/{name}/about`** — same story, via `DCL_ONE_SDK_WORLD_BASE`.
+
+`DCL_ONE_SDK_CATALYST` follows the same rule: it defaults to a **local** content
+server (`http://127.0.0.1:5141`), not a public catalyst, so a preview never
+silently sources its realm from production. With nothing listening there,
+back-fill routes such as `/lambdas/profiles` return 502 until you name an
+upstream — that is the intended posture, not a failure.
+
+`/preview-wearables` is implemented for older explorer builds even though
+upstream's own source marks it for removal in favour of
+`/content/entities/active`, which this server also serves.
 
 ## License
 

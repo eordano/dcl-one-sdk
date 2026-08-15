@@ -144,6 +144,106 @@ pub(super) async fn scenes() -> Json<Value> {
     Json(json!({ "scenes": [], "total": 0 }))
 }
 
+/// Upstream serves the first project's scene.json verbatim off disk
+/// (sdk-commands `endpoints.js`). This serves the in-memory copy, which is the
+/// same document and stays correct across a composite rebuild.
+pub(super) async fn scene_json(State(st): State<Arc<AppState>>) -> Response {
+    match st.projects.first() {
+        Some(p) => Json(p.scene_json.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, "no scene loaded").into_response(),
+    }
+}
+
+/// Env var naming the feature-flag host. Upstream hardcodes
+/// `https://feature-flags.decentraland.zone`; this toolchain bakes in no
+/// third-party host, on the same reasoning as `proxy::WORLD_BASE_ENV` — unset,
+/// this route 501s and nothing else is affected.
+pub(super) const FEATURE_FLAGS_ENV: &str = "DCL_ONE_SDK_FEATURE_FLAGS";
+
+fn feature_flags_base() -> Option<String> {
+    match std::env::var(FEATURE_FLAGS_ENV) {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().trim_end_matches('/').to_string()),
+        _ => None,
+    }
+}
+
+/// `/feature-flags/{file}` — upstream proxies this so a browser page served
+/// from the preview origin is not CORS-blocked fetching flags. Same job, minus
+/// the baked host.
+pub(super) async fn feature_flags(AxPath(file): AxPath<String>) -> Response {
+    // Single path segment by construction, but it lands in a URL we build, so
+    // refuse anything that could climb out of the configured base.
+    if file.contains('/') || file.contains('\\') || file.contains("..") {
+        return (StatusCode::BAD_REQUEST, "bad feature-flag file").into_response();
+    }
+    let Some(base) = feature_flags_base() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            format!(
+                "no feature-flag host configured — set {FEATURE_FLAGS_ENV} to the base URL that \
+                 serves /<file> (upstream uses https://feature-flags.decentraland.zone). This \
+                 toolchain ships no default, so nothing is fetched from a third party unless you \
+                 name it."
+            ),
+        )
+            .into_response();
+    };
+    super::proxy::passthrough_get(&format!("{base}/{file}")).await
+}
+
+/// `/preview-wearables` — the smart-wearable manifests in this workspace, with
+/// content URLs rebased onto the preview origin. Upstream's own source marks it
+/// deprecated in favour of `/content/entities/active` (which this server also
+/// serves); it is here so older explorer builds still resolve wearables.
+pub(super) async fn preview_wearables(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    let base = format!(
+        "{}://{}{}/content/contents",
+        forwarded_proto(&headers),
+        preview_host(&headers),
+        forwarded_prefix(&headers)
+    );
+    Json(json!({
+        "ok": true,
+        "data": collect_preview_wearables(&st.projects, &base, &st.machine),
+    }))
+}
+
+/// One entry per project carrying a readable `wearable.json`. A plain scene
+/// contributes nothing, which is why the route answers `{ok: true, data: []}`
+/// rather than 404 for a normal project — the same shape upstream returns.
+///
+/// Hashes are the preview's own reversible path hashes, so the URLs resolve
+/// through `/content/contents/{hash}` exactly like scene files do.
+fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for p in projects {
+        let Ok(text) = std::fs::read_to_string(p.root.join("wearable.json")) else {
+            continue;
+        };
+        let Ok(mut wearable) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let contents: Vec<Value> = collect_publishable_files(&p.root)
+            .unwrap_or_default()
+            .iter()
+            .map(|rel| {
+                let abs = p.root.join(rel).display().to_string();
+                let hash = b64_hash(&abs, machine);
+                json!({ "key": rel, "url": format!("{base}/{hash}"), "hash": hash })
+            })
+            .collect();
+        if let Some(obj) = wearable.as_object_mut() {
+            obj.insert("baseUrl".into(), json!(base));
+            obj.insert("contents".into(), json!(contents));
+        }
+        out.push(wearable);
+    }
+    out
+}
+
 pub(super) async fn contents(
     method: axum::http::Method,
     State(st): State<Arc<AppState>>,
@@ -423,6 +523,104 @@ pub(super) async fn entities_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct WearableTmp(PathBuf);
+
+    impl WearableTmp {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "dcl-one-sdk-wearables-{tag}-{}-{:x}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            WearableTmp(dir)
+        }
+    }
+
+    impl Drop for WearableTmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn project_at(root: PathBuf) -> Project {
+        Project {
+            root,
+            scene_json: json!({ "main": "bin/index.js" }),
+        }
+    }
+
+    #[test]
+    fn a_scene_without_a_wearable_json_contributes_no_entries() {
+        let tmp = WearableTmp::new("plain");
+        std::fs::write(tmp.0.join("scene.json"), "{}").unwrap();
+        let out = collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", "m");
+        // Upstream answers {ok:true,data:[]} for a plain scene rather than 404,
+        // so an empty list here is the contract, not a failure.
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_smart_wearable_is_listed_with_preview_resolvable_urls() {
+        let tmp = WearableTmp::new("sw");
+        std::fs::write(
+            tmp.0.join("wearable.json"),
+            r#"{"id":"urn:x","data":{"category":"eyewear"}}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.0.join("model.glb"), b"glb").unwrap();
+        let out = collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", "m");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["id"], "urn:x");
+        assert_eq!(out[0]["baseUrl"], "http://x/c");
+        let contents = out[0]["contents"].as_array().unwrap();
+        let model = contents
+            .iter()
+            .find(|c| c["key"] == "model.glb")
+            .expect("model.glb listed");
+        // The hash must be the preview's reversible path hash, so the advertised
+        // URL actually resolves through /content/contents/{hash}.
+        let abs = tmp.0.join("model.glb").display().to_string();
+        assert_eq!(model["hash"], json!(b64_hash(&abs, "m")));
+        assert_eq!(
+            model["url"],
+            json!(format!("http://x/c/{}", b64_hash(&abs, "m")))
+        );
+    }
+
+    #[test]
+    fn a_malformed_wearable_json_is_skipped_not_fatal() {
+        let tmp = WearableTmp::new("bad");
+        std::fs::write(tmp.0.join("wearable.json"), "{not json").unwrap();
+        assert!(
+            collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", "m").is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn feature_flags_without_a_configured_host_is_501_not_a_baked_default() {
+        std::env::remove_var(FEATURE_FLAGS_ENV);
+        let resp = feature_flags(AxPath("flags.json".to_string())).await;
+        // The whole point: no third-party host is baked in, so this must refuse
+        // rather than quietly reaching decentraland.zone the way upstream does.
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn feature_flags_refuses_a_file_that_could_climb_out_of_the_base() {
+        std::env::set_var(FEATURE_FLAGS_ENV, "https://flags.example");
+        for bad in ["../secret", "a/b", "..\\secret"] {
+            let resp = feature_flags(AxPath(bad.to_string())).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{bad} must not reach the upstream"
+            );
+        }
+        std::env::remove_var(FEATURE_FLAGS_ENV);
+    }
 
     #[test]
     fn unmatched_pointers_splits_local_from_upstream() {

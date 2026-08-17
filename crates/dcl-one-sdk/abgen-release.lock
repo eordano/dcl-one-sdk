@@ -1,30 +1,29 @@
 # The abgen release that every dcl-one-sdk binary embeds.
 #
-# abgen release binaries are self-contained: the Unity templates and the shader
-# bundles are compiled into the executable, so the embed is ONE file with no
-# sibling template/ or shader/ directories. (`/health` on a release binary run
-# from an empty directory reports `template_ok: true, templates_missing: []`
-# and logs `templates=compiled into this build`.)
+# abgen releases are relocatable bundles: a launcher script beside
+# bin/abgen.bin and a bundled lib/ loader, with the Unity templates and shader
+# bundles compiled into the executable. (`/health` on a release run from an
+# empty directory reports `template_ok: true, templates_missing: []` and logs
+# `templates=compiled into this build`.)
 #
 # build.rs reads this file, downloads the archive for the build target into a
-# cache, verifies it against the sha256 below, and embeds the binary. Set
+# cache, verifies it against the sha256 below, and embeds the bundle. Set
 # ABGEN_EMBED_BIN to embed a different abgen instead (offline builds, a local
 # abgen checkout); export-overlay/flake.nix parses this same file so a nix
 # build fetches the identical bytes without needing network at compile time.
 #
 # Refresh with: scripts/pin-abgen.sh <tag>   e.g. scripts/pin-abgen.sh v0.17.0
 #
-# Keys are abgen's release targets, not rust target triples: the embed is a
-# standalone executable, so the host ABI it was linked against is irrelevant and
-# *-pc-windows-msvc builds ship the -gnu archive. A musl host is the one gap —
-# these linux archives are glibc-linked — use ABGEN_EMBED_BIN there.
+# Keys are abgen's release targets, not rust target triples: the bundle ships
+# its own loader, so the host ABI it was linked against is irrelevant and
+# *-pc-windows-msvc builds ship the -gnu archive.
 
-version = v0.16.0
+version = v0.16.2
 url = https://github.com/decentraland/abgen/releases/download/{version}/abgen-{version}-{target}.tar.gz
 
-aarch64-apple-darwin       = ccff87a8192d5f329f0427e68fa850a490d4cefa53839f11062f91afe8420278
-x86_64-apple-darwin        = 8e3cb8957a8f1916b820e008d369be4cff0f1b024ff6764998f5c2bc5d151950
-aarch64-unknown-linux-gnu  = baa8237820d9283961091cffc6372b10f2b5d1f4e4f0f55dd3e0d2668f56024a
-x86_64-unknown-linux-gnu   = c155d8f27653bd357f42ca3cf7b848809d0c07804445f79011bce79c6a8594d3
-aarch64-pc-windows-gnullvm = d1e76059b3caba6152e01b26d6d168cb4112e745d88d2c728a5851d4709306ef
-x86_64-pc-windows-gnu      = 026c425d2d203c173876d7a33af66a292cd54e3db3d99677b05503f1a3826d1a
+aarch64-apple-darwin       = a94cdecbec0111b6b1d5fda74e3ca6d6b8f96116d5d50e68f6ae16abe13ddf4a
+x86_64-apple-darwin        = c43e2d119c71c066d137fc7e345fa49cfe8aa8df9fd1248ce25f856dc0c0804e
+aarch64-unknown-linux-gnu  = 6e8362a0e6434ae27928f6577a141c7be2e2f9c906b39fa0965dc0b3de61ecb9
+x86_64-unknown-linux-gnu   = 84738fb3d2fcafad29903f1799592edb2d56a8e4f648fac9b0e9cd4b71cdb422
+aarch64-pc-windows-gnullvm = e0db19268b9dd883c56e718bbe0ad1e6ec986ade979947cf89ae4fe5c083deb8
+x86_64-pc-windows-gnu      = e64e9efbe681f818a01e8aeedbce530b3044761c406c7aa8d0058b1592351185

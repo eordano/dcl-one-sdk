@@ -48,10 +48,9 @@ header=$(sed -n '1,/^# Keys are abgen/p' "$lock" | sed '$d')
 {
   printf '%s\n' "$header"
   cat <<EOF
-# Keys are abgen's release targets, not rust target triples: the embed is a
-# standalone executable, so the host ABI it was linked against is irrelevant and
-# *-pc-windows-msvc builds ship the -gnu archive. A musl host is the one gap —
-# these linux archives are glibc-linked — use ABGEN_EMBED_BIN there.
+# Keys are abgen's release targets, not rust target triples: the bundle ships
+# its own loader, so the host ABI it was linked against is irrelevant and
+# *-pc-windows-msvc builds ship the -gnu archive.
 
 version = $tag
 url = https://github.com/$repo/releases/download/{version}/abgen-{version}-{target}.tar.gz

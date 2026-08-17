@@ -256,7 +256,7 @@ fn generate_abgen_embed() -> Result<()> {
     // beside template/ and shader/ (its ABGEN_ROOT layout) and, on windows,
     // loose DLLs; carry those along when they happen to be there.
     let mut rels = vec![bin_name.clone()];
-    for sub in ["template", "shader"] {
+    for sub in ["template", "shader", "bin", "lib"] {
         collect_files(&dir.join(sub), sub, &mut rels)?;
     }
     for entry in std::fs::read_dir(&dir)?.flatten() {
@@ -393,7 +393,7 @@ fn fetch_pinned_abgen(lock: &AbgenLock) -> Result<PathBuf> {
     } else {
         "abgen"
     };
-    let unpacked = cache.join(exe);
+    let unpacked = cache.join("dist").join(exe);
     if unpacked.is_file() {
         return Ok(unpacked);
     }
@@ -462,7 +462,20 @@ fn fetch_pinned_abgen(lock: &AbgenLock) -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
-    std::fs::rename(&staged, &unpacked)?;
+    // The linux archives are launcher bundles (abgen + bin/abgen.bin + a
+    // bundled lib/ loader), so publish the executable's whole directory; a
+    // rename losing to a concurrent build is fine as long as the winner's
+    // dist is in place.
+    let dist_src = staged
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| stage.clone());
+    if std::fs::rename(&dist_src, cache.join("dist")).is_err() && !unpacked.is_file() {
+        panic!(
+            "could not publish the unpacked abgen into {}",
+            cache.display()
+        );
+    }
     let _ = std::fs::remove_dir_all(&stage);
     let _ = std::fs::remove_file(&archive);
     Ok(unpacked)

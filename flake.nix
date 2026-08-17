@@ -44,9 +44,9 @@
           system = pkgs.stdenv.hostPlatform.system;
           craneLib = crane.mkLib pkgs;
 
-          # A release abgen is one self-contained executable — the Unity templates
-          # and the shader bundles are compiled into it — so this unpacks to a
-          # single file with no sibling template/ or shader/ directories.
+          # A release abgen is a relocatable bundle — launcher script, bin/, and
+          # a bundled lib/ loader, with the Unity templates and shader bundles
+          # compiled into the executable — so unpack the whole tree.
           abgen-dist =
             let
               target = abgenTargets.${system};

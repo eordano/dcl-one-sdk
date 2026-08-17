@@ -64,7 +64,7 @@ fn extract_into(root: &Path) -> std::io::Result<()> {
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&tmp, &bytes)?;
-        if *rel == BIN_NAME {
+        if *rel == BIN_NAME || rel.starts_with("bin/") || rel.starts_with("lib/") {
             set_executable(&tmp)?;
         }
         std::fs::rename(&tmp, &path)?;
@@ -109,11 +109,14 @@ mod tests {
     fn extraction_yields_a_runnable_binary_and_is_idempotent() {
         let first = ensure_extracted().expect("embedded abgen extracts");
         assert!(first.is_file());
-        let meta = std::fs::metadata(&first).unwrap();
-        assert!(meta.len() > 1_000_000, "abgen is {} bytes", meta.len());
+        // BIN_NAME may be a tiny launcher script; the real weight sits in the
+        // bundle's bin/ and lib/ siblings, so size-check the whole embed.
+        let total: usize = FILES.iter().map(|(_, _, raw_len)| *raw_len).sum();
+        assert!(total > 1_000_000, "embedded abgen bundle is {total} bytes");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&first).unwrap();
             assert_eq!(meta.permissions().mode() & 0o111, 0o111);
         }
         // Second call is a no-op that returns the same path.

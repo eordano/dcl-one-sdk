@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-preview-tunnel"
-version = "0.16.7"
+version = "0.17.0"
 edition = "2021"
 description = "Self-hosted preview tunnel for dcl-one-sdk: agents dial out one WebSocket trunk, the service allocates public /t/<id> routes and multiplexes inbound HTTP + WebSocket traffic back over the trunk. Port 5167."
 

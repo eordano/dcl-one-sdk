@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-envcfg"
-version = "0.16.7"
+version = "0.17.0"
 edition = "2021"
 description = "Shared env-var config helpers + standard --help/--version argv handling for catalyrst service bins"
 

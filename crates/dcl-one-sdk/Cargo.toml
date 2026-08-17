@@ -1,6 +1,6 @@
 [package]
 name = "dcl-one-sdk"
-version = "0.16.7"
+version = "0.17.0"
 edition = "2021"
 description = "Binary-compatible Rust replacement for @dcl/sdk-commands: bundle (rolldown, in-process), preview-serve, and deploy Decentraland SDK7 scenes"
 # Same dual terms as abgen, so embedding the converter in-process later is a

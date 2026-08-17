@@ -2,8 +2,9 @@
   description = "dcl-one-sdk — an npm-free Rust toolchain for Decentraland SDK7 scenes";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs.crane.url = "github:ipetkov/crane/v0.21.0";
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, crane }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems
@@ -38,41 +39,60 @@
       };
     in
     {
-      packages = forAllSystems (pkgs: rec {
-        # A release abgen is one self-contained executable — the Unity templates
-        # and the shader bundles are compiled into it — so this unpacks to a
-        # single file with no sibling template/ or shader/ directories.
-        abgen-dist =
-          let
-            target = abgenTargets.${pkgs.stdenv.hostPlatform.system};
-            archive = pkgs.fetchurl {
-              url = builtins.replaceStrings
-                [ "{version}" "{target}" ] [ abgenLock.version target ] abgenLock.url;
-              sha256 = abgenLock.${target};
-            };
-          in
-          pkgs.runCommand "abgen-${abgenLock.version}-${target}" { } ''
-            mkdir -p $out
-            tar -xzf ${archive} -C $out --strip-components=1
-            test -x $out/abgen
-          '';
+      packages = forAllSystems (pkgs:
+        let
+          system = pkgs.stdenv.hostPlatform.system;
+          craneLib = crane.mkLib pkgs;
 
-        dcl-one-sdk = pkgs.rustPlatform.buildRustPackage {
-          pname = "dcl-one-sdk";
-          version = "0.16.7";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "-p" "dcl-one-sdk" "--bin" "dcl-one-sdk" ];
-          doCheck = false;
-          nativeBuildInputs = [ pkgs.pkg-config pkgs.protobuf ];
-          buildInputs = [ pkgs.openssl ]
-            ++ nixpkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
-          env.OPENSSL_NO_VENDOR = "1";
-          env.ABGEN_EMBED_BIN = "${abgen-dist}/abgen";
-          meta.mainProgram = "dcl-one-sdk";
-        };
-        default = dcl-one-sdk;
-      });
+          # A release abgen is one self-contained executable — the Unity templates
+          # and the shader bundles are compiled into it — so this unpacks to a
+          # single file with no sibling template/ or shader/ directories.
+          abgen-dist =
+            let
+              target = abgenTargets.${system};
+              archive = pkgs.fetchurl {
+                url = builtins.replaceStrings
+                  [ "{version}" "{target}" ] [ abgenLock.version target ] abgenLock.url;
+                sha256 = abgenLock.${target};
+              };
+            in
+            pkgs.runCommand "abgen-${abgenLock.version}-${target}" { } ''
+              mkdir -p $out
+              tar -xzf ${archive} -C $out --strip-components=1
+              test -x $out/abgen
+            '';
+
+          # Args shared by the deps-only layer and the package build, kept
+          # byte-identical so crane's cargoArtifacts actually hits. pname/version
+          # are set explicitly because the root Cargo.toml is a virtual workspace
+          # manifest (no [package]), so crane cannot derive them from it.
+          sdkCraneArgs = {
+            pname = "dcl-one-sdk";
+            version = "0.17.0";
+            src = ./.;
+            strictDeps = true;
+            cargoExtraArgs = "--locked -p dcl-one-sdk --bin dcl-one-sdk";
+            doCheck = false;
+            nativeBuildInputs = [ pkgs.pkg-config pkgs.protobuf ];
+            buildInputs = [ pkgs.openssl ]
+              ++ nixpkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+            OPENSSL_NO_VENDOR = "1";
+            ABGEN_EMBED_BIN = "${abgen-dist}/abgen";
+          };
+
+          # third-party dep graph compiled once into its own derivation, reused
+          # by the package build.
+          dcl-one-sdk-deps = craneLib.buildDepsOnly sdkCraneArgs;
+
+          dcl-one-sdk = craneLib.buildPackage (sdkCraneArgs // {
+            cargoArtifacts = dcl-one-sdk-deps;
+            meta.mainProgram = "dcl-one-sdk";
+          });
+        in
+        {
+          inherit abgen-dist dcl-one-sdk-deps dcl-one-sdk;
+          default = dcl-one-sdk;
+        });
 
       apps = forAllSystems (pkgs: rec {
         dcl-one-sdk = {

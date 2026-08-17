@@ -644,8 +644,13 @@ mod tests {
         );
     }
 
+    // Both tests mutate the process-wide FEATURE_FLAGS_ENV; without this lock
+    // they race under the parallel test runner and 501 becomes 502.
+    static FLAGS_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn feature_flags_without_a_configured_host_is_501_not_a_baked_default() {
+        let _env = FLAGS_ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var(FEATURE_FLAGS_ENV);
         let resp = feature_flags(AxPath("flags.json".to_string())).await;
         // The whole point: no third-party host is baked in, so this must refuse
@@ -655,6 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn feature_flags_refuses_a_file_that_could_climb_out_of_the_base() {
+        let _env = FLAGS_ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(FEATURE_FLAGS_ENV, "https://flags.example");
         for bad in ["../secret", "a/b", "..\\secret"] {
             let resp = feature_flags(AxPath(bad.to_string())).await;

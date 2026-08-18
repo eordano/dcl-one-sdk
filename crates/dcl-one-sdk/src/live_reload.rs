@@ -1,4 +1,4 @@
-use crate::scene::b64_hash;
+use crate::scene::b64_content_hash;
 use prost::Message;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -72,7 +72,7 @@ pub fn reload_frames(
         ReloadEvent::Scene => update_scene_frame(scene_id),
         ReloadEvent::Model { path, removed } => {
             let src = model_src(root, path);
-            let hash = b64_hash(&src, machine);
+            let hash = b64_content_hash(&root.join(&src).display().to_string(), machine);
             update_model_frame(scene_id, &src, &hash, *removed)
         }
     };
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn model_frames_use_relative_src_and_b64_hash() {
+    fn model_frames_use_relative_src_and_the_content_mapping_hash() {
         let root = Path::new("/proj");
         let event = ReloadEvent::Model {
             path: root.join("assets/tree.glb"),
@@ -166,7 +166,10 @@ mod tests {
         match decoded.message {
             Some(ws_scene_message::Message::UpdateModel(u)) => {
                 assert_eq!(u.src, "assets/tree.glb");
-                assert_eq!(u.hash, b64_hash("assets/tree.glb", "host"));
+                assert_eq!(
+                    u.hash,
+                    crate::scene::b64_content_hash("/proj/assets/tree.glb", "host")
+                );
                 assert_eq!(u.scene_id, "scene-1");
                 assert_eq!(u.r#type(), UpdateModelType::UmtChange);
             }

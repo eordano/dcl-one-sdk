@@ -1,0 +1,76 @@
+(dcl-one-sdk golden v1 dynamic-import production)
+TOOLCHAIN sdk=7.26.0 ecs=7.26.0 bundler=rolldown-1.2.4 blob=sha256:bfba3692f31514bd
+SCENE_COMPILED_JS_SIZE_PROD=481.8k bytes
+  ARTIFACT bin/index.js               5883 sha256=dea26fe67f01c565
+  ARTIFACT bin/scene.js               1348 sha256=8cf61aac03231663
+  ARTIFACT bin/sdk-runtime.js       474613 sha256=33bab9f0f499ea4a
+LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=0
+ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
+  // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
+  "use strict";
+  import * as entrypoint from "<SCENE>/src/index.ts"
+  import { engine, NetworkEntity } from '@dcl/sdk/ecs'
+  import * as sdk from '@dcl/sdk'
+  import { compositeProvider } from '@dcl/sdk/composite-provider'
+  import { compositeFromLoader } from '~sdk/all-composites'
+  import { _initializeScripts } from '~sdk/script-utils'
+  import { compositeFromLoader as __sceneComposites } from './all-composites.js'
+  Object.assign(compositeFromLoader, __sceneComposites)
+
+  false
+
+  // `console.error(e)` drops the frames, and the host captures its own stack at
+  // the call site — this catch block. `e.stack` carries the throw site, so it is
+  // a superset of what upstream prints.
+  function __reportSceneError(e: any) {
+    console.error(e && e.stack ? e.stack : e)
+  }
+
+  if ((entrypoint as any).main !== undefined) {
+    function _INTERNAL_startup_system() {
+      try {
+        _initializeScripts(engine)
+
+        const maybePromise = (entrypoint as any).main()
+        if (maybePromise && typeof maybePromise === 'object' && typeof (maybePromise as unknown as Promise<unknown>).then === 'function') {
+          maybePromise.catch(__reportSceneError)
+        }
+      } catch (e) {
+        __reportSceneError(e)
+      } finally {
+        engine.removeSystem(_INTERNAL_startup_system)
+      }
+    }
+    engine.addSystem(_INTERNAL_startup_system, Infinity)
+  }
+
+  export * from '@dcl/sdk'
+  export * from "<SCENE>/src/index.ts"
+  export * from '~sdk/script-utils'
+  REQUIRE(scene): @dcl/sdk
+  REQUIRE(scene): @dcl/sdk/ecs
+  REQUIRE(scene): @dcl/sdk/math
+  REQUIRE(scene): ~sdk/all-composites
+  REQUIRE(scene): ~sdk/script-utils
+MAIN_CRDT none (no composite)
+DEPLOY entity=bafkreianithxhtatndpayqk5o3qjnxprni3il4qhhzk2v4hrh5sdv5nscq files=4 total=482.0k bytes
+  bafkreigbeh7s4uf5a6xnw5vz3vbc6bp334klyralrp2mct44gr2zqbqj64 scene.json 171 bytes
+  bafybeiagimmlavww7momge3jfpkxtniibletbghzk6eybyv4jov777wvl4 bin/sdk-runtime.js 474613 bytes
+  bafkreiem6ynkyazdczr7yyuu6ilpeska3jhaes6i5wk2erllwwg3fpnlme bin/scene.js 1348 bytes
+  bafkreig6ujx6m7ybyvszssokawyhtpqridsfkjvorchc5t5htsdrnfhub4 bin/index.js 5883 bytes
+EVAL bin/index.js
+  READFILE: bin/sdk-runtime.js
+  READFILE: bin/scene.js
+  REQUIRE: ~system/Runtime
+  REQUIRE: ~system/EngineApi
+  REQUIRE: ~system/CommunicationsController
+  REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/EthereumController
+CALL onStart()
+CALL onUpdate(0)
+CALL onUpdate(0.1)
+  Scene: PUT_COMPONENT e=0x200 c=1 t=1 data={"position":{"x":2,"y":3,"z":4},"rotation":{"x":0,"y":0,"z":0,"w":1},"scale":{"x":1,"y":1,"z":1},"parent":0}
+CALL onUpdate(0.1)
+CALL onUpdate(0.1)
+HOSTCALLS readFile=2 crdtGetState=1 crdtSendToRenderer=4 sendBatch=4
+CRDT_TRAFFIC messages=1 bytes=68

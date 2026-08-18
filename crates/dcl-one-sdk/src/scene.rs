@@ -1,6 +1,7 @@
 use crate::ux::{TrySteps, UserError};
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -242,6 +243,9 @@ pub fn machine_id() -> String {
         .unwrap_or_else(|| "dcl-one".to_string())
 }
 
+/// The identity of a path in a preview: reversible, so `/content/contents/{hash}`
+/// finds the file again without a side table. Used bare only for things that ARE
+/// a path and have no bytes; real files go through [`b64_content_hash`].
 pub fn b64_hash(path_str: &str, machine: &str) -> String {
     use base64::Engine;
     let unique = format!("{path_str}-{machine}");
@@ -251,9 +255,69 @@ pub fn b64_hash(path_str: &str, machine: &str) -> String {
     )
 }
 
+/// Separates the path part of a hash from its content tag. Not in the base64url
+/// alphabet, so splitting on it can never cut into the encoded path, and an
+/// untagged hash still decodes.
+const CONTENT_TAG: char = '.';
+
+/// [`b64_hash`] plus a digest of the file's bytes, making the hash a content
+/// address: an edit changes the hash, so no cache anywhere can serve stale
+/// bytes under a name that still looks current. A path-only hash could, which
+/// is why a client had to drop every cached asset on reload to stay correct.
+/// An unreadable file falls back to the path-only hash — the request for it is
+/// going to fail anyway.
+pub fn b64_content_hash(abs_path: &str, machine: &str) -> String {
+    let base = b64_hash(abs_path, machine);
+    match content_tag(std::path::Path::new(abs_path)) {
+        Some(tag) => format!("{base}{CONTENT_TAG}{tag}"),
+        None => base,
+    }
+}
+
+/// A short digest of a file, memoised on (mtime, len): the content mapping is
+/// rebuilt on every entity request, so re-reading would push the whole scene
+/// through sha256 on a timer.
+fn content_tag(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    type Stamp = (std::time::SystemTime, u64);
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (Stamp, String)>>> =
+        std::sync::OnceLock::new();
+    let cache = SEEN.get_or_init(Default::default);
+    let lock = || {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let stamp = (meta.modified().ok()?, meta.len());
+    if let Some((seen, tag)) = lock().get(path) {
+        if *seen == stamp {
+            return Some(tag.clone());
+        }
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let tag: String = Sha256::digest(&bytes)
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    lock().insert(path.to_path_buf(), (stamp, tag.clone()));
+    Some(tag)
+}
+
+/// The part of a hash that identifies WHICH file, not which version of it.
+pub fn hash_path_part(hash: &str) -> &str {
+    hash.rsplit_once(CONTENT_TAG).map_or(hash, |(path, _)| path)
+}
+
 pub fn b64_unhash(hash: &str, machine: &str) -> Option<String> {
     use base64::Engine;
     let b = hash.strip_prefix("b64-")?;
+    let b = hash_path_part(b);
     let normalized = b.trim_end_matches('=').replace('+', "-").replace('/', "_");
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(normalized.as_bytes())

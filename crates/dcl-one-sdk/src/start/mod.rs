@@ -2,6 +2,7 @@ mod content_cache;
 mod editor;
 mod http;
 mod landing;
+pub(crate) mod scene_logs;
 
 /// Whether a worlds host is configured, for callers outside this module.
 ///
@@ -36,8 +37,7 @@ use http::{
     scene_id_for, scene_json, scenes,
 };
 use proxy::{
-    entities_deploy_proxy, explorer_proxy, lambdas_contracts_servers, lambdas_explore_realms,
-    lambdas_proxy, world_about, world_content,
+    catalyst_proxy, lambdas_contracts_servers, lambdas_explore_realms, world_about, world_content,
 };
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -59,28 +59,63 @@ pub struct StartOptions {
     pub ignore_composite: bool,
     pub offline_comms: bool,
     pub mobile: bool,
-    /// Run the local abgen conversion sidecar. On unless --no-asset-bundles —
-    /// including under --asset-bundles, which only changes HOW the explorer
-    /// reaches it (see `local_ab`), not whether it runs.
+    /// Run the local abgen conversion sidecar. On unless --no-asset-bundles.
     pub ab_sidecar: bool,
-    /// Forward `local-ab=true` in the desktop deep link (--asset-bundles).
+    /// Forward `local-ab=true` in the desktop deep link. Tracks `ab_sidecar`.
     ///
-    /// Upstream's flag does NOT hand conversion to the explorer, which is what
-    /// this used to claim. Per `AppArgsFlags.LOCAL_AB` in unity-explorer it
+    /// This does NOT hand conversion to the explorer, which is what upstream
+    /// uses the flag for. Per `AppArgsFlags.LOCAL_AB` in unity-explorer it
     /// "carries no URL or port": the client appends
     /// `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH` to the realm it already has
     /// and fetches `{realm}/optimized-assets`, which this server proxies to the
-    /// sidecar. The alternative — the default — is to name the sidecar directly
-    /// with `optimized-assets-url`, which the explorer treats as an override.
+    /// sidecar — so our sidecar still does every conversion.
+    ///
+    /// It is not an option because the alternative does not work. Naming the
+    /// sidecar directly with `optimized-assets-url` was the old default, and
+    /// the launcher drops that param before the explorer ever sees it (see the
+    /// route comment below). Going through the realm also costs one port
+    /// instead of two: one firewall approval, and a LAN or tunnel guest needs
+    /// no second reachable address.
     pub local_ab: bool,
     pub mcp: bool,
     pub mcp_port: Option<u16>,
+    /// How much of the developer's source to quote around a scene error.
+    pub source_context: SourceContext,
     /// Raw tokens after a standalone `--`, forwarded into the desktop deep
     /// link as query params.
     pub explorer_params: Vec<String>,
     pub data_layer: bool,
     pub tunnel: Option<String>,
     pub tunnel_token: Option<String>,
+}
+
+/// Extra source lines quoted either side of the line a scene error points at.
+#[derive(Clone, Copy)]
+pub struct SourceContext {
+    pub before: u32,
+    pub after: u32,
+}
+
+impl SourceContext {
+    /// `--error-source-lines-context` sets both sides; the per-side flags win
+    /// over it, so `--error-source-lines-context=4 --error-source-lines-after=0`
+    /// is meaningful.
+    ///
+    /// Defaults to 0: the line that threw is the answer, and neighbours are
+    /// padding the reader has to skip past on every error.
+    pub fn resolve(context: Option<u32>, before: Option<u32>, after: Option<u32>) -> Self {
+        const DEFAULT: u32 = 0;
+        SourceContext {
+            before: before.or(context).unwrap_or(DEFAULT),
+            after: after.or(context).unwrap_or(DEFAULT),
+        }
+    }
+}
+
+impl Default for SourceContext {
+    fn default() -> Self {
+        SourceContext::resolve(None, None, None)
+    }
 }
 
 struct AppState {
@@ -92,11 +127,18 @@ struct AppState {
     base: (i64, i64),
     data_layer: Option<DataLayerState>,
     entity_cache: Mutex<HashMap<PathBuf, (Instant, Value)>>,
-    /// Set once the abgen sidecar reports ready; the landing page's desktop
-    /// deep link carries it so the explorer uses locally converted bundles.
+    /// The sidecar's own address, set once abgen reports ready. This is what
+    /// `/optimized-assets/*` forwards to and what the landing page reports —
+    /// NOT something to put in a deep link; see `local_ab`.
     optimized_assets_url: std::sync::OnceLock<String>,
+    /// Whether deep links carry `local-ab=true`. Mirrors `Opts::local_ab` so
+    /// the landing page builds the same link the terminal banner prints: with
+    /// this on, a link must NOT also name the sidecar directly, since the
+    /// explorer treats `optimized-assets-url` as an override of the
+    /// realm-derived base and the two would cancel out.
+    local_ab: bool,
     /// Pre-encoded `&key=value...` appended to every desktop deep link
-    /// (--asset-bundles/--mcp/--mcp-port and `--` passthrough params).
+    /// (local-ab/--mcp/--mcp-port and `--` passthrough params).
     deep_link_extra: String,
     /// Ring buffer of the latest requests, shown on the landing page.
     recent_requests: Mutex<VecDeque<(String, u16, Instant)>>,
@@ -120,16 +162,9 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .transpose()?;
     let workspace = Workspace::load(&opts.dir)?;
     let first = workspace.projects[0].clone();
-    // Bind before the build steps: a taken port fails fast (explicit --port)
-    // or silently moves to the next free one, and holding the listener keeps
-    // the chosen port ours through the whole build.
     let (port, listener) = bind_preview_port(opts.port).await?;
 
     let data_layer = if opts.data_layer {
-        // Serving the UI and hosting the data layer are separate concerns, and
-        // the host is the one we can always provide: it is in the blob. A
-        // scene with no `@dcl/inspector` gets the protocol anyway, which is
-        // what a Creator-Hub-style external editor connects to.
         let public_dir = data_layer::locate_inspector_public(&first.root)?;
         if public_dir.is_none() {
             tracing::info!(
@@ -157,6 +192,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         data_layer,
         entity_cache: Mutex::new(HashMap::new()),
         optimized_assets_url: std::sync::OnceLock::new(),
+        local_ab: opts.local_ab,
         deep_link_extra: joinblock::deep_link_extra(
             opts.local_ab,
             opts.mcp,
@@ -165,6 +201,10 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         ),
         recent_requests: Mutex::new(VecDeque::new()),
     });
+    if let Some(mcp_port) = opts.mcp.then_some(opts.mcp_port).flatten() {
+        scene_logs::spawn(mcp_port, workspace.projects.clone(), opts.source_context);
+    }
+
     let comms_state = Arc::new(crate::comms::CommsState::default());
 
     let mut steps = if workspace.is_multi() {
@@ -177,22 +217,18 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .route("/", get(root))
         .route("/about", get(about))
         .route("/scenes", get(scenes))
-        // Upstream sdk-commands parity (endpoints.js): scene.json off disk, the
-        // deprecated wearables listing, and the feature-flag CORS hop.
         .route("/scene.json", get(scene_json))
         .route("/preview-wearables", get(preview_wearables))
         .route("/feature-flags/{file}", get(feature_flags))
         .route("/content/contents/{hash}", get(contents).head(contents))
         .route("/content/entities/active", post(entities_active))
         .route("/content/entities/scene", get(entities_scene))
-        .route("/content/entities", post(entities_deploy_proxy))
+        .route("/content/entities", post(catalyst_proxy))
         .route("/lambdas/explore/realms", get(lambdas_explore_realms))
         .route("/lambdas/contracts/servers", get(lambdas_contracts_servers))
-        .route("/lambdas/{*path}", any(lambdas_proxy))
-        .route("/explorer/{*path}", any(explorer_proxy))
+        .route("/lambdas/{*path}", any(catalyst_proxy))
+        .route("/explorer/{*path}", any(catalyst_proxy))
         .route("/world/{name}/about", get(world_about))
-        // The realm-derived asset-bundle base the explorer uses under
-        // `local-ab=true` (what --asset-bundles forwards). Proxies the sidecar.
         .route(
             "/optimized-assets/{*path}",
             any(crate::start::proxy::optimized_assets),
@@ -227,7 +263,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         let optimized_assets_url = match sidecar.as_mut() {
             Some(s) => {
                 if s.wait_ready().await {
-                    ux::note(format!("Serving asset bundles (abgen JIT): {}", s.url));
+                    ux::note_arrow(format!("Serving asset bundles (abgen JIT): {}", s.url));
                     let _ = banner_state.optimized_assets_url.set(s.url.clone());
                     Some(s.url.clone())
                 } else {
@@ -248,15 +284,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
             unreachable,
             tunnel_hint: trunk_url.is_none(),
             editor: banner_state.data_layer.is_some(),
-            // The two are alternatives, never both: the explorer treats
-            // `optimized-assets-url` as an OVERRIDE of the realm-derived base
-            // (DecentralandUrlsSource::ResolveOptimizedAssetsUrl), so emitting
-            // it alongside `local-ab=true` would silently defeat the flag the
-            // user just asked for.
-            optimized_assets_url: match local_ab {
-                true => None,
-                false => optimized_assets_url,
-            },
+            optimized_assets_url: banner_ab_url(local_ab, optimized_assets_url),
             deep_link_extra: banner_state.deep_link_extra.clone(),
             native_hud: true,
         };
@@ -284,12 +312,24 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         r = axum::serve(listener, app) => r.context("serving"),
         _ = shutdown_signal() => Ok(()),
     };
-    // Never orphan abgen: it runs in its own process group (so the
-    // terminal's ctrl-c no longer reaches it) and kill_on_drop cannot fire
-    // when the SDK dies by signal — kill the whole group explicitly on
-    // every exit path.
     crate::asset_bundles::kill_sidecar_group();
     result
+}
+
+/// The `optimized-assets-url` the join block should advertise, given whether the
+/// deep link already carries `local-ab=true`.
+///
+/// The two are alternatives, never both: the explorer treats
+/// `optimized-assets-url` as an OVERRIDE of the realm-derived base
+/// (`DecentralandUrlsSource::ResolveOptimizedAssetsUrl`), so emitting it
+/// alongside `local-ab=true` would silently defeat the flag. Since `local_ab`
+/// now tracks the sidecar, in practice this returns None whenever there is a
+/// sidecar at all — but the pairing is what matters, so it stays explicit.
+fn banner_ab_url(local_ab: bool, sidecar_url: Option<String>) -> Option<String> {
+    match local_ab {
+        true => None,
+        false => sidecar_url,
+    }
 }
 
 /// Resolves on SIGINT (ctrl-c) or, on unix, SIGTERM.
@@ -805,6 +845,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_deep_link_never_carries_both_ab_forms() {
+        let sidecar = || Some("http://127.0.0.1:5147".to_string());
+        assert_eq!(banner_ab_url(true, sidecar()), None);
+        assert_eq!(banner_ab_url(true, None), None);
+        assert_eq!(banner_ab_url(false, None), None);
+        assert_eq!(banner_ab_url(false, sidecar()), sidecar());
+
+        assert_eq!(
+            joinblock::deep_link_extra(true, false, None, &[]),
+            "&local-ab=true"
+        );
+        assert_eq!(joinblock::deep_link_extra(false, false, None, &[]), "");
+    }
+
     fn state(projects: Vec<Project>) -> AppState {
         let (reload_tx, _) = broadcast::channel(4);
         AppState {
@@ -817,6 +872,7 @@ mod tests {
             data_layer: None,
             entity_cache: Mutex::new(HashMap::new()),
             optimized_assets_url: std::sync::OnceLock::new(),
+            local_ab: true,
             deep_link_extra: String::new(),
             recent_requests: Mutex::new(VecDeque::new()),
         }
@@ -970,6 +1026,47 @@ mod tests {
         assert!(body.contains(
             "https://decentraland.org/bevy-web/?preview=true&amp;realm=http://127.0.0.1:8000"
         ));
+
+        let must = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        assert!(
+            must(r#"class="scene""#) < must(r#"id="join""#),
+            "the scene card comes before the join cards"
+        );
+        let panel = must(r#"<div class="panel span-2">"#);
+        let next_panel = body[panel + 1..]
+            .find(r#"<div class="panel"#)
+            .map_or(body.len(), |i| i + panel + 1);
+        assert!(
+            panel < must("<h3>parcels</h3>")
+                && must("<h3>parcels</h3>") < must("<h3>spawn points</h3>")
+                && must("<h3>spawn points</h3>") < next_panel,
+            "spawn points fold into the parcels panel"
+        );
+        assert!(
+            must(r#"id="deploy""#) > must("recent requests"),
+            "deploy is the last section"
+        );
+        assert!(body.contains("dcl-one-sdk deploy --dir "));
+        for page in ["/about", "/scenes", "/scene.json", "/preview-wearables"] {
+            assert!(body.contains(&format!(r#"href="{page}""#)), "{page} linked");
+        }
+        assert!(!body.contains("<form"), "no form, so nothing to POST to");
+        for gone in [
+            "comms ws-room",
+            "abgen ready",
+            "bar__realm",
+            ">setup<",
+            ">server<",
+            "snapshot",
+            "/inspector/",
+            "class=\"foot\"",
+        ] {
+            assert!(!body.contains(gone), "{gone} should be gone");
+        }
+        assert!(!body.contains(&format!("dcl-one-sdk {}", env!("CARGO_PKG_VERSION"))));
     }
 
     #[tokio::test]
@@ -1009,6 +1106,59 @@ mod tests {
         assert!(body.contains("a &lt;script&gt; title"));
     }
 
+    /// The landing page's module doc claims it carries no JavaScript, and the
+    /// design leans on it: every affordance is an `<a>`, a `<details>` or a
+    /// `:hover`. The nearest existing assertion is `!contains("<script>")` in
+    /// the escaping test above, which is about a scene TITLE and would pass
+    /// with `<script src=…>` or an `onclick=` on the page — so the claim needs
+    /// its own test or it is just a comment.
+    #[tokio::test]
+    async fn the_landing_page_carries_no_javascript() {
+        let tmp = Tmp::new("landing-nojs");
+        let root_dir = tmp.0.join("scene-x");
+        std::fs::create_dir_all(root_dir.join("bin")).unwrap();
+        std::fs::write(root_dir.join("bin/index.js"), "module.exports={}").unwrap();
+        let scene_json = json!({
+            "main": "bin/index.js",
+            "display": { "title": "Plain" },
+            "scene": { "parcels": ["0,0"], "base": "0,0" },
+            "requiredPermissions": ["USE_FETCH"],
+            "spawnPoints": [{ "name": "spawn", "default": true,
+                              "position": { "x": 8, "y": 0, "z": 8 } }]
+        });
+        std::fs::write(root_dir.join("scene.json"), scene_json.to_string()).unwrap();
+        let project = Project {
+            root: root_dir.canonicalize().unwrap(),
+            scene_json,
+        };
+        let st = Arc::new(state(vec![project]));
+        let req = axum::extract::Request::builder()
+            .uri("/")
+            .header("host", "127.0.0.1:8000")
+            .header("accept", "text/html")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = root(State(st), req).await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap().to_lowercase();
+        assert!(!body.contains("<script"), "no script element");
+        assert!(!body.contains("javascript:"), "no javascript: url");
+        assert!(!body.contains("<form"), "no form element");
+        for (attr, _) in body.match_indices(" on") {
+            let rest = &body[attr + 3..];
+            let name_len = rest
+                .find(|c: char| !c.is_ascii_alphabetic())
+                .unwrap_or(rest.len());
+            assert!(
+                !(name_len > 0 && rest[name_len..].starts_with('=')),
+                "inline event handler: on{}",
+                &rest[..name_len]
+            );
+        }
+    }
+
     fn state_with_data_layer(public_dir: PathBuf) -> AppState {
         let (reload_tx, _) = broadcast::channel(4);
         let (_tx, port_rx) = tokio::sync::watch::channel(1234u16);
@@ -1026,6 +1176,7 @@ mod tests {
             }),
             entity_cache: Mutex::new(HashMap::new()),
             optimized_assets_url: std::sync::OnceLock::new(),
+            local_ab: true,
             deep_link_extra: String::new(),
             recent_requests: Mutex::new(VecDeque::new()),
         }
@@ -1140,7 +1291,6 @@ mod tests {
         assert!(body.len() < plain.len());
         assert_eq!(crate::data_layer::gunzip(&body).unwrap(), plain);
 
-        // No Accept-Encoding: the editor still has to load.
         let expanded =
             inspector_asset(State(st), AxPath("bundle.js".to_string()), HeaderMap::new()).await;
         assert_eq!(expanded.status(), StatusCode::OK);
@@ -1192,7 +1342,7 @@ mod tests {
         assert!(content.iter().any(|c| {
             c["file"] == json!("bin/index.js")
                 && c["hash"]
-                    == json!(b64_hash(
+                    == json!(crate::scene::b64_content_hash(
                         &b.root.join("bin/index.js").display().to_string(),
                         "test-machine"
                     ))

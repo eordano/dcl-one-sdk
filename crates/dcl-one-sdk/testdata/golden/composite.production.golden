@@ -1,0 +1,84 @@
+(dcl-one-sdk golden v1 composite production)
+TOOLCHAIN sdk=7.26.0 ecs=7.26.0 bundler=rolldown-1.2.4 blob=sha256:bfba3692f31514bd
+SCENE_COMPILED_JS_SIZE_PROD=481.5k bytes
+  ARTIFACT bin/index.js               5885 sha256=62c40fde5c2afc25
+  ARTIFACT bin/scene.js               1051 sha256=98124e6cf6a79d76
+  ARTIFACT bin/sdk-runtime.js       474613 sha256=33bab9f0f499ea4a
+LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=513
+ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
+  // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
+  "use strict";
+  import * as entrypoint from "<SCENE>/src/index.ts"
+  import { engine, NetworkEntity } from '@dcl/sdk/ecs'
+  import * as sdk from '@dcl/sdk'
+  import { compositeProvider } from '@dcl/sdk/composite-provider'
+  import { compositeFromLoader } from '~sdk/all-composites'
+  import { _initializeScripts } from '~sdk/script-utils'
+  import { compositeFromLoader as __sceneComposites } from './all-composites.js'
+  Object.assign(compositeFromLoader, __sceneComposites)
+
+  false
+
+  // `console.error(e)` drops the frames, and the host captures its own stack at
+  // the call site — this catch block. `e.stack` carries the throw site, so it is
+  // a superset of what upstream prints.
+  function __reportSceneError(e: any) {
+    console.error(e && e.stack ? e.stack : e)
+  }
+
+  if ((entrypoint as any).main !== undefined) {
+    function _INTERNAL_startup_system() {
+      try {
+        _initializeScripts(engine)
+
+        const maybePromise = (entrypoint as any).main()
+        if (maybePromise && typeof maybePromise === 'object' && typeof (maybePromise as unknown as Promise<unknown>).then === 'function') {
+          maybePromise.catch(__reportSceneError)
+        }
+      } catch (e) {
+        __reportSceneError(e)
+      } finally {
+        engine.removeSystem(_INTERNAL_startup_system)
+      }
+    }
+    engine.addSystem(_INTERNAL_startup_system, Infinity)
+  }
+
+  export * from '@dcl/sdk'
+  export * from "<SCENE>/src/index.ts"
+  export * from '~sdk/script-utils'
+  REQUIRE(scene): @dcl/sdk
+  REQUIRE(scene): @dcl/sdk/ecs
+  REQUIRE(scene): @dcl/sdk/math
+  REQUIRE(scene): ~sdk/all-composites
+  REQUIRE(scene): ~sdk/script-utils
+MAIN_CRDT main.crdt 317 bytes sha256=a12a5297f2515775 (native, 1 composite)
+DEPLOY entity=bafkreibuwoz2aureyo7oov6bd3vhsp3ozmz2pxyhdjrszqjt7cncdiskxa files=6 total=483.7k bytes
+  bafkreibig7gpevw73nv2ygong3jlgzthtzutgbfy6u3qwpzxgzbujzc5cu scene.json 166 bytes
+  bafkreifbfjjjp4srk523rnwg3ktgpy65qmvh2swj7ebkyzi5ncvkqtg4pq main.crdt 317 bytes
+  bafybeiagimmlavww7momge3jfpkxtniibletbghzk6eybyv4jov777wvl4 bin/sdk-runtime.js 474613 bytes
+  bafkreieycjhgz5vhtv3btvbq72tlqkyaehbijr4dwmbluqlzx2xq6e7ysi bin/scene.js 1051 bytes
+  bafkreidcyqh54xbk7qsqvpmbfptzrug3vqtxn3p44cn5cc7nz33iar24pm bin/index.js 5885 bytes
+  bafkreiajivmg7dakw5cltgz5g6lmx7ntzxvvz2r5cf6xtznoappci2w6nu assets/scene/main.composite 1664 bytes
+EVAL bin/index.js
+  READFILE: bin/sdk-runtime.js
+  READFILE: bin/scene.js
+  REQUIRE: ~system/Runtime
+  REQUIRE: ~system/EngineApi
+  REQUIRE: ~system/CommunicationsController
+  REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/EthereumController
+CALL onStart()
+  main.crdt: PUT_COMPONENT e=0x200 c=1 t=0 data={"position":{"x":16,"y":0.009999999776482582,"z":16},"rotation":{"x":0,"y":0,"z":0,"w":1},"scale":{"x":32,"y":0.019999999552965164,"z":32},"parent":0}
+  main.crdt: PUT_COMPONENT e=0x201 c=1 t=0 data={"position":{"x":16,"y":3,"z":16},"rotation":{"x":0,"y":0,"z":0,"w":1},"scale":{"x":1,"y":1,"z":1},"parent":0}
+  main.crdt: PUT_COMPONENT e=0x200 c=1018 t=0 data={"mesh":{"$case":"box","box":{"uvs":[]}}}
+  main.crdt: PUT_COMPONENT e=0x200 c=1019 t=0 data={"collisionMask":3,"mesh":{"$case":"box","box":{}}}
+  main.crdt: PUT_COMPONENT e=0x200 c=1017 t=0 data={"material":{"$case":"pbr","pbr":{"albedoColor":{"r":0.019999999552965164,"g":0.029999999329447746,"b":0.05000000074505806,"a":1},"emissiveColor":{"r":0.009999999776482582,"g":0.019999999552965164,"b":0.029999999329447746},"metallic":0,"roughness":1,"emissiveIntensity":0.20000000298023224}}}
+  main.crdt: PUT_COMPONENT e=0x201 c=1070 t=0 data={"area":{"x":14,"y":6,"z":14},"excludeIds":[],"modifiers":[0,1]}
+CALL onUpdate(0)
+  Scene: PUT_COMPONENT e=0x202 c=1 t=1 data={"position":{"x":4,"y":2,"z":4},"rotation":{"x":0,"y":0,"z":0,"w":1},"scale":{"x":1,"y":1,"z":1},"parent":0}
+CALL onUpdate(0.1)
+CALL onUpdate(0.1)
+CALL onUpdate(0.1)
+HOSTCALLS readFile=2 crdtGetState=1 crdtSendToRenderer=4 sendBatch=4
+CRDT_TRAFFIC messages=7 bytes=385

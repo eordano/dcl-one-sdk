@@ -1,558 +1,255 @@
 # dcl-one-sdk
 
-Binary-compatible Rust replacement for `@dcl/sdk-commands`: bundle (rolldown,
-in-process), preview-serve, and deploy Decentraland SDK7 scenes. Parity target:
-`@dcl/sdk-commands` 7.26.0 (npm latest); the vendored node_modules and init
-scaffold pin the same 7.26.0 line (blob regenerated via
-`scripts/build-base-blob.py`). Scenes still on 7.22.6
-(project-realm-template / editor-scene) remain
-covered — every 7.22.6→7.26.0 behavior change ported here is
-backward-compatible with them.
+One binary that builds, previews and publishes Decentraland SDK7 scenes.
 
-## Commands
+It replaces `@dcl/sdk-commands` — the npm CLI a scene normally depends on — with
+a single Rust executable. There is nothing to `npm install`: the bundler is
+rolldown compiled in-process, the TypeScript toolchain a scene needs is
+vendored inside the binary and extracted on demand, and the abgen asset-bundle
+converter is embedded too. A machine with this binary and nothing else can
+scaffold a scene, build it, serve a live preview to the desktop client, and
+deploy it to a catalyst.
 
-- `dcl-one-sdk init [--dir D] [--project scene|smart-wearable] [-y|--yes]` -
-  embedded templates, no network; refuses a non-empty dir without `--yes`;
-  prompts for project kind on a TTY, else defaults to `scene`. Scene
-  scaffold: scene.json, package.json with exact-pinned `@dcl/sdk`
-  devDependencies and npm scripts that call `dcl-one-sdk`, tsconfig extending
-  `tsconfig.ecs7.json`, src/index.ts, .gitignore, .dclignore, README, navmap
-  thumbnail; a vendored node_modules is extracted from the binary
-  (`--node-modules-only` restores it into an existing project).
-  The blob carries a stand-in for `@dcl/inspector` (0.18 MB) that covers
-  both the crdt dump (so composite scenes regenerate `main.crdt` offline)
-  and a minimal data-layer host (so `start --data-layer` serves the editor
-  protocol offline: 4 of the 22 rpc methods live, 18 inert stubs). The
-  editor's browser UI is not vendored — `/inspector/*` needs
-  `npm install --save-dev @dcl/inspector` or `DCL_ONE_INSPECTOR_DIR`. See
-  `src/vendor/README.md` for why, and for what the 18 stubs cost.
-  Smart-wearable scaffold: `wearable.json` skeleton with generated UUID
-  `id`, the full 10x10 portable-experience parcel grid, the `pack` npm
-  script, a README naming the model.glb / thumbnail.png to supply.
-- `dcl-one-sdk get-context-files [--dir D] [--offline]` - installs the AI
-  context a scene hands to an agent, in two halves. The **embedded** half
-  writes `.claude/skills/migrate-smart-items-to-code/` (SKILL.md + two references,
-  57 KB) out of the binary — no network, no npm; that path is where Claude
-  Code discovers project skills, so the agent picks it up by frontmatter
-  `name`/`description` without anyone pointing at it. The **downloaded** half
-  recreates `dclcontext/` flat from the `decentraland/documentation`
-  `ai-sdk-context` corpus via the GitHub contents API. An unreachable GitHub
-  is a note, not a failure: the skill is installed, `dclcontext/` is left
-  exactly as it was (it is no longer wiped before the request), and the
-  command still exits 0. `--offline` skips the request. Outside a project
-  nothing is written at all — exits 0 with guidance. API base override:
-  `DCL_ONE_SDK_CONTEXT_API`. Skill source: `skills/` at the crate root,
-  embedded by `src/skills.rs`; a file added there but not to `EMBEDDED` fails
-  `cargo test`.
-- `dcl-one-sdk build [--dir D] [-p|--production] [-w|--watch] [--ignoreComposite]
-  [--customEntryPoint] [--skip-install] [--skip-type-check]` - at a
-  `dcl-workspace.json` root builds every member in order with upstream's dim
-  `[i/n] in <folder>:` header; `-w|--watch` runs one watch session per member.
-- `dcl-one-sdk start [--dir D] [-p|--port N] [--skip-build] [--skip-install] [-w|--no-watch] [--ci] [--ignoreComposite] [--offline-comms] [-m|--mobile] [--data-layer] [--no-asset-bundles] [--asset-bundles] [--mcp] [--mcp-port N] [--tunnel WSS_URL|help] [--tunnel-token TOKEN] [--tunnel-token-file PATH] [-- EXPLORER_PARAMS...]` -
-  accepts and ignores `--no-browser`, `--mini-comms`, `--skip-install` for
-  drop-in compat with supervisor-managed preview service invocations that
-  pass the upstream flags (the deployment's project-realm / editor-scene
-  systemd units). Comms is ON by default;
-  `--data-layer` enables the visual editor (Creator Hub section). An abgen
-  asset-bundle sidecar runs by default on 5147 (abgen's canonical port;
-  taken = random fallback — either way the desktop deep link carries
-  `optimized-assets-url=<sidecar>` once `/readyz` passes). EVERY build
-  embeds abgen — `cargo build` too, no optionality: `abgen-release.lock`
-  pins an upstream release plus a per-target archive sha256, and build.rs
-  downloads it into `$CARGO_HOME/dcl-one-sdk-abgen` (or
-  `ABGEN_EMBED_CACHE`), verifies the hash, and embeds the executable
-  deflate-compressed (13 MB in-binary for 36 MB on disk). A release abgen is
-  ONE self-contained file — templates and shaders are compiled into it
-  (`/health`: `template_ok: true, templates_missing: []`), so no `template/`
-  or `shader/` siblings are needed. `export-overlay/flake.nix` parses the
-  same lock and `fetchurl`s the same archive, so nix and cargo builds carry
-  identical bytes; `scripts/pin-abgen.sh <tag>` repins from the release's own
-  SHA256SUMS.txt. `ABGEN_EMBED_BIN=<path>` embeds a different abgen instead
-  of downloading (offline builds, musl hosts — the pinned Linux archives are
-  glibc-linked — an abgen from source). At run time only `ABGEN_BIN`
-  overrides the embedded copy; the scene's `@dcl/abgen` npm package and PATH
-  are NOT consulted, so a scene cannot silently swap the sidecar version.
-  Extraction is under `<temp>/dcl-abgen/bin/<content-tag>/`, reused across
-  runs (a length check against the embedded raw size; the tag already pins
-  content) and serialized by a process mutex with a pid+counter staging
-  name — pid alone is not unique between threads, and two callers used to
-  truncate each other's staging file and publish a 0-byte abgen. That path
-  holds ONLY the extracted binary, never conversion output. Conversion output + JIT
-  cache live IN the scene: `.dcl-optimized-assets/{out,cache}`
-  (watcher-ignored — hot reload would loop on abgen's revalidation writes —
-  and never deployed). Every `ABGEN_*` var the SDK sets is env-wins (export
-  it to override): `ABGEN_CATALYST_URL=http://127.0.0.1:<port>/content`,
-  `ABGEN_UPSTREAM_AB_CDN` zone-aware (a `.zone` catalyst pairs with
-  `ab-cdn.decentraland.zone`, else `.org`; abgen derives the matching
-  asset-bundle-registry from that URL itself),
-  `ABGEN_INDEX_EAGER_BUILD=off`, `ABGEN_INDEX_BUILD_PLATFORMS=<host
-  platform>`, `ABGEN_WORLDS_CONTENT_URL=off` explicitly (abgen defaults it
-  ON when unset; nothing remote is locally convertible in preview), and
-  JIT/index/rayon concurrency = ceil(3/4·ncpu)
-  (`ABGEN_JIT_BUILD_CONCURRENCY`, `ABGEN_INDEX_BUILD_CONCURRENCY`,
-  `RAYON_NUM_THREADS`); `ABGEN_GPU_BACKEND` is deliberately NOT set
-  (abgen's auto is right) but exports still pass through. Preview
-  back-fill: content hashes the local scene does not own (wearable GLBs,
-  emotes, profile snapshots) and unmatched NON-parcel pointers resolve from
-  `DCL_ONE_SDK_CATALYST`, which defaults to the LOCAL catalyrst content
-  server (`http://127.0.0.1:5141`, `proxy.rs::LOCAL_CATALYST`) — NOT to a
-  public catalyst, so a preview never silently sources its realm from
-  production. Nothing listening there means `/lambdas/profiles` and other
-  back-fill routes return 502 until you name an upstream; that is the
-  intended posture, not a failure. (`https://interconnected.online` is the
-  `deploy` default — `deploy/mod.rs` — and applies to publishing only.)
-  Parcel pointers never go upstream at all. Fetched
-  content is LRU-cached in `<scene>/.dcl-cache/contents` (recency = file
-  mtime, default 5000 entries, `DCL_ONE_SDK_CONTENT_CACHE_MAX` overrides, 0
-  disables), so the next session serves it offline. Sidecar `ABGEN_BUILD`
-  json lines are rewritten to
-  `abgen build: <file> (<platform>) <ms>, in <size>, out <size>` (the FAIL
-  variant goes to stderr); other sidecar output relays verbatim. A crashing
-  abgen prints a one-line hint and preview starts immediately (it can no
-  longer be missing), and `--no-asset-bundles` turns the sidecar off — which
-  is exactly upstream's preview, since upstream has no sidecar at all.
-  `--asset-bundles` (upstream 7.26.0) does NOT hand conversion to the
-  Explorer — an earlier version of this file and of `--asset-bundles --help`
-  both said so and both were wrong. Per `AppArgsFlags.LOCAL_AB` in
-  unity-explorer the flag "carries no URL or port": the client appends
-  `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH` (`/optimized-assets`) to the
-  realm it already has, so the PREVIEW SERVER must serve
-  `{realm}/optimized-assets` — pinned by that repo's
-  `RealmLaunchSettingsShould` cases (`http://127.0.0.1:8000` ->
-  `http://127.0.0.1:8000/optimized-assets`, ref js-sdk-toolchain#1504). This
-  server proxies that path to the sidecar, so the sidecar keeps running under
-  `--asset-bundles` and only the addressing changes: `local-ab=true` in the
-  deep link instead of `optimized-assets-url`. One origin means no second port
-  and no second firewall approval on a LAN join. `--mcp` and
-  `--mcp-port N` forward as deep-link params, and anything after a standalone
-  `--` is forwarded verbatim into the deep link as query params
-  (`--key=value`, `--key value`, bare `--key` becomes `key=true`; declared
-  and core params win over passthrough). Trap: the abgen RELEASE
-  archives' `abgen` is the JIT server (`catalyrst-abgen` bin renamed by the
-  abgen export assembler); the in-tree `--bin abgen` is the one-shot
-  converter CLI and exits on boot if embedded. After bind
-  it prints the JOIN BLOCK: per-interface realm URLs classified via
-  `src/netinfo.rs` (loopback / LAN / overlay-VPN / virtual bridge,
-  link-local skipped), each address self-probed for reachability; web +
-  desktop-deep-link + second-instance (`&multi-instance=true`) + native
-  rows; the second-identity note (same address = kicked by the relay); a
-  mixed-content warning with the loopback `ssh -L` workaround; a Chrome/Edge
-  Local Network Access note under the web row (the hosted web explorer needs
-  the "Apps on device" permission to reach a local realm; the
-  `chrome://settings` deep link follows the configured web-explorer origin);
-  warnings for loopback-only and NAT-VM guest (`10.0.2.15`). A failed INITIAL
-  build no longer kills `start`: the server binds and the watcher runs
-  anyway, the error reports in the re-build style, and the first save that
-  fixes it completes the initial build and hot-reloads (config errors —
-  scene.json `main`, missing tsconfig — stay fatal, as upstream). Every URL handed out
-  (`/about` fixedAdapter, `content.publicUrl`, `scenesUrn` baseUrl) is
-  Host-header-derived, so whatever address a client dials is the address
-  comms + content flow through. `--mobile` adds a terminal QR
-  of the LAN mobile deep link. Web-row explorer base:
-  `DCL_ONE_SDK_WEB_EXPLORER`. At a `dcl-workspace.json` root all members are
-  served in ONE realm. `--tunnel <wss-url>` / `--tunnel-token` / `--tunnel
-  help`: see the tunnel section.
-- `dcl-one-sdk deploy [--dir D] [-t|--target CATALYST] [--target-content URL]
-  [--sign-key PATH] [--skip-build] [--dry-run] [--timestamp MS] [--entity-out PATH]
-  [--multi-scene] [-y|--yes] [-b|--no-browser] [--ci] [-p|--port N]`
-  - signing: `--sign-key` (wins) or `DCL_PRIVATE_KEY` (env use announced on
-    stderr) sign headlessly; otherwise a
-    local signing page is served (`/api/info` re-mints a fresh entity per
-    page load, `personal_sign(entityId)`, POST `/api/sign` uploads) and its
-    URL is ALWAYS printed (gate `g13`; upstream's `--no-browser` silent hang
-    cannot recur). Browser opens unless `--no-browser`/`--ci`; wait times
-    out after 10 minutes (`DCL_ONE_SDK_LINKER_TIMEOUT_SECS` overrides);
-    `--port` pins the page's port (default: any free port).
-  - target resolution (upstream `getCatalyst` semantics): `--target-content
-    <url>` verbatim; `--target <catalyst>` gets `https://` prepended when
-    scheme-less, is probed via `GET /about`, deploys to `content.publicUrl`;
-    both together rejected. With neither: `DCL_ONE_SDK_DEFAULT_TARGET`
-    (probed as catalyst first, else content URL) wins if set; a
-    `worldConfiguration` scene demands an explicit server; a headless key
-    demands an explicit target (key-signed deploys never pick a server
-    implicitly); the browser flow walks the upstream mainnet catalyst
-    snapshot and uses the first `/about`-healthy one. Parcel deploys whose
-    resolved target host is off the upstream rotation print a network-scope
-    note ("updates that network only, not Genesis City on decentraland.org").
-  - worlds: without `--multi-scene`, existing scenes on other parcels get a
-    `Continue? (y/N)` prompt (`--yes` skips; non-TTY/`--ci` refuses); the
-    armed removal signs the upstream `delete:/entities/<world>:<ts>:{}`
-    payload (second browser signature or the same key) and sends
-    `DELETE <tc>/entities/<world>` with `x-identity-*` headers before
-    uploading; when the server lacks that upstream route (HTTP 404/405 -
-    today's catalyrst-worlds), the key-signed flow falls back to per-scene
-    signed-fetch deletes (`DELETE <tc>/world/<name>/scenes/<coord>`).
-    `--multi-scene` is purely additive.
-  - `--timestamp`/`--entity-out` make entity construction reproducible for
-    oracle A/B (browser flow re-mints at signing time unless `--timestamp`
-    pins it).
-- `dcl-one-sdk unpublish --parcel X,Y [-t|--target CATALYST] [--target-content
-  URL] [--sign-key PATH]` - signed-fetch `DELETE <content>/scenes/{x},{y}`
-  against a dcl-one-style content core (key signing only, same
-  `--sign-key`/`DCL_PRIVATE_KEY` plumbing). Only scenes published to that
-  network are deletable; synced Genesis City entities 404, and a successful
-  unpublish reverts the parcel to the last synced Genesis City state there.
-- `dcl-one-sdk world settings get|set NAME [--target-content URL]` and
-  `dcl-one-sdk world permissions list|grant|revoke NAME [PERMISSION ADDRESS] [--target-content URL]` -
-  worlds-server management with the ADR signed-fetch auth chain
-  (`method:path:timestamp:metadata` lowercased, EIP-191 2-link), signed with
-  `--sign-key`/`DCL_PRIVATE_KEY` (flag wins). `settings set` multipart fields: `--title
-  --description --content-rating --spawn-coordinates --skybox-time
-  --single-player --show-in-places --category (repeatable) --thumbnail
-  <png>`. `permissions grant|revoke` maps to
-  `PUT|DELETE /world/{name}/permissions/{deployment|streaming|access}/{address}`;
-  `list`/`settings get` are unsigned reads.
-  - signing: the mutating subcommands (`settings set`, `permissions
-    grant|revoke`) take the same signer options as `deploy` and also accept
-    `[-b|--no-browser] [--ci] [-p|--port N]`. With no key they serve a local
-    signing page (`/api/info` mints a fresh `method:path:timestamp:{}` payload
-    per load, `personal_sign(payload)`, POST `/api/sign` performs the request)
-    whose URL is always printed. This is how a world owner grants a disposable
-    deploy key without ever exporting their own: grant once from the browser,
-    then run the deploys headlessly under that key. A 401/403 keeps the page
-    alive and asks for a different wallet — the usual cause is the wrong
-    account being connected — while any other failure exits the CLI.
-- `dcl-one-sdk pack [--dir D] [--skip-build]` (alias `pack-smart-wearable`) -
-  flat `smart-wearable.zip` of the publishable file set (same `.dclignore`
-  semantics and glob-9 ordering as deploy; entries resolved against the
-  project dir, fixing the upstream cwd defect). Validates wearable.json
-  first (rarity/category schema enums, representations complete, referenced
-  files present); the 2 MiB overrun is a warning (as upstream); plain scenes
-  get an explicit "not a smart wearable" error, not upstream's silent exit 0.
+**Compared with upstream.** The parity target is `@dcl/sdk-commands` 7.26.0,
+which is npm `latest`; the vendored toolchain and the `init` scaffold pin the
+same line, and scenes still on 7.22.6 keep working because every behaviour
+change ported here is backward-compatible with them. Commands, flags and output
+match upstream closely enough to drop into a supervisor that invokes the npm
+CLI, including flags this binary accepts and ignores. Where it deliberately
+differs: builds are in-process rather than shelling out to node, `main.crdt` is
+generated natively instead of through `@dcl/inspector`, the preview runs an
+asset-bundle sidecar upstream has no equivalent of, content hashes are
+content-addressed rather than path-derived, and scene runtime errors are pulled
+out of the running client and printed in your terminal. Each of those is called
+out below where it matters.
 
-## Build parity
+---
 
-`@dcl/sdk-commands` bundles via the esbuild JS API + two JS plugins;
-dcl-one-sdk reproduces that pipeline with rolldown compiled into the binary
-(`src/rolldown_backend.rs`, crates pinned `=1.2.0` - their Rust API is
-internal surface, bump in lockstep), so no JS toolchain runs in the bundle
-path. The three virtual inputs upstream feeds esbuild through plugins are
-pre-generated as real files under `<project>/.dcl-one/`:
+## Start a scene
 
-- `.dcl-one/entrypoint.ts` - port of `getEntrypointCode()` (incl. the
-  literal `false` statement upstream emits for non-editor scenes), the
-  `~sdk/all-composites` / `~sdk/script-utils` imports rewritten to relative
-  paths; `is_editor_scene()` parses `assets/scene/main.composite` and
-  requires an `asset-packs::` component other than the build-time-only
-  `asset-packs::Script` (7.24.5 `isEditorScene`, upstream #1381; malformed
-  or missing composite = not an editor scene)
-- `.dcl-one/all-composites.js` - `export const compositeFromLoader = {...}`;
-  since 7.24.5 only a ROOT-LEVEL `main.composite` is inlined (secondary
-  composites stay on disk and lazy-load at runtime through the sdk composite
-  provider via `~system/Runtime.readFile`; editor scenes keep their state in
-  `main.crdt`), each through the Rust port of upstream's
-  `Composite.fromJson` -> `Composite.toJson` normalization
-  (`src/composite_norm.rs`, schema table `docs/composite-component-schemas.json`
-  regenerated from the released `@dcl/ecs` 7.26.0; edge cases in
-  `docs/composite-tojson-edge-cases.json`); byte-identical to upstream.
-  Composite files over 16 MiB are refused (upstream cap), and the scan also
-  yields `maxCompositeEntity` = max(`entityId & 0xffff`) across every
-  parseable composite
-- `.dcl-one/script-utils.js` - upstream's 7.26.0 gate first: a scene whose
-  composites author no `asset-packs::Script` instances and that is not an
-  editor scene gets the tiny stub module (same export surface, no runtime),
-  skipping the embedded script runtime entirely. Only the rest inline
-  sdk-commands' `dist/logic/runtime-script.js`
-  from the scene's node_modules, same CJS-strip transforms, incl.
-  `prepareRuntimeCode`'s `@dcl/inspector/node_modules/@dcl/asset-packs` ->
-  `@dcl/asset-packs` rewrite (without it the inlined runtime-script keeps an
-  `--external:@dcl/inspector/*` require that throws at eval); wrapped with
-  `_initializeScripts` (scripts array support not implemented). In watch, a
-  composite edit that flips the gate rebuilds the sdk chunk even though no
-  registry key changed
+```
+dcl-one-sdk init [--dir D] [--project scene|smart-wearable] [-y|--yes]
+```
 
-Options mirrored onto `rolldown::BundlerOptions`: cjs/browser/es2020,
-externals (`~system/*`, `@dcl/inspector*`; `*` globs compiled to anchored
-regexes), aliases (react, `@dcl/sdk`, `@dcl/ecs`, `@dcl/asset-packs` -
-upstream resolution order, which since 7.24.5 checks the scene's OWN
-`node_modules/@dcl/asset-packs` by direct path, never a walk-up resolve;
-`Project::node_module` has always behaved that way), define block
-(document/window/DEBUG/NODE_ENV), minify in production, `sourcemap: inline`
-dev / NONE in production (7.24.5 dropped prod maps; `*.map` also joined the
-`.dclignore` defaults). Upstream's `DCL_MAX_COMPOSITE_ENTITY` esbuild define
-is delivered differently in the split layout: the loader stub sets
-`globalThis.DCL_MAX_COMPOSITE_ENTITY` before the sdk chunk evals - the
-`typeof`-guarded reader in `@dcl/ecs` `createEntityContainer` sees the same
-value, and the cached sdk-runtime chunk bytes stay independent of composite
-content (watch rewrites the stub when the value changes).
-`INVALID_ANNOTATION`/`IMPORT_IS_UNDEFINED` warnings are filtered
-caller-side (rolldown core ignores `ChecksOptions` for emission). Type checking
-shells the scene's own `node_modules/typescript/lib/tsc.js --noEmit` under
-node (upstream's forked-tsc behavior).
+Writes a scene from templates embedded in the binary — no network. You get
+`scene.json`, a `package.json` whose scripts call `dcl-one-sdk`, a `tsconfig`
+extending `tsconfig.ecs7.json`, `src/index.ts`, `.gitignore`, `.dclignore`, a
+README and a navmap thumbnail. It refuses a non-empty directory unless you pass
+`--yes`, and on a terminal it asks which kind of project you want.
 
-## Start parity
+The vendored `node_modules` is extracted from the binary at the same time.
+`--node-modules-only` restores it into a project that already exists.
 
-The preview-server surface bevy-explorer consumes:
+`--project smart-wearable` scaffolds a wearable instead: a `wearable.json`
+skeleton with a generated UUID, the full 10×10 portable-experience parcel grid,
+and a `pack` script.
 
-- `GET /world/{name}/about` + `GET|HEAD /world-content/{name}/contents/{hash}` -
-  same-origin mirror of an upstream world (base `DCL_ONE_SDK_WORLD_BASE`; there
-  is no default, and the route answers 501 until you set it), `scenesUrn` baseUrls rewritten to
-  the mirror; content resolves through a candidate-fallback list (urn baseUrl
-  -> world-base origin -> about `content.publicUrl`, first answering host
-  promoted) because worlds hosts advertise contents URLs that can 404, and is
-  LRU-cached in `.dcl-cache`. Exists so the web explorer's movement controller
-  (`basiccontroller.dcl.eth`, a portable loaded at startup) reaches a
-  CORS-clean origin in local previews: every web join URL pins
-  `portables=<realm>/world/basiccontroller.dcl.eth` at the mirror.
-- `GET /about` - sdk-commands `setupRealmAndComms` shape
-  (`localSceneParcels`, `bff.publicUrl = host`); `scenesUrn` embeds a
-  `?=&baseUrl=http://<host>/content/contents/` modifier pinning content
-  fetches to the preview server (bevy's `ipfs_path.rs::to_url` checks the
-  embedded base BEFORE the realm about; without it `main.crdt` raced against
-  the default catalyst and the scene never loaded)
-- `GET /mini-comms/{roomId}` - RFC-5 ws-room relay (comms section)
-- `GET|HEAD /content/contents/{b64-hash}` - `b64-` +
-  base64(`<absPath>-<machineId>`) addressing (sdk-commands'
-  `b64HashingFunction`), restricted to paths under the project root; the
-  project-root hash returns the scene entity JSON (upstream `serveFolders`);
-  responses carry `ETag` (= `hash_bytes_v1` content CID) +
-  `Cache-Control: no-cache` and answer `If-None-Match` with 304 - the b64
-  hashes are path-derived and never change on edit, so revalidation is what
-  makes the sdk-runtime chunk cache; every request hits the access log
-- `POST /content/entities/active`, `GET /content/entities/scene` -
-  synthetic scene entity with b64 content hashes
-- `GET /scenes` - `{"scenes":[],"total":0}`
-- `GET /mobile-preview` - `{ok,data:{url,qr}}` with the mobile deep link and
-  the QR as an `image/svg+xml` data URL (upstream ships PNG; both embed in
-  `<img src>`); 404 `{ok:false,error:"No LAN IP address found"}` without a
-  shareable interface
-- `GET /` - WebSocket; each reload pushes TWO frames in guaranteed order:
-  the legacy `{"type":"SCENE_UPDATE","payload":{"sceneId"}}` text frame
-  first (the only frame bevy's `comms/src/preview.rs` parses), then a binary
-  protobuf `WsSceneMessage` (`updateScene`; `updateModel` with
-  upstream-bug-compatible `src`/`hash` fields for `.glb`/`.gltf` edits,
-  which notify without a rebuild — `UMT_CHANGE` while the file exists on
-  disk, `UMT_REMOVE` once it is gone; removal is judged by existence at
-  batch time, so a delete-then-recreate inside one debounce window reports
-  `UMT_CHANGE`) for foundation explorers. Deliberate divergence: upstream's
-  undebounced `unlink` handler sends `UMT_REMOVE` and its debounced `all`
-  handler then re-sends the same deleted model as `UMT_CHANGE` 800 ms
-  later; we send exactly one `UMT_REMOVE` and no contradicting follow-up
-- watcher: notify, 100 ms debounce, filters ts/tsx/js/jsx/composite; ignores
-  `.dcl-one`/`bin`/`node_modules`/`.git` matched as path COMPONENTS (not
-  string prefixes - `bindings.ts` or a `binary/` folder are
-  still watched); drops inotify Access events (the rebuild's own reads
-  otherwise self-trigger an infinite loop); composite changes regenerate
-  `.dcl-one/all-composites.js` strictly before the rebuild
-- workspaces (`dcl-workspace.json`, upstream `logic/workspace-validations.js`
-  semantics; no file -> single-folder workspace on the fly): `/about` unions
-  `localSceneParcels`, one
-  `scenesUrn` per member; the entities endpoints answer over the union
-  filtered by requested pointers (upstream `pointerRequestHandler`; no
-  pointers -> all entities where upstream returns `[]` - deliberate, keeping
-  the single-scene bevy flow byte-identical); `/content/contents/{b64}`
-  resolves the owning member by longest-root match; per-member watch
-  session, reload frames carry that member's sceneId so only that scene
-  reloads. Single-scene projects take the exact pre-workspace code path.
+One gap worth knowing: the vendored blob carries a stand-in for
+`@dcl/inspector` that covers the crdt dump and a minimal data-layer host, but
+not the editor's browser UI. `/inspector/*` needs a real
+`npm install --save-dev @dcl/inspector`, or `DCL_ONE_INSPECTOR_DIR` pointing at
+one.
 
-## Creator Hub / visual editor (`start --data-layer`)
+### AI context files
 
-Node-bridge approach (a pure-Rust DataService was rejected):
+```
+dcl-one-sdk get-context-files [--dir D] [--offline]
+```
 
-- `start --data-layer` writes `.dcl-one/data-layer-host.mjs` (embedded
-  template) and spawns it under node: the driver `createRequire`s the
-  SCENE'S OWN `@dcl/inspector`, `@dcl/rpc` and `ws` (no version skew), boots
-  `createDataLayerHost(fs)` over a ported sdk-commands fs adapter
-  (cwd-sensitive; the driver chdirs to the project), and serves the
-  22-procedure `DataService` on a loopback-only ephemeral port reported as
-  `{"ready":true,"port":N}` on stdout. Restart with 1s->30s backoff; the
-  driver exits when stdin closes so no node process outlives `start`
-  (tokio's `Child::wait()` closes stdin - the supervisor holds the handle).
-- When the scene has no `@dcl/inspector`, `req()` falls through to the
-  vendored stand-in and the SAME code path runs against
-  `src/vendor/inspector-shim` — a real host, not a stub: `crdtStream`,
-  `save`, `get`/`setInspectorPreferences` plus 100ms-debounced autosave;
-  the remaining 18 methods return well-formed empty responses. It defines
-  all 57 editor components at boot from a pinned schema table, because
-  `@dcl/ecs` silently DROPS crdt messages for components the engine does
-  not know. Serving the UI is decoupled from hosting the data layer:
-  `locate_inspector_public` returns `Option` and a missing UI is a 404 on
-  `/inspector/*`, not a failed `start`.
-- `GET /data-layer` raw-proxies binary WS frames to the driver.
-  `GET /inspector/` serves the scene's own
-  `node_modules/@dcl/inspector/public` with the `$CONFIG` injection
-  (`dataLayerRpcWsUrl` derived per-request from Host/X-Forwarded-*). Gotcha:
-  only the `const config = '$CONFIG'` assignment may be rewritten - the file
-  also compares `config !== '$CONFIG'` as a sentinel; replacing both makes
-  the UI silently fall back to its in-memory fake data layer (unit-pinned).
-- The join block prints `editor: http://<ip>:<port>/inspector/` rows; scenes
-  without an installed inspector UI get a 404 there naming the package, and
-  can point `DCL_ONE_INSPECTOR_DIR` at an external `@dcl/inspector`.
-- Save loop: inspector save -> `assets/scene/main.composite` -> watcher ->
-  regeneration -> incremental rebuild -> SCENE_UPDATE push -> hot reload.
-- `assets/scene/entity-names.ts`: regenerated from the composites'
-  `core-schema::Name` components, byte-identical to what Creator Hub writes
-  (its trailing `"} \n"` included), so a scene moving between the Hub and this
-  toolchain shows no diff. Hub scenes import the enum it declares —
-  `engine.getEntityOrNullByName(EntityNames.Video_Screen)` — and before this
-  the file was left at whatever was on disk, so renaming an entity in the
-  editor silently desynced the enum from the scene until somebody reopened the
-  Hub. Written only when the bytes change, so it cannot loop the watcher, and
-  it runs BEFORE `main.crdt`: the names come from composite JSON and owe
-  nothing to the crdt encoder, so a composite the native generator cannot
-  encode still gets correct names. Skipped when no composite names anything;
-  a failure is a note, not a failed build, because the type check is the
-  honest place to complain if a scene actually imports the file.
-- `main.crdt`: `build` and the watcher run the driver's one-shot `dump-crdt`
-  mode, calling the scene's own sdk-commands `getAllComposites` with a real
-  `writeFile` (inspector-API fallback when sdk-commands is missing); `build`
-  skips when there are no composites, degrades to a warn when node is
-  unavailable. Byte-parity vs sdk-commands 7.22.6: 3/3 layouts cmp-identical.
-- Tests: `tests/data_layer_rpc.rs` (gated on
-  `DCL_ONE_SDK_TEST_NODE_MODULES`) drives the @dcl/rpc handshake through the
-  axum proxy: boot composite -> initial crdt state -> raw PUT_COMPONENT ->
-  `save()` -> `SCENE_UPDATE` -> `main.crdt`. Point the gate at an extracted
-  `node_modules.zip` and it passes against the blob alone, with no
-  `@dcl/inspector` installed; the two `/inspector/*` assertions are the only
-  ones that key off whether a UI is present.
+Installs the context a scene hands to a coding agent, in two halves. The
+embedded half writes `.claude/skills/migrate-smart-items-to-code/` out of the
+binary — that path is where Claude Code discovers project skills, so an agent
+picks it up without being told. The downloaded half fetches Decentraland's
+`ai-sdk-context` corpus into `dclcontext/`. An unreachable GitHub is a note,
+not a failure: the skill is still installed and the command still exits 0.
+`--offline` skips the request; `DCL_ONE_SDK_CONTEXT_API` overrides the API base.
 
-## Comms: RFC-5 ws-room relay (`src/comms.rs`)
+---
 
-Rust port of `@dcl/mini-comms` (`dist/logic/handle-linear-protocol.js` +
-`dist/adapters/rooms.js`), the relay sdk-commands runs in preview:
+## Build it
 
-- `/about` advertises `comms.fixedAdapter = "ws-room:ws://<host>/mini-comms/room-1"`
-  (host from the `Host` header; nginx `sub_filter` handles external
-  rewriting). `--offline-comms` restores `offline:offline`; `--mini-comms`
-  is accepted (hidden, ignored) for back-compat with existing unit files.
-- `GET /mini-comms/{roomId}` upgrades with subprotocols `rfc5` OR `rfc4`
-  echoed back (bevy sends `Sec-WebSocket-Protocol: rfc5`); frames are binary
-  protobuf `WsPacket` (vendored
-  `proto/decentraland/kernel/comms/rfc5/ws_comms.proto`, compiled by the
-  same `build.rs` prost pass as the reload proto).
-- Linear protocol and room semantics are upstream-exact: address regex
-  `^0x[0-9a-fA-F]{40}$` (lowercased), `dcl-`-prefixed challenge (address map
-  global across rooms), 1000 ms handshake timeouts, global monotonic alias
-  counter, `from_alias` overwritten server-side on rebroadcast, unknown
-  packet types tolerated, empty rooms dropped, second login with the same
-  address kicks the old session (`WsKicked{"Already logged in"}`).
-- Signature validation:
-  `catalyrst_crypto::sign::verify_signed_message(chain, challenge, ident.address)`
-  runs the upstream chain validation (personal-sign ECDSA links, ephemeral
-  links incl. expiry, low-s enforcement) AND binds `chain[0]` (the owner) to
-  the identified address. This deliberately EXCEEDS upstream, whose
-  `Authenticator.validateSignature` registers the peer under the *claimed*
-  address as long as ANY wallet validly signs the challenge - spoofable via
-  an attacker-owned chain or a lone `[{SIGNER, payload:<challenge>}]` echo.
-  Tests: `tests/comms_ws.rs` (two tokio-tungstenite clients through the bevy
-  wire sequence). EIP-1654 (contract wallet) links are the one true
-  deviation: rejected (`Eip1654NotImplemented`) - no ethereum RPC in preview.
-- Not ported (metrics/config-only): the `WS_MAX_BUFFERED_AMOUNT`
-  unreliable-drop heuristic (default 0 upstream; we always forward -
-  unbounded per-peer queues) and the prometheus counters.
+```
+dcl-one-sdk build [--dir D] [-p|--production] [-w|--watch]
+                  [--ignoreComposite] [--customEntryPoint]
+                  [--skip-install] [--skip-type-check]
+```
 
-## Internet reach: `--tunnel` + catalyrst-preview-tunnel
+Bundles the scene into `bin/index.js` and type-checks it. At a
+`dcl-workspace.json` root it builds every member in order.
 
-`catalyrst-preview-tunnel` (sibling crate in this workspace) is a small
-self-hostable tunnel service:
+Two things happen here that upstream does differently.
+
+**Type checking runs beside the build, not in front of it.** tsc keeps its
+state in `.dcl-cache/tsbuildinfo`, so it stops re-checking all of `@dcl/sdk`'s
+declarations on every run — roughly 790 ms down to 390 ms on a real scene. A
+missing or stale info file costs exactly one full check. `--skip-type-check`
+turns it off; the bundle is written either way.
+
+**`main.crdt` is generated in Rust.** Composites are parsed and encoded
+natively, including components that carry their own `jsonSchema` — which is
+every Creator Hub scene, since `core-schema::Network-Entity` alone triggers it.
+That used to fall back to a node round trip costing about 355 ms of a 900 ms
+build. The node path still exists and still runs for the cases the native
+encoder does not cover: nested composites, binary composite entries, and
+component names it does not recognise. `--ignoreComposite` skips regeneration
+entirely. Set `DCL_ONE_CRDT_VERIFY=1` to run the node data-layer alongside the
+native encoder and log whether the bytes match.
+
+`--customEntryPoint` bundles `scene.json`'s `main` verbatim instead of
+generating the loader stub.
+
+---
+
+## Preview it
+
+```
+dcl-one-sdk start [--dir D] [-p|--port N] [--skip-build] [--no-watch]
+                  [-m|--mobile] [--data-layer] [--offline-comms]
+                  [--no-asset-bundles] [--mcp --mcp-port N]
+                  [--tunnel WSS_URL] [-- EXPLORER_PARAMS...]
+```
+
+Builds the scene, serves it as a local realm on port 8000 (or the next free
+port), and reloads it in the running client when you save. Comms is on by
+default. `--skip-install` and `--no-browser` are accepted and ignored, so
+supervisors that pass upstream's flags keep working.
+
+The banner prints the ways in: a `decentraland://` deep link for the desktop
+client, LAN addresses for another device on the network, a web-explorer URL,
+and with `-m` a QR code for a phone. Open `http://127.0.0.1:8000` in a browser
+and you get a page with all of them, the scene's parcels and spawn points, its
+permissions, a request log, the other routes this server exposes, and the
+`deploy` command for this scene.
+
+**Asset bundles.** An abgen sidecar runs by default on 5147, converting models
+on demand so the client renders optimised assets instead of raw GLBs. Every
+deep link carries `local-ab=true`, which makes the client fetch
+`{realm}/optimized-assets` — proxied by this server to the sidecar. That is one
+port and one firewall approval instead of two, and a LAN or tunnel guest needs
+no second reachable address. `--no-asset-bundles` turns the sidecar off and
+stops forwarding the flag; the two move together, because forwarding it with no
+sidecar points the client at a route that answers 503. `--asset-bundles` is
+accepted for upstream parity and does nothing, since it now describes the
+default.
+
+**Scene errors in your terminal.** Run with `--mcp --mcp-port N` — both are
+required — and a scene that throws prints here instead of vanishing into the
+client's log:
+
+```
+  ✘ scene error in src/index.ts:41
+    TypeError: Cannot read properties of undefined (reading 'gallery')
+   41 │   return layout.gallery.shelf
+                        ^
+    at src/index.ts:45:17
+   45 │   const shelf = buildShelf()
+```
+
+Nothing is injected into your bundle. The client already collects its scene log
+and exposes it over the MCP server it runs when `--mcp` is set; this polls that.
+Frames resolve through the bundle's inline source map, so the quoted line comes
+out of the bundle rather than your source tree. Frames in generated code are
+dropped and library frames stay dim. `--error-source-lines-context N` (and
+`-before` / `-after`) widen the quote; the default is 0, just the line that
+threw.
+
+**Live reload.** Saving a `.ts` rebuilds the scene chunk in a few milliseconds
+and tells the client to reload. Saving a `.glb` sends a message naming that one
+file. Content hashes include a digest of the file's bytes, so an edited asset
+gets a new hash and no cache — ours or the client's — can serve the old one.
+
+---
+
+## Edit it visually
+
+```
+dcl-one-sdk start --data-layer
+```
+
+Serves the Creator Hub data-layer protocol at `/data-layer`, so the visual
+editor can drive the scene while it runs. With `@dcl/inspector` installed the
+editor UI is served at `/inspector/` as well; without it, the protocol still
+works and the UI is simply absent.
+
+---
+
+## Share it
+
+Anyone on your network can join through the LAN address in the banner. For
+someone who is not, `--tunnel` exposes the preview through a relay:
 
 ```
 # on a public host
-catalyrst-preview-tunnel        # PUBLIC_BASE_URL=https://<tunnel-host>, optional TUNNEL_TOKEN
+catalyrst-preview-tunnel --listen 0.0.0.0:9000 --token SECRET
 
-# on the creator machine
-dcl-one-sdk start --tunnel wss://<tunnel-host> [--tunnel-token <token> | --tunnel-token-file <path>]
+# on your machine
+dcl-one-sdk start --tunnel wss://tunnel.example:9000 --tunnel-token SECRET
 ```
 
-Token sources, highest wins: `--tunnel-token`, then `--tunnel-token-file`,
-then the `DCL_ONE_SDK_TUNNEL_TOKEN` env var (file/env keep the token out of
-argv and `ps` output).
+Prefer `--tunnel-token-file` or `DCL_ONE_SDK_TUNNEL_TOKEN` over the flag — a
+token passed as an argument is visible in `ps` and in shell history.
 
-The agent (`src/tunnel.rs`) dials out over one websocket trunk, is assigned
-a `/t/<id>` prefix, and the CLI prints an INTERNET join block (public realm
-+ web/desktop/native/mobile rows) alongside the local one. HTTP + websocket
-traffic (incl. mini-comms and live-reload) is multiplexed over the trunk;
-`/about` and the root redirect honor `X-Forwarded-Proto`/`Host`/`Prefix`, so
-the realm descriptor is correct behind the tunnel or any reverse proxy.
-Reconnects: 1s->30s jittered backoff, SAME public URL resumed across blips
-(keyed resume); an unreachable tunnel warns ONCE with a clean UserError
-while serving continues locally. `--tunnel help` prints the zero-infra
-`ssh -R`/`ssh -L` fallback recipes. In-engine bevy through the tunnel was
-not driven (protocol-level proof only).
+---
 
-## Error contract
+## Publish it
 
-Every user-reachable failure names its cause and at least one `-> try:`
-next step; raw error chains (`caused by:`, os errors) render only under
-`--verbose`. `tests/error_contract.rs` enforces the contract (G1-G32),
-including: the tunnel-unreachable warn renders the concise first cause
-(`g24`); tsc gets `--pretty false` on non-TTY stderr and the error count
-survives; broken workspace members name the `dcl-workspace.json` folders
-entry instead of misdirecting to `--dir`, with the absolute path trimmed to
-satisfy gate g20.
+```
+dcl-one-sdk deploy [--dir D] [-t|--target CATALYST] [--target-content URL]
+```
 
-## Deploy
+Builds, packages and signs the scene, then uploads it. Signing happens in a
+browser: deploy starts a small page on a throwaway port, waits for your wallet,
+and shuts it down once the signature comes back. `DCL_PRIVATE_KEY` signs
+headlessly instead, for CI.
 
-Upstream-exact pipeline: sdk-commands' `.dclignore` defaults + user lines
-with CASE-INSENSITIVE gitignore semantics (npm `ignore` 5.3.2 defaults
-`ignoreCase: true`, so `Readme.MD` is excluded by `*.md`; our matcher sets
-`GitignoreBuilder::case_insensitive(true)`), the `getPublishableFiles` file
-set in glob-9 order, `hash_bytes_v1` CIDv1 hashing via catalyrst-hashing, v3
-entity JSON without `id` byte-identical to dcl-catalyst-client's
-(`src/jsjson.rs` reproduces JS `JSON.stringify` number/string formatting),
-EIP-191 simple 2-link auth chain, multipart POST `/entities`. Entity-id
-parity is pinned against the sdk-commands oracle. World deploys with an
-explicit `--target-content` pre-check deployment permission for the signing
-address before anything is deleted or uploaded (7.24.5 semantics: owner,
-`unrestricted`, wallet with world-wide grant, else the per-parcel allowlist);
-denial is a hard error naming the denied parcels, while an unreachable
-permissions endpoint only warns and continues. Planned: query the server
-for existing hashes and upload only the delta.
+Without a target it walks a rotation of public catalysts until one is healthy.
+A world scene needs an explicit `--target-content`, because publishing a world
+to a random Genesis City catalyst is not what you meant.
+`DCL_ONE_SDK_DEFAULT_TARGET` sets your own default.
 
-## Split bundle layout
+Related: `unpublish` takes a scene down, `pack` builds the `.zip` a smart
+wearable is submitted as, and `world` reads and writes a world's settings and
+permissions on a worlds content server.
 
-Every build emits three files (the split layout is the only build mode):
+---
 
-- `bin/index.js` - loader stub (`src/templates/split-loader.js`): sets
-  `globalThis.DCL_MAX_COMPOSITE_ENTITY` (upstream's esbuild define, see
-  Build parity), reads both chunks via `~system/Runtime.readFile`, evals
-  them, wires a `require` shim (`~system/*` passthrough, registry lookup,
-  loud error otherwise), delegates `onStart`/`onUpdate`; TextDecoder
-  feature-detect with a chunked ASCII fallback
-- `bin/sdk-runtime.js` - lazy+memoized registry of the SDK modules (24
-  static keys + conditional `@dcl/asset-packs{,/dist/scene-entrypoint}` and
-  `react/jsx-runtime`); byte-identical across scene-code edits (same
-  ETag/CID), so it caches indefinitely
-- `bin/scene.js` - the scene entrypoint with the SDK externalized
-  (composites stay scene-side, filling the sdk chunk's slot via
-  `Object.assign`)
+## Reference
 
-Production sizes on the freshly scaffolded template scene: scene.js 998 B,
-loader stub 3,702 B, sdk-runtime.js 463,288 B - the per-scene marginal cost
-is the ~1 KB scene chunk, vs upstream's single ~938 KB production bundle.
+**Ports.** 8000 preview server (or next free), 5147 abgen sidecar (or random),
+5141 a local catalyrst if you run one.
 
-Watch/start wiring: the scene chunk re-bundles on every edit; the
-sdk-runtime chunk re-bundles only when the registry key list changes
-(`split::registry_keys` re-checked per batch; node_modules is unwatched, so
-in practice once per session), with `SCENE_UPDATE` pushed per scene-chunk
-rebuild. Composite edits regenerate `all-composites.js` (and `main.crdt`)
-strictly before the scene rebuild.
+**Files written into the scene.** `bin/` holds the built chunks.
+`.dcl-one/` holds the generated entrypoint and composite index. `.dcl-cache/`
+holds the tsc info file and fetched upstream content. `.dcl-optimized-assets/`
+holds abgen's output and JIT cache. All are watcher-ignored, and none are
+deployed.
 
-## Security posture (`start` preview server)
+**Environment.** `DCL_ONE_SDK_CATALYST` (falling back to upstream's
+`DCL_CATALYST`) picks where profiles, wearables and avatars come from; it
+defaults to `https://interconnected.online`, and without a reachable catalyst
+the client shows no avatars. `DCL_ONE_SDK_CATALYST_ROTATION` overrides the
+deploy rotation. `DCL_ONE_SDK_WORLD_BASE` names a worlds host for the
+`/world/…` mirror. `DCL_ONE_SDK_FEATURE_FLAGS` names a feature-flag host.
+`DCL_ONE_SDK_CONTENT_CACHE_MAX` bounds the fetched-content LRU.
+`DCL_ONE_SDK_WEB_EXPLORER` overrides the web explorer URL.
+`DCL_ONE_SDK_ALLOWED_ORIGINS` widens CORS. `ABGEN_BIN` runs a different
+sidecar; every other `ABGEN_*` variable this binary sets is env-wins, so
+exporting one overrides it.
 
-The preview server binds `0.0.0.0` (LAN reach is the point) with
-`CorsLayer::permissive()`. Hardened:
+**Error output.** Failures print what went wrong, why, and what to try, and the
+set of them is pinned by tests — an error that loses its guidance fails the
+build rather than shipping.
 
-- `/data-layer` (WRITE-capable inspector RPC) enforces an Origin allowlist
-  on the WS upgrade: same-origin (`Host` / `X-Forwarded-Host`-aware, so
-  nginx fronting keeps working), native clients (no Origin / `null`), and
-  origins in `DCL_ONE_SDK_ALLOWED_ORIGINS` (comma-separated) are accepted;
-  other cross-origin pages (incl. DNS-rebind) are rejected `403`.
-- `/content/contents/{hash}` only serves files the entity listing includes
-  (what `.dclignore`/`collect_publishable_files` publish); `.env`, `.git`,
-  `package.json` and other ignored files under the scene root `404`.
-- `/inspector/{*path}` canonicalizes and confines reads to `public_dir`
-  (absolute-path and `..`/`..\` escapes `404`).
-- The linker signing server binds loopback (`127.0.0.1`) by default so LAN
-  hosts cannot scrape `/api/info` or race a bogus `/api/sign`; set
-  `DCL_ONE_SDK_LINKER_HOST=0.0.0.0` to sign from another device.
+**Golden snapshots.** Eight fixture scenes are built and snapshotted into
+`testdata/golden/`: artifact sizes and hashes, the generated entrypoint, decoded
+`main.crdt` messages, deploy CIDs, and a runtime trace of per-frame CRDT
+traffic. Any change to the bundler, the entrypoint generator or the crdt
+encoder shows up as a reviewable diff. Regenerate with
+`scripts/update-goldens.sh`.
 
-Known gaps (deferred; do not break the proven bevy/nginx preview): the `/`
-live-reload WS and `/mini-comms/*` upgrades enforce no Origin check
-(mini-comms already requires a wallet-signed challenge bound to the
-identified address; the reload socket is read-only push);
-`CorsLayer::permissive()` stays - a full cross-origin lockdown risks the
-decentraland.org-origin bevy web client. mini-comms keeps unbounded
-rooms/peers and per-peer queues, and the alias counter is a `u32` (wraps
-after 4.2B joins) - DoS/wrap surface only, acceptable for a local preview
-relay.
+**Security posture of the preview server.** It binds a local port and serves
+unauthenticated routes, so it is meant for your machine and your LAN, not the
+public internet without a tunnel you control. The landing page carries no
+JavaScript and no form: it cannot be made to mutate server state by a page you
+happen to have open. `/content/contents/{hash}` serves only files the scene
+actually publishes, so a `.dclignored` file cannot be read back out.

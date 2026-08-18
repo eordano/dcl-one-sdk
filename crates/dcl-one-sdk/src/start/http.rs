@@ -3,7 +3,7 @@ use super::{
 };
 use crate::deploy::collect_publishable_files;
 use crate::live_reload::ReloadFrame;
-use crate::scene::{b64_hash, b64_unhash, Project};
+use crate::scene::{b64_content_hash, b64_hash, b64_unhash, Project};
 use axum::{
     extract::{ws::Message, Path as AxPath, RawQuery, State, WebSocketUpgrade},
     http::{header, HeaderMap, StatusCode},
@@ -25,8 +25,6 @@ pub(super) async fn root(State(st): State<Arc<AppState>>, req: axum::extract::Re
         .map(|v| v.eq_ignore_ascii_case("websocket"))
         .unwrap_or(false);
     if !is_ws {
-        // Browsers get a human-readable landing page; everything else (curl,
-        // explorer probes) keeps the historical redirect to the realm manifest.
         let accepts_html = req
             .headers()
             .get(header::ACCEPT)
@@ -88,21 +86,37 @@ pub(super) fn preview_host(headers: &HeaderMap) -> String {
     })
 }
 
+/// `scheme://host[/prefix]` as the client reached us, reverse proxy included.
+/// Everything this server advertises about itself has to be built on it.
+pub(super) fn preview_origin(headers: &HeaderMap) -> String {
+    format!(
+        "{}://{}{}",
+        forwarded_proto(headers),
+        preview_host(headers),
+        forwarded_prefix(headers)
+    )
+}
+
+/// Where the catalyst back-fill and the world mirror keep fetched content.
+pub(super) fn contents_cache_dir(st: &AppState) -> Option<PathBuf> {
+    st.projects
+        .first()
+        .map(|p| p.root.join(".dcl-cache").join("contents"))
+}
+
 pub(super) async fn about(
     State(st): State<Arc<AppState>>,
     req: axum::extract::Request,
 ) -> Json<Value> {
     let headers = req.headers();
-    let host = forwarded_host(headers).unwrap_or_else(|| {
-        headers
-            .get(header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("127.0.0.1")
-            .to_string()
-    });
-    let proto = forwarded_proto(headers);
-    let ws_proto = if proto == "https" { "wss" } else { "ws" };
+    let host = preview_host(headers);
+    let ws_proto = if forwarded_proto(headers) == "https" {
+        "wss"
+    } else {
+        "ws"
+    };
     let prefix = forwarded_prefix(headers);
+    let origin = preview_origin(headers);
     let fixed_adapter = if st.offline_comms {
         "offline:offline".to_string()
     } else {
@@ -114,7 +128,7 @@ pub(super) async fn about(
         .iter()
         .map(|p| {
             format!(
-                "urn:decentraland:entity:{}?=&baseUrl={proto}://{host}{prefix}/content/contents/",
+                "urn:decentraland:entity:{}?=&baseUrl={origin}/content/contents/",
                 scene_id_for(p, &st.machine)
             )
         })
@@ -134,8 +148,8 @@ pub(super) async fn about(
             "scenesUrn": scenes_urn,
             "realmName": "LocalPreview"
         },
-        "content": { "healthy": true, "publicUrl": format!("{proto}://{host}{prefix}/content") },
-        "lambdas": { "healthy": true, "publicUrl": format!("{proto}://{host}{prefix}/lambdas") },
+        "content": { "healthy": true, "publicUrl": format!("{origin}/content") },
+        "lambdas": { "healthy": true, "publicUrl": format!("{origin}/lambdas") },
         "healthy": true
     }))
 }
@@ -144,9 +158,9 @@ pub(super) async fn scenes() -> Json<Value> {
     Json(json!({ "scenes": [], "total": 0 }))
 }
 
-/// Upstream serves the first project's scene.json verbatim off disk
-/// (sdk-commands `endpoints.js`). This serves the in-memory copy, which is the
-/// same document and stays correct across a composite rebuild.
+/// Upstream serves the first project's scene.json off disk (sdk-commands
+/// `endpoints.js`); the in-memory copy is the same document and stays correct
+/// across a composite rebuild.
 pub(super) async fn scene_json(State(st): State<Arc<AppState>>) -> Response {
     match st.projects.first() {
         Some(p) => Json(p.scene_json.clone()).into_response(),
@@ -154,57 +168,38 @@ pub(super) async fn scene_json(State(st): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// Env var naming the feature-flag host. Upstream hardcodes
-/// `https://feature-flags.decentraland.zone`; this toolchain bakes in no
-/// third-party host, on the same reasoning as `proxy::WORLD_BASE_ENV` — unset,
-/// this route 501s and nothing else is affected.
+/// Upstream hardcodes `https://feature-flags.decentraland.zone`; this toolchain
+/// bakes in no third-party host, as with `proxy::WORLD_BASE_ENV`.
 pub(super) const FEATURE_FLAGS_ENV: &str = "DCL_ONE_SDK_FEATURE_FLAGS";
 
-fn feature_flags_base() -> Option<String> {
-    match std::env::var(FEATURE_FLAGS_ENV) {
-        Ok(v) if !v.trim().is_empty() => Some(v.trim().trim_end_matches('/').to_string()),
-        _ => None,
-    }
-}
-
-/// `/feature-flags/{file}` — upstream proxies this so a browser page served
-/// from the preview origin is not CORS-blocked fetching flags. Same job, minus
-/// the baked host.
+/// `/feature-flags/{file}` — upstream proxies this so a browser page served from
+/// the preview origin is not CORS-blocked fetching flags.
 pub(super) async fn feature_flags(AxPath(file): AxPath<String>) -> Response {
-    // Single path segment by construction, but it lands in a URL we build, so
-    // refuse anything that could climb out of the configured base.
     if file.contains('/') || file.contains('\\') || file.contains("..") {
         return (StatusCode::BAD_REQUEST, "bad feature-flag file").into_response();
     }
-    let Some(base) = feature_flags_base() else {
+    let Some(base) = super::proxy::configured_base(&[FEATURE_FLAGS_ENV]) else {
         return (
             StatusCode::NOT_IMPLEMENTED,
-            format!(
-                "no feature-flag host configured — set {FEATURE_FLAGS_ENV} to the base URL that \
-                 serves /<file> (upstream uses https://feature-flags.decentraland.zone). This \
-                 toolchain ships no default, so nothing is fetched from a third party unless you \
-                 name it."
+            super::proxy::unconfigured_host_hint(
+                "feature-flag",
+                FEATURE_FLAGS_ENV,
+                "/<file> (upstream uses https://feature-flags.decentraland.zone)",
             ),
         )
             .into_response();
     };
-    super::proxy::passthrough_get(&format!("{base}/{file}")).await
+    super::proxy::passthrough(axum::http::Method::GET, &format!("{base}/{file}")).await
 }
 
 /// `/preview-wearables` — the smart-wearable manifests in this workspace, with
-/// content URLs rebased onto the preview origin. Upstream's own source marks it
-/// deprecated in favour of `/content/entities/active` (which this server also
-/// serves); it is here so older explorer builds still resolve wearables.
+/// content URLs rebased onto the preview origin. Upstream marks it deprecated in
+/// favour of `/content/entities/active`; it is here for older explorer builds.
 pub(super) async fn preview_wearables(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Json<Value> {
-    let base = format!(
-        "{}://{}{}/content/contents",
-        forwarded_proto(&headers),
-        preview_host(&headers),
-        forwarded_prefix(&headers)
-    );
+    let base = format!("{}/content/contents", preview_origin(&headers));
     Json(json!({
         "ok": true,
         "data": collect_preview_wearables(&st.projects, &base, &st.machine),
@@ -213,10 +208,9 @@ pub(super) async fn preview_wearables(
 
 /// One entry per project carrying a readable `wearable.json`. A plain scene
 /// contributes nothing, which is why the route answers `{ok: true, data: []}`
-/// rather than 404 for a normal project — the same shape upstream returns.
-///
-/// Hashes are the preview's own reversible path hashes, so the URLs resolve
-/// through `/content/contents/{hash}` exactly like scene files do.
+/// rather than 404 — the same shape upstream returns. Hashes are the preview's
+/// own reversible path hashes, so the URLs resolve through
+/// `/content/contents/{hash}` exactly like scene files do.
 fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for p in projects {
@@ -231,7 +225,7 @@ fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) ->
             .iter()
             .map(|rel| {
                 let abs = p.root.join(rel).display().to_string();
-                let hash = b64_hash(&abs, machine);
+                let hash = b64_content_hash(&abs, machine);
                 json!({ "key": rel, "url": format!("{base}/{hash}"), "hash": hash })
             })
             .collect();
@@ -251,13 +245,7 @@ pub(super) async fn contents(
     headers: HeaderMap,
 ) -> Response {
     let Some(path_str) = b64_unhash(&hash, &st.machine) else {
-        // Not a local preview hash (Qm…/bafy… from wearables, emotes, profile
-        // snapshots): back-up fetch from the upstream catalyst, LRU-cached in
-        // the scene's .dcl-cache.
-        let cache_dir = st
-            .projects
-            .first()
-            .map(|p| p.root.join(".dcl-cache").join("contents"));
+        let cache_dir = contents_cache_dir(&st);
         return super::proxy::contents_upstream(method, &hash, &headers, cache_dir.as_deref())
             .await;
     };
@@ -366,32 +354,26 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 }
 
 fn is_published_hash(st: &AppState, project: &Project, hash: &str) -> bool {
+    let requested = crate::scene::hash_path_part(hash);
     scene_entity(st, project)
         .get("content")
         .and_then(|c| c.as_array())
         .is_some_and(|arr| {
-            arr.iter()
-                .any(|e| e.get("hash").and_then(|h| h.as_str()) == Some(hash))
+            arr.iter().any(|e| {
+                e.get("hash")
+                    .and_then(|h| h.as_str())
+                    .is_some_and(|h| crate::scene::hash_path_part(h) == requested)
+            })
         })
 }
 
-/// The explorer's asset-bundle verdict for this scene, read off the entity as
-/// `status` (`DCL.Ipfs.TrimmedEntityDefinitionBase.assetBundleRegistryEnum`,
-/// `[JsonProperty("status")]`) and rendered in its connection-status panel.
-///
-/// Upstream sdk-commands sends no such field — in production it comes from the
-/// asset-bundle registry, which a preview has no equivalent of. Reporting it
-/// here is a deliberate divergence: the sidecar IS the registry for a preview,
-/// so it can answer honestly instead of leaving the client to default the enum
-/// to `complete` whether or not any bundle exists.
-///
-/// `fallback` is the accurate word when the sidecar is off: the client falls
-/// back to raw GLTFs, which is exactly what happens.
-fn ab_status(st: &AppState) -> &'static str {
-    ab_status_from(&st.optimized_assets_url)
-}
-
-fn ab_status_from(optimized_assets_url: &std::sync::OnceLock<String>) -> &'static str {
+/// The explorer's asset-bundle verdict, read off the entity as `status`
+/// (`DCL.Ipfs.TrimmedEntityDefinitionBase.assetBundleRegistryEnum`). Upstream
+/// sdk-commands sends no such field, so the client defaults the enum to
+/// `complete` whether or not a bundle exists; the sidecar IS the registry for a
+/// preview, so it can answer honestly. `fallback` is literal — the client falls
+/// back to raw GLTFs.
+fn ab_status(optimized_assets_url: &std::sync::OnceLock<String>) -> &'static str {
     match optimized_assets_url.get() {
         Some(_) => "complete",
         None => "fallback",
@@ -399,12 +381,9 @@ fn ab_status_from(optimized_assets_url: &std::sync::OnceLock<String>) -> &'stati
 }
 
 fn scene_entity(st: &AppState, project: &Project) -> Value {
-    // `status` is injected per request, not baked into the cache entry: the
-    // sidecar reports ready AFTER the first entities can be served, so a cached
-    // "fallback" would otherwise outlive the thing it describes.
     let mut entity = scene_entity_cached(st, project);
     if let Some(obj) = entity.as_object_mut() {
-        obj.insert("status".into(), json!(ab_status(st)));
+        obj.insert("status".into(), json!(ab_status(&st.optimized_assets_url)));
     }
     entity
 }
@@ -436,7 +415,7 @@ pub(super) fn build_scene_entity(project: &Project, machine: &str) -> Value {
         .iter()
         .map(|rel| {
             let abs = root.join(rel).display().to_string();
-            json!({ "file": rel, "hash": b64_hash(&abs, machine) })
+            json!({ "file": rel, "hash": b64_content_hash(&abs, machine) })
         })
         .collect();
     let ts = SystemTime::now()
@@ -508,9 +487,9 @@ pub(super) async fn entities_active(
     Json(Value::Array(entities))
 }
 
-/// Requested pointers no local entity covers; these resolve upstream.
-/// Parcel pointers never go upstream — they would resolve to the production
-/// scene at those coordinates (Genesis Plaza) instead of the local preview.
+/// Requested pointers no local entity covers; these resolve upstream. Parcel
+/// pointers never do — they would return the production scene at those
+/// coordinates (Genesis Plaza) instead of the local preview.
 fn unmatched_pointers(entities: &[Value], pointers: &[String]) -> Vec<String> {
     pointers
         .iter()
@@ -588,13 +567,10 @@ mod tests {
 
     #[test]
     fn ab_status_tells_the_truth_about_whether_bundles_are_served() {
-        // The explorer reads this as AssetBundleRegistryEnum. Absent, the enum
-        // defaults to `complete` (it is variant 0) whether or not a single
-        // bundle exists — which is why saying `fallback` out loud matters.
         let url = std::sync::OnceLock::new();
-        assert_eq!(ab_status_from(&url), "fallback");
+        assert_eq!(ab_status(&url), "fallback");
         let _ = url.set("http://127.0.0.1:5147".to_string());
-        assert_eq!(ab_status_from(&url), "complete");
+        assert_eq!(ab_status(&url), "complete");
     }
 
     #[test]
@@ -602,8 +578,6 @@ mod tests {
         let tmp = WearableTmp::new("plain");
         std::fs::write(tmp.0.join("scene.json"), "{}").unwrap();
         let out = collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", "m");
-        // Upstream answers {ok:true,data:[]} for a plain scene rather than 404,
-        // so an empty list here is the contract, not a failure.
         assert!(out.is_empty());
     }
 
@@ -625,13 +599,11 @@ mod tests {
             .iter()
             .find(|c| c["key"] == "model.glb")
             .expect("model.glb listed");
-        // The hash must be the preview's reversible path hash, so the advertised
-        // URL actually resolves through /content/contents/{hash}.
         let abs = tmp.0.join("model.glb").display().to_string();
-        assert_eq!(model["hash"], json!(b64_hash(&abs, "m")));
+        assert_eq!(model["hash"], json!(b64_content_hash(&abs, "m")));
         assert_eq!(
             model["url"],
-            json!(format!("http://x/c/{}", b64_hash(&abs, "m")))
+            json!(format!("http://x/c/{}", b64_content_hash(&abs, "m")))
         );
     }
 
@@ -644,8 +616,6 @@ mod tests {
         );
     }
 
-    // Both tests mutate the process-wide FEATURE_FLAGS_ENV; without this lock
-    // they race under the parallel test runner and 501 becomes 502.
     static FLAGS_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
@@ -653,8 +623,6 @@ mod tests {
         let _env = FLAGS_ENV.lock().await;
         std::env::remove_var(FEATURE_FLAGS_ENV);
         let resp = feature_flags(AxPath("flags.json".to_string())).await;
-        // The whole point: no third-party host is baked in, so this must refuse
-        // rather than quietly reaching decentraland.zone the way upstream does.
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
@@ -686,7 +654,6 @@ mod tests {
             vec!["urn:decentraland:off-chain:base-avatars:BaseMale".to_string()]
         );
         assert!(unmatched_pointers(&local, &["0,0".to_string()]).is_empty());
-        // Catalysts lowercase pointers; matching must be case-insensitive.
         assert!(unmatched_pointers(&local, &[]).is_empty());
         let mixed = vec![json!({ "pointers": ["urn:x:Y"] })];
         assert!(unmatched_pointers(&mixed, &["urn:x:y".to_string()]).is_empty());
@@ -695,11 +662,8 @@ mod tests {
     #[test]
     fn parcel_pointers_never_go_upstream() {
         let local = vec![json!({ "pointers": ["0,0"] })];
-        // A parcel the local scene does not cover must NOT resolve upstream:
-        // it would return the production scene at those coordinates.
         assert!(unmatched_pointers(&local, &["5,-12".to_string()]).is_empty());
         assert!(unmatched_pointers(&local, &[" -3 , 4 ".to_string()]).is_empty());
-        // URNs are not parcels.
         assert!(is_parcel_pointer("0,0"));
         assert!(is_parcel_pointer("-73,50"));
         assert!(!is_parcel_pointer(

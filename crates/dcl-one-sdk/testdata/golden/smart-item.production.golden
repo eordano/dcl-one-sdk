@@ -1,0 +1,110 @@
+(dcl-one-sdk golden v1 smart-item production)
+TOOLCHAIN sdk=7.26.0 ecs=7.26.0 bundler=rolldown-1.2.4 blob=sha256:bfba3692f31514bd
+SCENE_COMPILED_JS_SIZE_PROD=632.4k bytes
+  ARTIFACT bin/index.js               5907 sha256=f5b96c123e32247a
+  ARTIFACT bin/scene.js               1819 sha256=70fa6b7d9bbb137f
+  ARTIFACT bin/sdk-runtime.js       474613 sha256=33bab9f0f499ea4a
+  ARTIFACT bin/sdk-smart-items.js   150045 sha256=3111aee5f86af41a
+LOADER sdk=bin/sdk-runtime.js smart=bin/sdk-smart-items.js scene=bin/scene.js max_composite_entity=512
+ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
+  // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
+  "use strict";
+  import * as entrypoint from "<SCENE>/src/index.ts"
+  import { engine, NetworkEntity } from '@dcl/sdk/ecs'
+  import * as sdk from '@dcl/sdk'
+  import { compositeProvider } from '@dcl/sdk/composite-provider'
+  import { compositeFromLoader } from '~sdk/all-composites'
+  import { _initializeScripts } from '~sdk/script-utils'
+  import { compositeFromLoader as __sceneComposites } from './all-composites.js'
+  Object.assign(compositeFromLoader, __sceneComposites)
+
+
+  import { syncEntity } from '@dcl/sdk/network'
+  import players from '@dcl/sdk/players'
+  import { setCompositeProvider } from '@dcl/sdk/ecs'
+  import { initAssetPacks } from '@dcl/asset-packs/dist/scene-entrypoint'
+  setCompositeProvider(engine, compositeProvider)
+  initAssetPacks(engine, { syncEntity }, players)
+
+
+  // `console.error(e)` drops the frames, and the host captures its own stack at
+  // the call site — this catch block. `e.stack` carries the throw site, so it is
+  // a superset of what upstream prints.
+  function __reportSceneError(e: any) {
+    console.error(e && e.stack ? e.stack : e)
+  }
+
+  if ((entrypoint as any).main !== undefined) {
+    function _INTERNAL_startup_system() {
+      try {
+        _initializeScripts(engine)
+
+        const maybePromise = (entrypoint as any).main()
+        if (maybePromise && typeof maybePromise === 'object' && typeof (maybePromise as unknown as Promise<unknown>).then === 'function') {
+          maybePromise.catch(__reportSceneError)
+        }
+      } catch (e) {
+        __reportSceneError(e)
+      } finally {
+        engine.removeSystem(_INTERNAL_startup_system)
+      }
+    }
+    engine.addSystem(_INTERNAL_startup_system, Infinity)
+  }
+
+  export * from '@dcl/sdk'
+  export * from "<SCENE>/src/index.ts"
+  export * from '~sdk/script-utils'
+  REQUIRE(scene): @dcl/asset-packs/dist/scene-entrypoint
+  REQUIRE(scene): @dcl/sdk
+  REQUIRE(scene): @dcl/sdk/composite-provider
+  REQUIRE(scene): @dcl/sdk/ecs
+  REQUIRE(scene): @dcl/sdk/math
+  REQUIRE(scene): @dcl/sdk/network
+  REQUIRE(scene): @dcl/sdk/players
+  REQUIRE(scene): ~sdk/all-composites
+  REQUIRE(scene): ~sdk/script-utils
+ENTITY_NAMES assets/scene/entity-names.ts
+  // Auto-generated entity names from the scene
+
+
+  /**
+   * Object containing all entity names in the scene for autocomplete support.
+   */
+  export enum EntityNames {
+    Counter_Box = "Counter Box",
+  } 
+MAIN_CRDT main.crdt 235 bytes sha256=6c587977670027c8 (native, 1 composite)
+DEPLOY entity=bafkreif2gxkgvwwacizc7mr4ifstxpsgatvewudq2asvrw3bvhpum7u43e files=7 total=635.0k bytes
+  bafkreifcxq62bje63i3khsvr45s3bkmtbvdutbhwehvfhc3yvspj6jrvda scene.json 167 bytes
+  bafkreidmlb4xozyae7ejrd7tnw6qct7ppr3j6w4s4qpdrvzahvgvbsekca main.crdt 235 bytes
+  bafkreibrcgxol6dk6qnhsilypqyzgf7gi3z27ojoom4glnhkqxhe2xnsqu bin/sdk-smart-items.js 150045 bytes
+  bafybeiagimmlavww7momge3jfpkxtniibletbghzk6eybyv4jov777wvl4 bin/sdk-runtime.js 474613 bytes
+  bafkreidq7jvx3g53cn72uvwpaf7bvm65qbdgwtnankjhj2aj757hrabydi bin/scene.js 1819 bytes
+  bafkreihvxfwbeprser5gil2uuxw3xle3o43x4by7j7h3zwzjhorwk2o7ma bin/index.js 5907 bytes
+  bafkreidxhlr4biomfortriklj6fnne7kzhvayixkmd6ynx2dlsoswh654a assets/scene/main.composite 2230 bytes
+EVAL bin/index.js
+  READFILE: bin/sdk-runtime.js
+  READFILE: bin/scene.js
+  READFILE: bin/sdk-smart-items.js
+  REQUIRE: ~system/Runtime
+  REQUIRE: ~system/EngineApi
+  REQUIRE: ~system/CommunicationsController
+  REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/EthereumController
+  REQUIRE: ~system/RestrictedActions
+  REQUIRE: ~system/SignedFetch
+  REQUIRE: ~system/CommsApi
+CALL onStart()
+  main.crdt: PUT_COMPONENT e=0x200 c=1 t=0 data={"position":{"x":8,"y":1,"z":8},"rotation":{"x":0,"y":0,"z":0,"w":1},"scale":{"x":1,"y":1,"z":1},"parent":0}
+  main.crdt: PUT_COMPONENT e=0x200 c=1018 t=0 data={"mesh":{"$case":"box","box":{"uvs":[]}}}
+  main.crdt: PUT_COMPONENT e=0x200 c=3864921337 t=0 data={"value":"Counter Box"}
+  main.crdt: PUT_COMPONENT e=0x200 c=3981387903 t=0 data=null
+  main.crdt: PUT_COMPONENT e=0x200 c=4149214247 t=0 data=null
+CALL onUpdate(0)
+  Scene: PUT_COMPONENT e=0x200 c=1 t=1 data={"position":{"x":9,"y":1,"z":9},"rotation":{"x":0,"y":0,"z":0,"w":1},"scale":{"x":1,"y":1,"z":1},"parent":0}
+CALL onUpdate(0.1)
+CALL onUpdate(0.1)
+CALL onUpdate(0.1)
+HOSTCALLS readFile=3 crdtGetState=1 crdtSendToRenderer=4 sendBatch=4
+CRDT_TRAFFIC messages=6 bytes=303

@@ -41,9 +41,6 @@ pub fn ensure_extracted() -> Option<PathBuf> {
 fn extract_into(root: &Path) -> std::io::Result<()> {
     for (rel, packed, raw_len) in FILES {
         let path = root.join(rel);
-        // Cheap freshness check: TAG already pins the content, so a file of the
-        // right length under it is the right file and needs no inflate to
-        // confirm.
         if std::fs::metadata(&path).is_ok_and(|m| m.len() as usize == *raw_len) {
             continue;
         }
@@ -52,10 +49,6 @@ fn extract_into(root: &Path) -> std::io::Result<()> {
         }
         let bytes = inflate(packed, *raw_len)?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        // pid alone is not a unique staging name — a second dcl-one-sdk process
-        // has a different one, but two callers inside this process do not — so
-        // add a counter. Without it they truncate each other's staging file and
-        // one of them publishes a 0-byte abgen.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = path.with_file_name(format!(
             ".{}.tmp-{}-{}",
@@ -109,8 +102,6 @@ mod tests {
     fn extraction_yields_a_runnable_binary_and_is_idempotent() {
         let first = ensure_extracted().expect("embedded abgen extracts");
         assert!(first.is_file());
-        // BIN_NAME may be a tiny launcher script; the real weight sits in the
-        // bundle's bin/ and lib/ siblings, so size-check the whole embed.
         let total: usize = FILES.iter().map(|(_, _, raw_len)| *raw_len).sum();
         assert!(total > 1_000_000, "embedded abgen bundle is {total} bytes");
         #[cfg(unix)]
@@ -119,7 +110,6 @@ mod tests {
             let meta = std::fs::metadata(&first).unwrap();
             assert_eq!(meta.permissions().mode() & 0o111, 0o111);
         }
-        // Second call is a no-op that returns the same path.
         assert_eq!(ensure_extracted().as_deref(), Some(first.as_path()));
     }
 }

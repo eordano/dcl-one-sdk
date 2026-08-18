@@ -14,24 +14,16 @@ const DUMP_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Clone)]
 pub struct DataLayerState {
     pub port_rx: watch::Receiver<u16>,
-    /// Where the editor's browser bundle lives — when there is one.
-    ///
-    /// `None` is a normal state, not a failure. The data layer and the UI are
-    /// separable: the blob ships a working host (`src/vendor/inspector-shim`)
-    /// and no UI, so `--data-layer` on a scene without `@dcl/inspector` serves
-    /// the protocol on `/data-layer` and answers `/inspector/*` with a 404
-    /// naming what to install. Treating a missing UI as fatal — which is what
-    /// this used to do — meant the vendored host could only ever start in the
-    /// one case where a real `@dcl/inspector` was installed, and in that case
-    /// the real one wins at `require()` time. The fallback was unreachable.
+    /// Where the editor's browser bundle lives, if one is installed. `None` is
+    /// normal: the data layer and the UI are separable, so `--data-layer`
+    /// without `@dcl/inspector` still serves the protocol and 404s
+    /// `/inspector/*`. Treating that as fatal made the vendored host
+    /// unreachable, since a real `@dcl/inspector` wins at `require()` time.
     pub public_dir: Option<PathBuf>,
 }
 
-/// The editor UI for this scene, if one is installed.
-///
-/// `Ok(None)` means "no UI here" and is not an error. An explicit
-/// `DCL_ONE_INSPECTOR_DIR` pointing at something that is not an inspector
-/// build still is: the user named a path and got it wrong.
+/// The editor UI for this scene, if one is installed. `Ok(None)` is not an
+/// error; a `DCL_ONE_INSPECTOR_DIR` that names a non-inspector build is.
 pub fn locate_inspector_public(root: &Path) -> Result<Option<PathBuf>> {
     if let Ok(dir) = std::env::var("DCL_ONE_INSPECTOR_DIR") {
         let d = PathBuf::from(&dir);
@@ -58,14 +50,6 @@ pub fn locate_inspector_public(root: &Path) -> Result<Option<PathBuf>> {
         }
         dir = d.parent();
     }
-    // The editor UI is no longer vendored. `@dcl/inspector` ships a pre-built
-    // browser bundle we cannot slim from here — 18 MB of it, ~60% a
-    // non-tree-shaken Babylon (2,037 re-exported symbols, including 359
-    // NodeMaterial blocks and 61 WebXR symbols that an editor panel never
-    // calls) plus 2,967 Font Awesome icons. Carrying 7.4 MB of that in every
-    // binary, for a path most scenes never take, was the wrong trade. The
-    // *protocol* half is vendored and still runs; only the browser bundle has
-    // to come from npm now.
     Ok(None)
 }
 
@@ -80,18 +64,14 @@ pub fn inspector_config_json(ws_url: &str) -> String {
     json!({ "dataLayerRpcWsUrl": ws_url }).to_string()
 }
 
-/// Where an inspector asset actually lives on disk.
-///
-/// The vendored blob stores `bundle.js` (18 MB) and `bundle.css` (5.6 MB) as
-/// `.gz`, which is most of the reason the editor unpacks to 11 MB instead of
-/// 73 MB. A scene with its own npm-installed `@dcl/inspector` has them plain,
-/// so the plain name always wins and the `.gz` is only a fallback.
+/// Where an inspector asset actually lives on disk. The vendored blob stores
+/// the big bundles `.gz` (11 MB unpacked instead of 73 MB); an npm-installed
+/// `@dcl/inspector` has them plain, so plain wins and `.gz` is the fallback.
 pub enum Asset {
     Plain(PathBuf),
     Gzipped(PathBuf),
 }
 
-/// Resolve `rel` under `public_dir`, refusing anything that escapes it.
 pub fn resolve_asset(public_dir: &Path, rel: &str) -> Option<Asset> {
     if rel.split('/').any(|seg| seg == "..") {
         return None;
@@ -104,8 +84,6 @@ pub fn resolve_asset(public_dir: &Path, rel: &str) -> Option<Asset> {
     let path = match &found {
         Asset::Plain(p) | Asset::Gzipped(p) => p,
     };
-    // canonicalize resolves symlinks, so this catches a link out of the tree
-    // as well as a `..` that slipped past the segment check.
     path.starts_with(&base).then_some(found)
 }
 
@@ -170,16 +148,11 @@ pub fn write_driver(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn node_bin() -> Result<PathBuf> {
-    match crate::build::find_node() {
-        Some(p) => Ok(p),
-        None => Err(UserError::new(
-            "node is required for the visual editor data layer but is not on PATH",
-            TrySteps::one("install Node.js or add it to PATH")
-                .and("to preview without the editor, drop --data-layer"),
-        )
-        .into()),
-    }
+fn node_for_data_layer() -> Result<PathBuf> {
+    crate::build::require_node(
+        "the visual editor data layer",
+        "to preview without the editor, drop --data-layer",
+    )
 }
 
 struct Driver {
@@ -272,7 +245,7 @@ async fn launch(node: &Path, driver: &Path, root: &Path) -> Result<Driver> {
 }
 
 pub async fn spawn(root: &Path) -> Result<watch::Receiver<u16>> {
-    let node = node_bin()?;
+    let node = node_for_data_layer()?;
     let driver = write_driver(root)?;
     let mut current = launch(&node, &driver, root).await?;
     let (tx, rx) = watch::channel(current.port);
@@ -325,10 +298,8 @@ pub async fn spawn(root: &Path) -> Result<watch::Receiver<u16>> {
 }
 
 pub async fn dump_crdt(root: &Path) -> Result<u64> {
-    let node = node_bin()?;
+    let node = node_for_data_layer()?;
     let driver = write_driver(root)?;
-    // Spawning node to walk every composite is the slowest step of a save, and
-    // it has a multi-minute timeout: without this the editor looks hung.
     let _progress = crate::ux::Slow::start("regenerating main.crdt");
     let out = tokio::time::timeout(
         DUMP_TIMEOUT,
@@ -389,16 +360,42 @@ pub async fn dump_crdt(root: &Path) -> Result<u64> {
         .unwrap_or(0))
 }
 
-/// Which generator produced main.crdt. The distinction is user-visible: the
-/// native path is in-process, while the fallback shells out to node and needs
-/// `@dcl/inspector` resolvable, so it is slower and has more ways to fail.
+/// Which generator produced main.crdt. User-visible: the fallback shells out to
+/// node and needs `@dcl/inspector` resolvable, so it is slower and fails more.
 pub enum CrdtRegen {
     /// Generated in-process, from this many composite files.
     Native(u64),
-    /// The native generator did not cover this scene. The node data-layer's
-    /// summary does not carry a composite count we can trust, so none is
-    /// reported rather than printing a zero that reads as "nothing included".
+    /// The node data-layer's summary carries no composite count we can trust,
+    /// so none is reported rather than a zero that reads as "nothing included".
     NodeDataLayer,
+}
+
+/// Re-run the node data-layer and shout if its bytes differ from the ones we
+/// just wrote; a `DCL_ONE_CRDT_VERIFY=1` soak that reports nothing is the gate
+/// for deleting the node fallback. The driver only ever writes
+/// `<root>/main.crdt`, so this borrows that path and restores it afterwards.
+async fn shadow_verify(root: &Path, native: &[u8]) {
+    let main_crdt = root.join("main.crdt");
+    let outcome = match dump_crdt(root).await {
+        Ok(_) => tokio::fs::read(&main_crdt)
+            .await
+            .map_err(anyhow::Error::from),
+        Err(e) => Err(e),
+    };
+    match outcome {
+        Ok(reference) => {
+            if let Some(difference) = crate::crdt_gen::describe_difference(native, &reference, root)
+            {
+                tracing::error!("DCL_ONE_CRDT_VERIFY: native main.crdt differs from the node data-layer's — {difference}");
+            } else {
+                tracing::info!("DCL_ONE_CRDT_VERIFY: native main.crdt matches the node data-layer byte for byte");
+            }
+        }
+        Err(e) => tracing::error!("DCL_ONE_CRDT_VERIFY: the node data-layer could not run ({e})"),
+    }
+    if let Err(e) = tokio::fs::write(&main_crdt, native).await {
+        tracing::error!("DCL_ONE_CRDT_VERIFY: could not restore the native main.crdt ({e})");
+    }
 }
 
 pub async fn regenerate_main_crdt(
@@ -408,9 +405,6 @@ pub async fn regenerate_main_crdt(
     if ignore_composite {
         return Ok(None);
     }
-    // The native generator is the fast path and usually finishes well inside
-    // the threshold; a scene with enough composites to be slow says so, and the
-    // fallback below starts its own for the node round trip.
     let progress = crate::ux::Slow::start("regenerating main.crdt");
     let generated = crate::crdt_gen::generate(root);
     progress.finish();
@@ -424,6 +418,9 @@ pub async fn regenerate_main_crdt(
                 "main.crdt regenerated natively from {} composite(s)",
                 generated.composites
             );
+            if std::env::var("DCL_ONE_CRDT_VERIFY").as_deref() == Ok("1") {
+                shadow_verify(root, &generated.bytes).await;
+            }
             Ok(Some(CrdtRegen::Native(generated.composites)))
         }
         Err(crate::crdt_gen::GenError::Unsupported(why)) => {
@@ -494,7 +491,6 @@ mod tests {
         t.write("ws/member/scene.json", "{}");
         let found = locate_inspector_public(&t.0.join("ws/member")).unwrap();
         assert_eq!(found, Some(t.0.join("node_modules/@dcl/inspector/public")));
-        // No UI is not an error: the data layer runs without one.
         assert_eq!(
             locate_inspector_public(Path::new("/nonexistent-dcl1")).unwrap(),
             None
@@ -523,8 +519,6 @@ mod tests {
             resolve_asset(&dir, "bundle.js"),
             Some(Asset::Gzipped(_))
         ));
-        // A scene with its own npm install has the plain file; it must win so
-        // we never serve a gzip body without the header.
         t.write("public/bundle.js", "plain wins");
         assert!(matches!(
             resolve_asset(&dir, "bundle.js"),
@@ -541,7 +535,6 @@ mod tests {
         let dir = t.0.join("public");
         assert!(resolve_asset(&dir, "../secret.txt").is_none());
         assert!(resolve_asset(&dir, "a/../../secret.txt").is_none());
-        // `..` hidden behind the .gz fallback must be refused too.
         assert!(resolve_asset(&dir, "../secret.txt.gz").is_none());
     }
 

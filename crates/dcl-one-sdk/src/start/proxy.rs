@@ -1,8 +1,7 @@
 //! Catalyst proxy routes, ported from upstream sdk-commands
 //! `start/server/endpoints.ts`: the explorer talks to the preview realm's
-//! lambdas/content for profiles and profile deploys, so a local realm must
-//! forward what it does not serve itself. Without these the v0.158+ desktop
-//! client clears a cached identity on boot (profile fetch 404s → treated as
+//! lambdas/content for profiles and profile deploys. Without these the v0.158+
+//! desktop client clears a cached identity on boot (a profile 404 reads as
 //! abandoned onboarding) and the new-account lobby's profile deploy fails.
 
 use std::collections::HashMap;
@@ -14,55 +13,60 @@ use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
 
-use super::http::preview_host;
+use super::http::{contents_cache_dir, preview_host, preview_origin};
 
-/// Falls back to the local catalyrst content server rather than a public
-/// catalyst: a preview must never silently source its realm from production.
-const LOCAL_CATALYST: &str = "http://127.0.0.1:5141";
+/// Where profiles, wearables and avatars come from. This used to default to a
+/// local catalyrst on 5141, which almost nobody runs, so every preview lost its
+/// avatars; upstream `@dcl/sdk-commands` ships a default here too
+/// (`logic/config.ts::getCatalystBaseUrl`). The env knob still aims it anywhere.
+const DEFAULT_CATALYST: &str = "https://interconnected.online";
 
-/// Where `/world/{name}/about` is proxied from. That proxy exists purely to
-/// lift the fetch onto the preview origin, since a browser page served from a
-/// different origin is CORS-blocked talking to a worlds host directly.
-///
-/// There is deliberately NO baked default. Whatever host went in here would be
-/// infrastructure somebody runs, and a toolchain shipping one silently points
-/// every user's preview at it. The engine takes the same line — bevy-explorer
-/// refuses to fall back to a public host and tells you to set
-/// `DCL_WORLD_REALM_BASE` — so this is configuration, not a constant.
-///
-/// Unset, the world proxy is the only thing that stops working; the rest of the
-/// preview is unaffected.
+/// Ours first, then upstream's own name so a project already configured for
+/// `@dcl/sdk-commands` does not need a second variable.
+const CATALYST_ENV: [&str; 2] = ["DCL_ONE_SDK_CATALYST", "DCL_CATALYST"];
+
+/// Where `/world/{name}/about` is proxied from. Deliberately no baked default:
+/// whatever host went here would be infrastructure somebody runs, and shipping
+/// one silently points every preview at it (bevy-explorer takes the same line
+/// with `DCL_WORLD_REALM_BASE`). Unset, only the world proxy stops working.
 pub(crate) const WORLD_BASE_ENV: &str = "DCL_ONE_SDK_WORLD_BASE";
 
-pub(crate) fn world_base() -> Option<String> {
-    match std::env::var(WORLD_BASE_ENV) {
+/// Immutable content hashes never revalidate.
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+/// First of `names` set to a non-blank value, trimmed and without a trailing
+/// slash.
+pub(super) fn configured_base(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|k| match std::env::var(k) {
         Ok(v) if !v.trim().is_empty() => Some(v.trim().trim_end_matches('/').to_string()),
         _ => None,
-    }
+    })
 }
 
-/// One sentence, wherever the absence has to be explained to a human.
-pub(crate) fn world_base_hint() -> String {
+/// The one sentence every unconfigured-upstream route says, so the "we bake in
+/// no third-party host" promise is worded the same wherever it surfaces.
+pub(super) fn unconfigured_host_hint(what: &str, env: &str, serves: &str) -> String {
     format!(
-        "no worlds host configured — set {WORLD_BASE_ENV} to the base URL that serves \
-         /<world>/about. This toolchain ships no default, so nothing is fetched from a \
-         third party unless you name it."
+        "no {what} host configured — set {env} to the base URL that serves {serves}. This \
+         toolchain ships no default, so nothing is fetched from a third party unless you name it."
     )
 }
 
-pub(crate) fn catalyst_base() -> String {
-    match std::env::var("DCL_ONE_SDK_CATALYST") {
-        Ok(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_string(),
-        _ => LOCAL_CATALYST.to_string(),
-    }
+pub(crate) fn world_base() -> Option<String> {
+    configured_base(&[WORLD_BASE_ENV])
 }
 
-/// The primary upstream plus two fallbacks from a configured rotation, so a
-/// timeout or 5xx on one catalyst does not strand wearable/profile fetches.
-/// An explicit DCL_ONE_SDK_CATALYST is respected first but still falls back.
-/// Only a rotation someone named is used: unlike `deploy`, whose purpose is to
-/// publish to the public network, a preview must not source a realm from it
-/// unasked.
+pub(crate) fn world_base_hint() -> String {
+    unconfigured_host_hint("worlds", WORLD_BASE_ENV, "/<world>/about")
+}
+
+pub(crate) fn catalyst_base() -> String {
+    configured_base(&CATALYST_ENV).unwrap_or_else(|| DEFAULT_CATALYST.to_string())
+}
+
+/// The primary upstream plus two fallbacks, so a timeout or 5xx on one catalyst
+/// does not strand wearable/profile fetches. Only a rotation someone named is
+/// used: unlike `deploy`, a preview must not source a realm unasked.
 fn upstream_candidates() -> Vec<String> {
     let primary = catalyst_base();
     let mut out = vec![primary.clone()];
@@ -90,23 +94,65 @@ fn proxy_client() -> Result<reqwest::Client, Response> {
         })
 }
 
-/// GET a configured URL and hand the body back with its content type. For
-/// routes that exist only to lift a fetch onto the preview origin (CORS), where
-/// there is nothing to rewrite and no fallback rotation to walk.
-pub(super) async fn passthrough_get(url: &str) -> Response {
-    passthrough(Method::GET, url).await
+fn axum_status(status: reqwest::StatusCode) -> StatusCode {
+    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+fn content_type_or(resp: &reqwest::Response, default: &str) -> String {
+    resp.headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(default)
+        .to_string()
+}
+
+/// Serve `hash` from the on-disk LRU if it is there. Shared by the catalyst
+/// back-fill and the world mirror, which cache into the same directory.
+async fn cached_content(
+    dir: &std::path::Path,
+    hash: &str,
+    method: &Method,
+    label: &str,
+) -> Option<Response> {
+    let (bytes, ct) = super::content_cache::get(dir, hash).await?;
+    let ct = ct.unwrap_or_else(|| "application/octet-stream".to_string());
+    tracing::info!(target: "access", "{label} {hash} 200 dcl-cache sent={}", bytes.len());
+    let resp_headers = [
+        (header::CONTENT_TYPE, ct),
+        (header::CACHE_CONTROL, IMMUTABLE.to_string()),
+        (header::CONTENT_LENGTH, bytes.len().to_string()),
+    ];
+    Some(match *method == Method::HEAD {
+        true => (resp_headers, axum::body::Body::empty()).into_response(),
+        false => (resp_headers, bytes).into_response(),
+    })
+}
+
+/// Forward a request and hand back status + content type + body unchanged, for
+/// routes that exist only to lift a fetch onto the preview origin (CORS).
+pub(super) async fn passthrough(method: Method, url: &str) -> Response {
+    let client = match proxy_client() {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.request(method, url).send().await {
+        Ok(resp) => {
+            let status = axum_status(resp.status());
+            let ct = content_type_or(&resp, "application/octet-stream");
+            match resp.bytes().await {
+                Ok(body) => (status, [(header::CONTENT_TYPE, ct)], body).into_response(),
+                Err(e) => (StatusCode::BAD_GATEWAY, format!("{url}: {e}")).into_response(),
+            }
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{url}: {e}")).into_response(),
+    }
 }
 
 /// `{realm}/optimized-assets/*` — the path the explorer derives from the realm
-/// when it is told `local-ab=true`, which is how upstream sdk-commands asks for
-/// asset bundles (`AppArgsFlags.LOCAL_AB`: "served by the preview server at
-/// {realm}/optimized-assets … carries no URL or port"; the base is pinned by
-/// `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH`).
-///
-/// Serving it here means `--asset-bundles` works without a second origin: the
-/// client keeps talking to the realm it already has, so there is no extra port
-/// in the deep link and no second firewall approval on the LAN. The sidecar is
-/// still the thing doing the work — this only forwards to it.
+/// under `local-ab=true`, pinned by `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH`
+/// and carrying no URL or port of its own. Serving it here keeps the client on
+/// the realm it already has: no extra port in the deep link, no second firewall
+/// approval on the LAN. The sidecar still does the work.
 pub(super) async fn optimized_assets(
     method: Method,
     axum::extract::State(st): axum::extract::State<std::sync::Arc<super::AppState>>,
@@ -114,9 +160,6 @@ pub(super) async fn optimized_assets(
     raw_query: axum::extract::RawQuery,
 ) -> Response {
     let Some(base) = st.optimized_assets_url.get() else {
-        // No sidecar (or not ready yet). 503 rather than 404: the route exists,
-        // the upstream for it does not, and a 404 would read as "this bundle
-        // does not exist" to a client that is asking for a manifest.
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "asset-bundle sidecar is not running (--no-asset-bundles?)",
@@ -125,31 +168,6 @@ pub(super) async fn optimized_assets(
     };
     let query = raw_query.0.map(|q| format!("?{q}")).unwrap_or_default();
     passthrough(method, &format!("{base}/{path}{query}")).await
-}
-
-/// Forward a request and hand back status + content type + body unchanged.
-async fn passthrough(method: Method, url: &str) -> Response {
-    let client = match proxy_client() {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.request(method, url).send().await {
-        Ok(resp) => {
-            let status =
-                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let ct = resp
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            match resp.bytes().await {
-                Ok(body) => (status, [(header::CONTENT_TYPE, ct)], body).into_response(),
-                Err(e) => (StatusCode::BAD_GATEWAY, format!("{url}: {e}")).into_response(),
-            }
-        }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("{url}: {e}")).into_response(),
-    }
 }
 
 /// Upstream parity: the realm advertises itself as the only realm.
@@ -175,44 +193,30 @@ pub(super) async fn lambdas_contracts_servers(req: Request) -> Json<serde_json::
     }]))
 }
 
-/// Bases already complained about, so a dead upstream is explained once rather
-/// than once per request.
 fn complained_bases() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
     SEEN.get_or_init(Default::default)
 }
 
-/// An unreachable upstream is not a one-off: the explorer re-asks for profiles
-/// and wearables continuously, so the naive per-request `warn!` printed the same
-/// line dozens of times and buried everything else. Say it ONCE per base, and
-/// say what to do about it — the per-URL detail drops to `info!`, which is the
-/// level `--verbose` selects.
+/// Once per base, not once per request: the explorer re-asks for profiles and
+/// wearables continuously, so a per-request warning buried everything else.
 fn note_upstream_unreachable(base: &str) {
     let mut seen = complained_bases().lock().unwrap_or_else(|e| e.into_inner());
     if !seen.insert(base.to_string()) {
         return;
     }
-    if base == LOCAL_CATALYST {
-        // The unconfigured default. Nothing is wrong with the scene; the user
-        // just has no content source for avatars, so name the knob.
-        crate::ux::note_stderr(format!(
-            "no upstream catalyst — avatars, wearables and profiles will not load. \
-             DCL_ONE_SDK_CATALYST is unset, so the preview looks for a LOCAL content server at \
-             {LOCAL_CATALYST} and nothing is listening there. Point it at a catalyst to load them \
-             (e.g. DCL_ONE_SDK_CATALYST=https://peer.decentraland.org); this toolchain ships no \
-             default so nothing is fetched from a third party unless you name it. The scene \
-             itself is unaffected."
-        ));
-    } else {
-        crate::ux::note_stderr(format!(
-            "upstream catalyst {base} is unreachable — avatars, wearables and profiles will not \
-             load until it answers. Re-run with --verbose for the per-request detail."
-        ));
-    }
+    crate::ux::note_stderr(format!(
+        "catalyst {base} is unreachable — avatars, wearables and profiles will not load until it \
+         answers. Point DCL_ONE_SDK_CATALYST at one that does (the default is \
+         {DEFAULT_CATALYST}). Re-run with --verbose for the per-request detail. The scene itself \
+         is unaffected."
+    ));
 }
 
-async fn forward_raw(
+/// Send to the catalyst, walking the fallback rotation on connect errors and
+/// 5xx. Idempotent methods retry; anything else goes to the primary only.
+async fn forward_to_catalyst(
     method: Method,
     upstream_path_and_query: String,
     headers: &HeaderMap,
@@ -241,18 +245,9 @@ async fn forward_raw(
         }
         match req.send().await {
             Ok(resp) => {
-                let status = resp.status();
-                let content_type = resp
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("application/binary")
-                    .to_string();
-                // reqwest decompresses; content-encoding/length must not be
-                // forwarded (upstream drops them for the same reason).
+                let status = axum_status(resp.status());
+                let content_type = content_type_or(&resp, "application/binary");
                 let bytes = resp.bytes().await.unwrap_or_default();
-                let status =
-                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 if status.is_server_error() && i + 1 < candidates.len() {
                     tracing::warn!("catalyst proxy {url}: {status}");
                     last_5xx = Some((status, content_type, bytes));
@@ -262,9 +257,6 @@ async fn forward_raw(
             }
             Err(e) => {
                 note_upstream_unreachable(base);
-                // info!, not debug!: --verbose maps to the `info` filter (see
-                // init_tracing), so debug would need RUST_LOG=debug and the
-                // one-time note above promises --verbose is enough.
                 tracing::info!("catalyst proxy {url}: {e}");
                 last_err =
                     Some((StatusCode::BAD_GATEWAY, format!("catalyst proxy: {e}")).into_response());
@@ -279,46 +271,22 @@ async fn forward_raw(
     }))
 }
 
-async fn forward(
-    method: Method,
-    upstream_path_and_query: String,
-    headers: &HeaderMap,
-    body: Bytes,
-) -> Response {
-    match forward_raw(method, upstream_path_and_query, headers, body).await {
-        Ok((status, ct, bytes)) => (status, [(header::CONTENT_TYPE, ct)], bytes).into_response(),
-        Err(resp) => resp,
-    }
-}
-
 /// Backup fetch: content hashes the local scene does not own (wearable GLBs,
-/// emotes, profile snapshots) are served from the upstream catalyst so the
-/// explorer can render avatars in preview. Successful GETs land in the
-/// scene's `.dcl-cache` LRU so the next preview session serves them offline
-/// and instantly; content is immutable, so hits never revalidate.
+/// emotes, profile snapshots) come from the upstream catalyst so the explorer
+/// can render avatars in preview. Successful GETs land in the scene's
+/// `.dcl-cache` LRU, which the next session serves offline.
 pub(super) async fn contents_upstream(
     method: Method,
     hash: &str,
     headers: &HeaderMap,
     cache_dir: Option<&std::path::Path>,
 ) -> Response {
-    const IMMUTABLE: &str = "public, max-age=31536000, immutable";
     if let Some(dir) = cache_dir {
-        if let Some((bytes, ct)) = super::content_cache::get(dir, hash).await {
-            let ct = ct.unwrap_or_else(|| "application/octet-stream".to_string());
-            tracing::info!(target: "access", "contents {hash} 200 dcl-cache sent={}", bytes.len());
-            let resp_headers = [
-                (header::CONTENT_TYPE, ct),
-                (header::CACHE_CONTROL, IMMUTABLE.to_string()),
-                (header::CONTENT_LENGTH, bytes.len().to_string()),
-            ];
-            if method == Method::HEAD {
-                return (resp_headers, axum::body::Body::empty()).into_response();
-            }
-            return (resp_headers, bytes).into_response();
+        if let Some(hit) = cached_content(dir, hash, &method, "contents").await {
+            return hit;
         }
     }
-    match forward_raw(
+    match forward_to_catalyst(
         method.clone(),
         format!("/content/contents/{hash}"),
         headers,
@@ -366,23 +334,10 @@ pub(super) async fn entities_active_upstream(pointers: &[String]) -> Vec<serde_j
     }
 }
 
-/// `router.all('/lambdas/:path+')` upstream: forward verbatim to the catalyst.
-pub(super) async fn lambdas_proxy(req: Request) -> Response {
-    proxy_request(req).await
-}
-
-/// `router.all('/explorer/:path+')` upstream.
-pub(super) async fn explorer_proxy(req: Request) -> Response {
-    proxy_request(req).await
-}
-
-/// `router.post('/content/entities')` upstream: the client's own deploys
-/// (profile publication from the onboarding lobby) go through the realm.
-pub(super) async fn entities_deploy_proxy(req: Request) -> Response {
-    proxy_request(req).await
-}
-
-async fn proxy_request(req: Request) -> Response {
+/// Upstream's `router.all('/lambdas/:path+')`, `router.all('/explorer/:path+')`
+/// and `router.post('/content/entities')` — the last carries the client's own
+/// deploys (profile publication from the onboarding lobby) through the realm.
+pub(super) async fn catalyst_proxy(req: Request) -> Response {
     let method = req.method().clone();
     let path_and_query = req
         .uri()
@@ -396,13 +351,14 @@ async fn proxy_request(req: Request) -> Response {
             return (StatusCode::PAYLOAD_TOO_LARGE, format!("proxy body: {e}")).into_response()
         }
     };
-    forward(method, path_and_query, &headers, body).await
+    match forward_to_catalyst(method, path_and_query, &headers, body).await {
+        Ok((status, ct, bytes)) => (status, [(header::CONTENT_TYPE, ct)], bytes).into_response(),
+        Err(resp) => resp,
+    }
 }
 
-/// World name (lowercased) -> candidate upstream contents prefixes
-/// (`…/contents/`), best first, learned from the world's own /about. Content
-/// hashes are immutable and the list is re-derivable by refetching the about,
-/// so a plain process cache is enough.
+/// World name (lowercased) -> candidate upstream contents prefixes, best first,
+/// learned from the world's own /about and re-derivable by refetching it.
 static WORLD_CONTENT_UPSTREAMS: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
     LazyLock::new(Default::default);
 
@@ -421,12 +377,8 @@ fn valid_world_name(name: &str) -> bool {
 
 async fn fetch_world_about(name: &str) -> Result<serde_json::Value, Response> {
     let client = proxy_client()?;
-    let base = world_base().ok_or_else(|| {
-        // 501 rather than 502: nothing upstream failed, the feature was never
-        // configured. Saying so beats proxying to a host the operator did not
-        // choose and never learning that it happened.
-        (StatusCode::NOT_IMPLEMENTED, world_base_hint()).into_response()
-    })?;
+    let base = world_base()
+        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, world_base_hint()).into_response())?;
     let url = format!("{base}/{name}/about");
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -435,8 +387,7 @@ async fn fetch_world_about(name: &str) -> Result<serde_json::Value, Response> {
             })
         }
         Ok(resp) => {
-            let status =
-                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status = axum_status(resp.status());
             Err((status, format!("world about {url}: {status}")).into_response())
         }
         Err(e) => Err((StatusCode::BAD_GATEWAY, format!("world about {url}: {e}")).into_response()),
@@ -452,13 +403,11 @@ fn origin_of(url: &str) -> Option<String> {
     Some(url[..end].to_string())
 }
 
-/// Every place the world's content might actually be served from, best guess
-/// first. Not just the urn's own baseUrl: a federated deployment can advertise
-/// a worlds host that does not expose `/contents/` (some deployments do),
-/// while the catalyst that proxied the /about has the entity synced — so the
-/// world base's own `/content/contents/` and the about's `content.publicUrl`
-/// are kept as fallbacks. Hashes are immutable, so any host that answers 200
-/// answers correctly.
+/// Every place the world's content might be served from, best guess first. Not
+/// just the urn's own baseUrl: a federated deployment can advertise a worlds
+/// host that does not expose `/contents/`, while the catalyst that proxied the
+/// /about has the entity synced. Hashes are immutable, so any host answering
+/// 200 answers correctly.
 fn world_content_candidates(about: &serde_json::Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |prefix: String| {
@@ -513,9 +462,8 @@ fn rewrite_scenes_urn(about: &mut serde_json::Value, local_contents_prefix: &str
 }
 
 /// Same-origin mirror of a world's /about, so a browser explorer can load a
-/// portable world (the movement controller in particular) without the CORS
-/// wall around the public worlds host. Content moves to `/world-content/…` on
-/// this origin, which the permissive CORS layer already covers.
+/// portable world without the CORS wall around the public worlds host. Content
+/// moves to `/world-content/…`, which the permissive CORS layer already covers.
 pub(super) async fn world_about(
     axum::extract::Path(name): axum::extract::Path<String>,
     headers: HeaderMap,
@@ -536,18 +484,18 @@ pub(super) async fn world_about(
             .into_response();
     }
     world_upstreams().insert(name.to_ascii_lowercase(), candidates);
-    let proto = super::forwarded_proto(&headers);
-    let host = preview_host(&headers);
-    let prefix = super::forwarded_prefix(&headers);
     rewrite_scenes_urn(
         &mut about,
-        &format!("{proto}://{host}{prefix}/world-content/{name}/contents/"),
+        &format!(
+            "{}/world-content/{name}/contents/",
+            preview_origin(&headers)
+        ),
     );
     Json(about).into_response()
 }
 
-/// Content half of the world mirror: immutable hashes, so hits land in the
-/// same `.dcl-cache` LRU the catalyst back-fill uses and never revalidate.
+/// Content half of the world mirror: immutable hashes, so hits land in the same
+/// `.dcl-cache` LRU the catalyst back-fill uses and never revalidate.
 pub(super) async fn world_content(
     method: Method,
     axum::extract::State(st): axum::extract::State<std::sync::Arc<super::AppState>>,
@@ -556,31 +504,15 @@ pub(super) async fn world_content(
     if !valid_world_name(&name) || !hash.chars().all(|c| c.is_ascii_alphanumeric()) {
         return (StatusCode::BAD_REQUEST, "invalid world content path").into_response();
     }
-    let cache_dir = st
-        .projects
-        .first()
-        .map(|p| p.root.join(".dcl-cache").join("contents"));
-    const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+    let cache_dir = contents_cache_dir(&st);
     if let Some(dir) = cache_dir.as_deref() {
-        if let Some((bytes, ct)) = super::content_cache::get(dir, &hash).await {
-            let ct = ct.unwrap_or_else(|| "application/octet-stream".to_string());
-            tracing::info!(target: "access", "world-content {hash} 200 dcl-cache sent={}", bytes.len());
-            let resp_headers = [
-                (header::CONTENT_TYPE, ct),
-                (header::CACHE_CONTROL, IMMUTABLE.to_string()),
-                (header::CONTENT_LENGTH, bytes.len().to_string()),
-            ];
-            if method == Method::HEAD {
-                return (resp_headers, axum::body::Body::empty()).into_response();
-            }
-            return (resp_headers, bytes).into_response();
+        if let Some(hit) = cached_content(dir, &hash, &method, "world-content").await {
+            return hit;
         }
     }
-    // Bound before the match: the guard must not live across the refetch await.
     let cached = world_upstreams().get(&name.to_ascii_lowercase()).cloned();
     let candidates = match cached {
         Some(c) => c,
-        // Server restarted between the about and the content fetch: re-derive.
         None => match fetch_world_about(&name).await.map(|a| {
             let c = world_content_candidates(&a);
             if !c.is_empty() {
@@ -608,12 +540,7 @@ pub(super) async fn world_content(
         let url = format!("{upstream}{hash}");
         match client.request(method.clone(), &url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let ct = resp
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("application/octet-stream")
-                    .to_string();
+                let ct = content_type_or(&resp, "application/octet-stream");
                 let bytes = resp.bytes().await.unwrap_or_default();
                 if method == Method::GET {
                     if let Some(dir) = cache_dir.as_deref() {
@@ -621,8 +548,6 @@ pub(super) async fn world_content(
                     }
                 }
                 if i > 0 {
-                    // Promote the answering host so the rest of this scene's
-                    // files skip the dead candidates.
                     let mut map = world_upstreams();
                     if let Some(list) = map.get_mut(&name.to_ascii_lowercase()) {
                         if let Some(pos) = list.iter().position(|u| u == upstream) {
@@ -641,8 +566,7 @@ pub(super) async fn world_content(
                     .into_response();
             }
             Ok(resp) => {
-                let status =
-                    StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let status = axum_status(resp.status());
                 tracing::warn!("world content {url}: {status}");
                 last = Some((status, format!("world content {url}: {status}")));
             }
@@ -664,13 +588,10 @@ mod tests {
 
     #[test]
     fn an_unreachable_upstream_is_explained_once_per_base_not_once_per_request() {
-        // The explorer re-asks for profiles and wearables continuously; before
-        // this, every one of those printed the same warning line.
         let base = "http://127.0.0.1:59999";
         complained_bases().lock().unwrap().remove(&base.to_string());
         note_upstream_unreachable(base);
         assert!(complained_bases().lock().unwrap().contains(base));
-        // Subsequent calls for the same base are silent; a different base is not.
         note_upstream_unreachable(base);
         note_upstream_unreachable(base);
         let other = "http://127.0.0.1:59998";
@@ -684,12 +605,18 @@ mod tests {
     }
 
     #[test]
-    fn the_unconfigured_default_is_the_local_catalyst_not_a_public_one() {
-        // Guards the posture the hint text explains: with nothing configured the
-        // preview must not silently reach a third party.
+    fn the_unconfigured_default_is_a_reachable_catalyst_and_both_env_names_win() {
         std::env::remove_var("DCL_ONE_SDK_CATALYST");
-        assert_eq!(catalyst_base(), LOCAL_CATALYST);
-        assert!(LOCAL_CATALYST.starts_with("http://127.0.0.1"));
+        std::env::remove_var("DCL_CATALYST");
+        assert_eq!(catalyst_base(), DEFAULT_CATALYST);
+        assert!(DEFAULT_CATALYST.starts_with("https://"));
+
+        std::env::set_var("DCL_CATALYST", "https://peer.decentraland.org/");
+        assert_eq!(catalyst_base(), "https://peer.decentraland.org");
+        std::env::set_var("DCL_ONE_SDK_CATALYST", "http://127.0.0.1:5141");
+        assert_eq!(catalyst_base(), "http://127.0.0.1:5141");
+        std::env::remove_var("DCL_ONE_SDK_CATALYST");
+        std::env::remove_var("DCL_CATALYST");
     }
 
     #[test]
@@ -721,9 +648,6 @@ mod tests {
         );
     }
 
-    /// The advertised baseUrl can point at a host that does not serve
-    /// `/contents/` (this is a real deployment shape), so the world
-    /// base's catalyst and the about's content.publicUrl stay as fallbacks.
     #[test]
     fn content_candidates_are_ordered_and_deduped() {
         let about = json!({
@@ -734,9 +658,6 @@ mod tests {
         });
         let candidates = world_content_candidates(&about);
         assert_eq!(candidates[0], "https://worlds.example/contents/");
-        // The world-base origin is a candidate only when one is configured.
-        // Unset — which is how the suite runs — it contributes nothing, and the
-        // urn baseUrl and about publicUrl still carry the resolution.
         match world_base().as_deref().and_then(origin_of) {
             Some(origin) => assert!(candidates.contains(&format!("{origin}/content/contents/"))),
             None => assert!(

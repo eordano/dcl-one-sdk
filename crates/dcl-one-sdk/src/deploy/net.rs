@@ -449,9 +449,6 @@ pub async fn enforce_world_permission(
                 ))
                 .and("or sign with a wallet listed below"),
             )
-            // Who owns it and who already holds each permission — the same
-            // view `world permissions list` prints. The refusal is only
-            // actionable if the user can see whom to ask.
             .why(crate::world::render_permissions(world, &check.doc))
             .into())
         }

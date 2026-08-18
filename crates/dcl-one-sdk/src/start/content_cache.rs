@@ -83,7 +83,6 @@ fn evict(dir: &Path, cap: usize) {
     let mut entries: Vec<(SystemTime, PathBuf)> = rd
         .flatten()
         .filter_map(|e| {
-            // Sidecars (.ct) and in-flight temp files are not entries.
             if !valid_hash(&e.file_name().to_string_lossy()) {
                 return None;
             }
@@ -157,7 +156,6 @@ mod tests {
             Some((b"glb-bytes".to_vec(), Some("model/gltf-binary".into())))
         );
         assert_eq!(get(&tmp.0, "QmMissing").await, None);
-        // Invalid hashes are never written.
         put(&tmp.0, "b64-notacid", b"x", None).await;
         assert!(!tmp.0.join("b64-notacid").exists());
     }
@@ -183,7 +181,6 @@ mod tests {
         assert!(tmp.0.join("QmMid").exists());
         assert!(tmp.0.join("QmNew").exists());
         assert!(tmp.0.join("QmNew.ct").exists());
-        // Under cap: nothing happens.
         evict(&tmp.0, 2);
         assert!(tmp.0.join("QmMid").exists());
     }

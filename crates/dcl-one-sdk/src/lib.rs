@@ -23,6 +23,7 @@ pub mod prebuilt;
 #[cfg(feature = "rolldown")]
 pub mod rolldown_backend;
 pub mod scene;
+pub mod schema_crdt;
 pub mod skills;
 pub mod split;
 pub mod start;

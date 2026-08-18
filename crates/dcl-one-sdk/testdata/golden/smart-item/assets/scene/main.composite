@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "components": [
+    {
+      "name": "core::Transform",
+      "data": {
+        "512": {
+          "json": {
+            "position": { "x": 8, "y": 1, "z": 8 },
+            "rotation": { "x": 0, "y": 0, "z": 0, "w": 1 },
+            "scale": { "x": 1, "y": 1, "z": 1 },
+            "parent": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "core::MeshRenderer",
+      "data": {
+        "512": { "json": { "mesh": { "$case": "box", "box": { "uvs": [] } } } }
+      }
+    },
+    {
+      "name": "core-schema::Name",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string", "serializationType": "utf8-string" }
+        },
+        "serializationType": "map"
+      },
+      "data": {
+        "512": { "json": { "value": "Counter Box" } }
+      }
+    },
+    {
+      "name": "asset-packs::Counter",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "number", "serializationType": "float32" },
+          "value": { "type": "integer", "serializationType": "int32" }
+        },
+        "serializationType": "map"
+      },
+      "data": {
+        "512": { "json": { "id": 0, "value": 1 } }
+      }
+    },
+    {
+      "name": "asset-packs::Script",
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string", "serializationType": "utf8-string" },
+                "priority": { "type": "number", "serializationType": "float32" },
+                "layout": {
+                  "type": "string",
+                  "serializationType": "optional",
+                  "optionalJsonSchema": { "type": "string", "serializationType": "utf8-string" }
+                }
+              },
+              "serializationType": "map"
+            },
+            "serializationType": "array"
+          }
+        },
+        "serializationType": "map"
+      },
+      "data": {
+        "512": {
+          "json": {
+            "value": [{ "path": "assets/scene/Scripts/Counter.ts", "priority": 0 }]
+          }
+        }
+      }
+    }
+  ]
+}

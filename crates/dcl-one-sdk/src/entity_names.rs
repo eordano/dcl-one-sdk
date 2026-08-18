@@ -80,8 +80,6 @@ pub fn render(names: &BTreeMap<String, String>) -> String {
         out.push_str(&escape(value));
         out.push_str("\",\n");
     }
-    // Upstream's trailing space is load-bearing only in the sense that keeping
-    // it means a Hub save produces no diff against our output.
     out.push_str("} \n");
     out
 }
@@ -110,8 +108,6 @@ pub fn collect(root: &Path) -> BTreeMap<String, String> {
             let Some(data) = comp.get("data").and_then(|d| d.as_object()) else {
                 continue;
             };
-            // Entity ids are numeric strings; sort them so "later entity wins"
-            // means the higher id, not whatever order serde handed us.
             let mut entries: Vec<(u64, &Value)> = data
                 .iter()
                 .filter_map(|(k, v)| k.parse::<u64>().ok().map(|id| (id, v)))

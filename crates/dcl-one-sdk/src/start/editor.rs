@@ -217,8 +217,6 @@ pub(super) async fn inspector_asset(
     let Ok(mut bytes) = tokio::fs::read(&full).await else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    // The mime comes from the request path, not the file: `bundle.js.gz` on
-    // disk is still `application/javascript` on the wire.
     let mut out = HeaderMap::new();
     out.insert(
         header::CONTENT_TYPE,
@@ -235,8 +233,6 @@ pub(super) async fn inspector_asset(
         if accepted {
             out.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
         } else {
-            // Rare, but a client that will not take gzip must still get the
-            // editor rather than a broken bundle.
             match data_layer::gunzip(&bytes) {
                 Ok(plain) => bytes = plain,
                 Err(e) => {

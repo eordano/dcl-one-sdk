@@ -74,8 +74,6 @@ async fn info(State(st): State<Arc<WorldLinkerState>>) -> Json<Value> {
     let r = &st.req;
     let path = r.action.path(&r.name);
     let method = r.action.method();
-    // Mint a fresh payload per page load: the server clock decides the
-    // timestamp, and a stale one would be rejected by the worlds server.
     let payload = signed_fetch_payload(method, &path, crate::deploy::now_ms());
     {
         let mut pending = st.pending.lock().unwrap_or_else(PoisonError::into_inner);
@@ -138,14 +136,7 @@ async fn sign(State(st): State<Arc<WorldLinkerState>>, Json(req): Json<SignReq>)
         }
         Ok((status, body)) => {
             let detail = body.trim();
-            // The worlds server only honours a signed-fetch payload for about a
-            // minute (ADR-44). A human connecting a wallet and reading a
-            // MetaMask prompt routinely takes longer than that, so expiry is
-            // the common failure here — not a permissions problem. Flag it
-            // separately so the page can re-mint and re-prompt by itself.
             let expired = is_expired_signature(detail);
-            // Any other refusal is nearly always the wrong account connected;
-            // let them switch wallets rather than restarting the command.
             let retryable = expired || status == 401 || status == 403;
             let error = if expired {
                 format!(
@@ -477,8 +468,6 @@ mod tests {
 
     #[test]
     fn expiry_is_told_apart_from_a_permission_refusal() {
-        // Both arrive as a plain 401, so only the body distinguishes them —
-        // and the page's auto-retry hangs off exactly this call.
         let expired = r#"{"error":"Expired signature: signature timestamp: 1785345934007, timestamp expiration: 1785345994007, local timestamp: 1785346010626","message":"This endpoint requires a signed fetch request. See ADR-44."}"#;
         assert!(is_expired_signature(expired));
         assert!(is_expired_signature("expired signature"));

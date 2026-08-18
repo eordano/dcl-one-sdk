@@ -3,8 +3,7 @@ use std::time::{Duration, Instant};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// abgen ships inside this binary, so a failure here is the sidecar itself
-/// misbehaving, not a missing install — say what to do about that instead.
+/// abgen ships inside this binary, so a failure here is never a missing install.
 const INSTALL_HINT: &str =
     "ABGEN_BIN overrides the embedded copy; --no-asset-bundles silences this";
 
@@ -20,9 +19,8 @@ fn free_port() -> Option<u16> {
     Some(l.local_addr().ok()?.port())
 }
 
-/// abgen's canonical port; taken (second preview, unrelated tenant) falls
-/// back to a random port that the deeplink carries. The probe binds the
-/// wildcard address because that is what abgen binds: a loopback probe
+/// abgen's canonical port, or a random one the deeplink carries. The probe binds
+/// the wildcard address because that is what abgen binds: a loopback probe
 /// false-passes when another abgen holds 0.0.0.0:5147 with SO_REUSEADDR.
 fn sidecar_port() -> Option<u16> {
     const PREFERRED: u16 = 5147;
@@ -32,10 +30,43 @@ fn sidecar_port() -> Option<u16> {
     free_port()
 }
 
-/// The local catalyrst-abgen serve endpoint. Overridden with
-/// ABGEN_UPSTREAM_AB_CDN; never defaults to a public asset-bundle CDN.
+/// Where abgen looks for an already-converted bundle before converting one
+/// itself (ABGEN_UPSTREAM_AB_CDN overrides). Must never be 127.0.0.1:5147:
+/// that is abgen's own port, so every miss re-entered the same server until
+/// "Too many open files (os error 24)". A real CDN also makes wearables usable
+/// without converting Decentraland's own on every boot.
 fn upstream_ab_cdn_default() -> String {
-    "http://127.0.0.1:5147".to_string()
+    "https://ab-cdn.interconnected.online".to_string()
+}
+
+/// The upstream to hand the sidecar, with an upstream that IS the sidecar
+/// dropped: the loop it causes reads as descriptor exhaustion, not as a
+/// misconfiguration. Empty is abgen's own "no read-through" (`abcdn/config.rs`
+/// filters an empty value out), so disabling needs no sentinel of ours.
+fn upstream_ab_cdn_for(port: u16) -> String {
+    let url = env_or("ABGEN_UPSTREAM_AB_CDN", upstream_ab_cdn_default());
+    if !points_at_port(&url, port) {
+        return url;
+    }
+    crate::ux::note_stderr(format!(
+        "ignoring ABGEN_UPSTREAM_AB_CDN={url}: that is this asset-bundle sidecar's own address, \
+         so every lookup would re-enter it until the process runs out of file descriptors. \
+         Converting locally instead."
+    ));
+    String::new()
+}
+
+fn points_at_port(url: &str, port: u16) -> bool {
+    url.trim()
+        .trim_end_matches('/')
+        .rsplit_once(':')
+        .is_some_and(|(host, p)| {
+            p == port.to_string()
+                && matches!(
+                    host,
+                    "http://127.0.0.1" | "http://localhost" | "http://0.0.0.0" | "http://[::1]"
+                )
+        })
 }
 
 fn host_platform() -> &'static str {
@@ -46,8 +77,8 @@ fn host_platform() -> &'static str {
     }
 }
 
-/// Leave a quarter of the cores for the preview server, the explorer and the
-/// rest of the machine: abgen lanes get ceil(3/4 · ncpu).
+/// abgen lanes get ceil(3/4 · ncpu), leaving a quarter for the preview server,
+/// the explorer and the rest of the machine.
 fn three_quarter_cpus() -> usize {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -61,16 +92,12 @@ fn pick_bin(env_bin: Option<String>, embedded: Option<PathBuf>) -> String {
     }
     match embedded {
         Some(p) => p.display().to_string(),
-        // Only reachable if the embed failed to unpack (a full or read-only
-        // temp dir), which already printed why. PATH is the last thing left to
-        // try before giving up on asset bundles for this run.
         None => "abgen".to_string(),
     }
 }
 
-/// The abgen the sidecar runs. Every dcl-one-sdk binary embeds one, so this
-/// needs no install step and has no per-scene lookup; ABGEN_BIN overrides it
-/// for advanced use — a locally built abgen, a bisect, a test.
+/// The abgen the sidecar runs. Every binary embeds one, so there is no install
+/// step and no per-scene lookup; ABGEN_BIN overrides it.
 pub fn resolve_bin() -> String {
     pick_bin(
         std::env::var("ABGEN_BIN").ok(),
@@ -85,14 +112,11 @@ pub struct Sidecar {
 }
 
 /// pgid of the running sidecar (0 = none). kill_on_drop only fires on a clean
-/// drop and only reaches the direct child; when the SDK dies by signal the
-/// abgen group would survive and keep holding port 5147, so the group id is
-/// kept here for an explicit group kill from the shutdown path.
+/// drop and only reaches the direct child, so an SDK killed by signal would
+/// leave the abgen group holding port 5147.
 #[cfg(unix)]
 static SIDECAR_PGID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-/// SIGTERM the whole process group, escalating to SIGKILL if anything in it
-/// survives the grace window. `pgid <= 0` is a no-op.
 #[cfg(unix)]
 fn kill_process_group(pgid: i32) {
     if pgid <= 0 {
@@ -109,8 +133,6 @@ fn kill_process_group(pgid: i32) {
     unsafe { libc::kill(-pgid, libc::SIGKILL) };
 }
 
-/// Kill the spawned sidecar's whole process group, if one is running. Safe to
-/// call more than once and with no sidecar at all.
 pub fn kill_sidecar_group() {
     #[cfg(unix)]
     kill_process_group(SIDECAR_PGID.swap(0, std::sync::atomic::Ordering::SeqCst));
@@ -162,8 +184,6 @@ fn relay_output(
             match rewrite_build_line(&line, &project_root) {
                 Some((msg, true)) => crate::ux::note_stderr(msg),
                 Some((msg, false)) => crate::ux::note(msg),
-                // abgen's startup config dump is INFO-level chatter; without
-                // --verbose only its warnings and errors reach the terminal.
                 None if !crate::ux::verbose() && !looks_like_problem(&line) => {}
                 None if to_stderr => eprintln!("{line}"),
                 None => println!("{line}"),
@@ -173,8 +193,6 @@ fn relay_output(
 }
 
 fn looks_like_problem(line: &str) -> bool {
-    // abgen INFO tracing lines may carry an `error=` field (degraded-mode
-    // notes); the INFO level itself marks them as chatter, not problems.
     if line.contains("INFO") {
         return false;
     }
@@ -187,86 +205,41 @@ pub fn spawn_sidecar(preview_port: u16, project_root: &Path) -> Option<Sidecar> 
     let bin = resolve_bin();
     let port = sidecar_port()?;
     let url = format!("http://127.0.0.1:{port}");
-    // Conversion output lives next to scene.json: watcher-ignored (or hot
-    // reload loops on abgen's revalidation writes) and never deployed.
     let cache_root: PathBuf = project_root.join(".dcl-optimized-assets");
 
     let mut cmd = tokio::process::Command::new(&bin);
-    // Own process group (unix): lets shutdown kill abgen AND anything abgen
-    // spawned via one group signal, even when the SDK dies by SIGINT/SIGTERM
-    // (kill_on_drop never fires then and reaches only the direct child).
     #[cfg(unix)]
     cmd.process_group(0);
-    let spawned = cmd
-        // All interfaces, like the preview server itself: LAN devices joining
-        // via the network deep link fetch their optimized assets directly.
-        .env("HTTP_SERVER_HOST", "0.0.0.0")
+    cmd.env("HTTP_SERVER_HOST", "0.0.0.0")
         .env("HTTP_SERVER_PORT", port.to_string())
-        .env(
+        .env("ABGEN_UPSTREAM_AB_CDN", upstream_ab_cdn_for(port));
+
+    let lanes = three_quarter_cpus().to_string();
+    for (name, default) in [
+        (
             "ABGEN_CATALYST_URL",
-            env_or(
-                "ABGEN_CATALYST_URL",
-                format!("http://127.0.0.1:{preview_port}/content"),
-            ),
-        )
-        // No worlds fallback in preview: nothing remote is locally
-        // convertible. abgen defaults this ON when unset, so disable
-        // explicitly ("off"; any other value re-enables it).
-        .env(
-            "ABGEN_WORLDS_CONTENT_URL",
-            env_or("ABGEN_WORLDS_CONTENT_URL", "off".to_string()),
-        )
-        .env(
-            "ABGEN_UPSTREAM_AB_CDN",
-            env_or("ABGEN_UPSTREAM_AB_CDN", upstream_ab_cdn_default()),
-        )
-        .env(
-            "ABGEN_INDEX_EAGER_BUILD",
-            env_or("ABGEN_INDEX_EAGER_BUILD", "off".to_string()),
-        )
-        .env(
-            "ABGEN_INDEX_BUILD_PLATFORMS",
-            env_or("ABGEN_INDEX_BUILD_PLATFORMS", host_platform().to_string()),
-        )
-        .env(
+            format!("http://127.0.0.1:{preview_port}/content"),
+        ),
+        ("ABGEN_WORLDS_CONTENT_URL", "off".to_string()),
+        ("ABGEN_INDEX_EAGER_BUILD", "off".to_string()),
+        ("ABGEN_INDEX_BUILD_PLATFORMS", host_platform().to_string()),
+        (
             "ABGEN_OUT_ROOT",
-            env_or(
-                "ABGEN_OUT_ROOT",
-                cache_root.join("out").display().to_string(),
-            ),
-        )
-        .env(
+            cache_root.join("out").display().to_string(),
+        ),
+        (
             "ABGEN_CACHE_DIR",
-            env_or(
-                "ABGEN_CACHE_DIR",
-                cache_root.join("cache").display().to_string(),
-            ),
-        )
-        // ABGEN_GPU_BACKEND is not set: abgen's auto is right (CPU on macOS
-        // where integrated Metal loses to the CPU for BC7, GPU elsewhere);
-        // exporting the var still passes through to the sidecar.
-        .env(
-            "ABGEN_JIT_BUILD_CONCURRENCY",
-            env_or(
-                "ABGEN_JIT_BUILD_CONCURRENCY",
-                three_quarter_cpus().to_string(),
-            ),
-        )
-        .env(
-            "ABGEN_INDEX_BUILD_CONCURRENCY",
-            env_or(
-                "ABGEN_INDEX_BUILD_CONCURRENCY",
-                three_quarter_cpus().to_string(),
-            ),
-        )
-        .env(
-            "RAYON_NUM_THREADS",
-            env_or("RAYON_NUM_THREADS", three_quarter_cpus().to_string()),
-        )
-        .env(
-            "RUST_LOG",
-            env_or("RUST_LOG", "abgen=info,tower_http=warn".to_string()),
-        )
+            cache_root.join("cache").display().to_string(),
+        ),
+        ("ABGEN_JIT_BUILD_CONCURRENCY", lanes.clone()),
+        ("ABGEN_INDEX_BUILD_CONCURRENCY", lanes.clone()),
+        ("RAYON_NUM_THREADS", lanes.clone()),
+        ("RUST_LOG", "abgen=info,tower_http=warn".to_string()),
+    ] {
+        cmd.env(name, env_or(name, default));
+    }
+
+    let spawned = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -287,8 +260,6 @@ pub fn spawn_sidecar(preview_port: u16, project_root: &Path) -> Option<Sidecar> 
             let (tx, exited) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
                 let _ = child.wait().await;
-                // Natural exit: forget the group so a later shutdown cannot
-                // signal a recycled pgid.
                 #[cfg(unix)]
                 let _ = SIDECAR_PGID.compare_exchange(
                     pgid,
@@ -359,13 +330,40 @@ impl Sidecar {
 mod tests {
     use super::*;
 
-    #[test]
-    fn rewrite_build_line_formats_ok_fail_and_passthrough() {
-        let root = std::env::temp_dir().join(format!(
-            "dcl-one-sdk-abgen-line-test-{}-{:x}",
+    fn scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "dcl-one-sdk-{tag}-{}-{:x}",
             std::process::id(),
             rand::random::<u64>()
-        ));
+        ))
+    }
+
+    #[test]
+    fn the_upstream_ab_cdn_is_never_this_sidecar() {
+        std::env::remove_var("ABGEN_UPSTREAM_AB_CDN");
+        let default = upstream_ab_cdn_default();
+        assert!(default.starts_with("https://"), "{default}");
+        assert!(!points_at_port(&default, 5147));
+        assert_eq!(upstream_ab_cdn_for(5147), default);
+
+        for form in [
+            "http://127.0.0.1:5147",
+            "http://localhost:5147/",
+            "http://0.0.0.0:5147",
+        ] {
+            std::env::set_var("ABGEN_UPSTREAM_AB_CDN", form);
+            assert_eq!(upstream_ab_cdn_for(5147), "", "{form}");
+            assert_eq!(upstream_ab_cdn_for(5148), form);
+        }
+
+        std::env::set_var("ABGEN_UPSTREAM_AB_CDN", "https://ab-cdn.example.org");
+        assert_eq!(upstream_ab_cdn_for(5147), "https://ab-cdn.example.org");
+        std::env::remove_var("ABGEN_UPSTREAM_AB_CDN");
+    }
+
+    #[test]
+    fn rewrite_build_line_formats_ok_fail_and_passthrough() {
+        let root = scratch("abgen-line-test");
         std::fs::create_dir_all(root.join("images")).unwrap();
         std::fs::write(root.join("images/scene-thumbnail.png"), vec![0u8; 2048]).unwrap();
 
@@ -373,7 +371,7 @@ mod tests {
         assert_eq!(
             rewrite_build_line(ok, &root),
             Some((
-                "abgen build: images/scene-thumbnail.png (mac) 16ms, in 2.0kb, out 33.1kb"
+                "abgen build: images/scene-thumbnail.png (mac) 16.0 ms, in 2.0kb, out 33.1kb"
                     .to_string(),
                 false
             ))
@@ -383,7 +381,7 @@ mod tests {
         assert_eq!(
             rewrite_build_line(fail, &root),
             Some((
-                "abgen build FAIL: assets/tree.glb (windows) 6,230ms \u{2014} decode error"
+                "abgen build FAIL: assets/tree.glb (windows) 6.23 sec \u{2014} decode error"
                     .to_string(),
                 true
             ))
@@ -418,7 +416,6 @@ mod tests {
             pick_bin(Some("/custom/abgen".into()), Some(embedded.clone())),
             "/custom/abgen"
         );
-        // An empty ABGEN_BIN is the same as unset, not a request to run "".
         assert_eq!(
             pick_bin(Some(String::new()), Some(embedded.clone())),
             embedded.display().to_string()
@@ -432,8 +429,6 @@ mod tests {
 
     #[test]
     fn resolve_bin_lands_on_the_embedded_abgen_without_any_install() {
-        // Guards the whole point of the embed: no scene, no PATH entry, no npm
-        // package, and `start` still has an executable to run.
         let prev = std::env::var("ABGEN_BIN").ok();
         std::env::remove_var("ABGEN_BIN");
         let bin = resolve_bin();
@@ -451,8 +446,6 @@ mod tests {
     #[test]
     fn kill_process_group_reaps_leader_and_grandchildren() {
         use std::os::unix::process::CommandExt;
-        // sh leads its own group; the backgrounded sleep joins that group and
-        // outlives sh, exactly like an abgen worker outliving the server.
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", "sleep 300 & exec sleep 300"])
             .process_group(0)
@@ -466,7 +459,6 @@ mod tests {
         kill_process_group(pgid);
         assert!(!child.wait().unwrap().success(), "leader died by signal");
 
-        // The whole group (incl. the reparented background sleep) is gone.
         let deadline = Instant::now() + Duration::from_secs(5);
         while unsafe { libc::kill(-pgid, 0) } == 0 {
             assert!(
@@ -475,22 +467,15 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
-        // pgid 0 / negative are no-ops, and double kill is safe.
         kill_process_group(0);
         kill_process_group(pgid);
     }
 
-    /// The scene's own `@dcl/abgen` platform package used to be part of the
-    /// lookup chain. It no longer is: the binary carries abgen, so a scene that
-    /// happens to have that package installed must not silently swap the
-    /// sidecar for a different version.
+    /// The scene's own `@dcl/abgen` package was once in the lookup chain; a
+    /// scene that still has it installed must not swap the sidecar version.
     #[test]
     fn an_npm_abgen_in_the_scene_is_ignored() {
-        let root = std::env::temp_dir().join(format!(
-            "dcl-one-sdk-npm-abgen-{}-{:x}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
+        let root = scratch("npm-abgen");
         let pkg = root
             .join("node_modules")
             .join("@dcl")

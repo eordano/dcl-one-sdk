@@ -62,7 +62,7 @@ fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool) -> String 
         ""
     };
     let editor_block = if editor_scene {
-        "\nimport { syncEntity } from '@dcl/sdk/network'\nimport players from '@dcl/sdk/players'\nimport { initAssetPacks } from '@dcl/asset-packs/dist/scene-entrypoint'\ninitAssetPacks(engine, { syncEntity }, players)\n"
+        "\nimport { syncEntity } from '@dcl/sdk/network'\nimport players from '@dcl/sdk/players'\nimport { setCompositeProvider } from '@dcl/sdk/ecs'\nimport { initAssetPacks } from '@dcl/asset-packs/dist/scene-entrypoint'\nsetCompositeProvider(engine, compositeProvider)\ninitAssetPacks(engine, { syncEntity }, players)\n"
             .to_string()
     } else {
         "false".to_string()
@@ -79,6 +79,13 @@ import {{ _initializeScripts }} from '~sdk/script-utils'
 {composite_fill}
 {editor_block}
 
+// `console.error(e)` drops the frames, and the host captures its own stack at
+// the call site — this catch block. `e.stack` carries the throw site, so it is
+// a superset of what upstream prints.
+function __reportSceneError(e: any) {{
+  console.error(e && e.stack ? e.stack : e)
+}}
+
 if ((entrypoint as any).main !== undefined) {{
   function _INTERNAL_startup_system() {{
     try {{
@@ -86,10 +93,10 @@ if ((entrypoint as any).main !== undefined) {{
 
       const maybePromise = (entrypoint as any).main()
       if (maybePromise && typeof maybePromise === 'object' && typeof (maybePromise as unknown as Promise<unknown>).then === 'function') {{
-        maybePromise.catch(console.error)
+        maybePromise.catch(__reportSceneError)
       }}
     }} catch (e) {{
-     console.error(e)
+      __reportSceneError(e)
     }} finally {{
       engine.removeSystem(_INTERNAL_startup_system)
     }}
@@ -154,11 +161,6 @@ fn write_all_composites(project: &Project, dir: &Path, ignore: bool) -> Result<(
                 .and_then(|raw| normalizer.normalize(&raw));
             match normalized {
                 Ok(json) => lines.push(format!("'{rel}':{json}")),
-                // Not a warning: everything placed in the Creator Hub lives in
-                // this file, so skipping it emits an empty compositeFromLoader
-                // and the scene builds green, deploys, and renders as bare
-                // ground. Failing here is the only way the author finds out
-                // before players do.
                 Err(err) => {
                     return Err(UserError::new(
                         format!("{rel} could not be loaded, so the scene would build with no content from the editor"),
@@ -205,20 +207,15 @@ pub fn scan_max_composite_entity(root: &Path) -> u32 {
     max
 }
 
-/// The `~sdk/script-utils` no-op: what a scene *without* the smart-item runtime
-/// links against. The generated entrypoint calls `_initializeScripts`
-/// unconditionally, so the symbol has to exist either way. Same export surface
-/// and semantics as upstream's `generateScriptStubModuleContent`.
+/// The `~sdk/script-utils` no-op a scene without the smart-item runtime links
+/// against; the generated entrypoint calls `_initializeScripts` unconditionally.
+/// Same export surface as upstream's `generateScriptStubModuleContent`.
 pub const SCRIPT_UTILS_STUB: &str = "export function _initializeScripts(_engine) {}\nexport function getScriptInstance(_entity, _scriptPath) { return null }\nexport function getScriptInstancesByPath(_scriptPath) { return [] }\nexport function getAllScriptInstances(_entity) { return [] }\nexport function callScriptMethod(entity, scriptPath, methodName, ..._args) {\n  console.error(`Method ${methodName} not found on script ${scriptPath} for entity ${entity}`)\n  return undefined\n}\n";
 
 /// The real `~sdk/script-utils`: `@dcl/sdk-commands`' compiled smart-item script
-/// runtime, de-CommonJS'd so rolldown can bundle it as an ES module.
-///
-/// `None` unless *both* `@dcl/asset-packs` and `@dcl/sdk-commands` are on disk
-/// — that is the npm flow. The vendored blob ships neither as source: it ships
-/// this same transformed code already bundled into the prebuilt smart-item
-/// chunk, which is why `prebuilt::build_chunks` calls this function directly at
-/// blob-build time.
+/// runtime, de-CommonJS'd so rolldown can bundle it as an ES module. `None`
+/// unless both packages are on disk — the npm flow; the vendored blob ships
+/// this same output prebuilt, via `prebuilt::build_chunks`.
 pub fn script_utils_source(project: &Project) -> Option<String> {
     let code = project
         .node_module("@dcl/asset-packs")
@@ -233,9 +230,8 @@ pub fn script_utils_source(project: &Project) -> Option<String> {
     ))
 }
 
-/// Upstream skips the embedded script runtime for scenes that author no
-/// scripts and are not editor scenes; only the rest inline the real runtime
-/// (when its sources are installed).
+/// Upstream skips the embedded script runtime for scenes that author no scripts
+/// and are not editor scenes.
 pub fn script_utils_content(project: &Project, ignore_composite: bool) -> String {
     let has_scripts = !ignore_composite && composites_have_scripts(&project.root);
     if !has_scripts && !project.is_editor_scene() {
@@ -245,15 +241,9 @@ pub fn script_utils_content(project: &Project, ignore_composite: bool) -> String
 }
 
 /// Does any composite author a smart-item script? The Rust side of upstream's
-/// `compositeData.scripts.size > 0`: an `asset-packs::Script` component with
-/// at least one instance in its `value` array (upstream keys its Map by
-/// `script.path`, so any entry — usable path or not — flips the gate).
-/// Composites that would fail to instance contribute nothing, as in
-/// upstream's per-composite try/catch: `CompositeNormalizer` enforces the
-/// same rules `getComponentDefinition` throws on (unknown `core::`
-/// components; non-core components with no schema in scope), and shares
-/// schema definitions across the sorted files the way upstream's single
-/// engine does.
+/// `compositeData.scripts.size > 0`: any entry in an `asset-packs::Script`
+/// component's `value` array flips the gate. Composites that would fail to
+/// instance contribute nothing, matching upstream's per-composite try/catch.
 pub fn composites_have_scripts(root: &Path) -> bool {
     let (has_scripts, skipped) = composites_script_scan(root);
     for message in skipped {
@@ -302,11 +292,6 @@ fn script_component_has_instances(comp: &serde_json::Value) -> bool {
                     .get("value")
                     .and_then(|v| v.as_array())
                     .is_some_and(|v| !v.is_empty()),
-                // Upstream schema-deserializes a binary entry and reads its
-                // decoded `value`; nothing here can run a jsonSchema-driven
-                // deserializer (crdt_gen rejects binary composites outright),
-                // so assume a binary entry carries instances rather than
-                // silently stubbing the runtime out of a scene that needs it.
                 None => entry.get("binary").is_some(),
             })
         })
@@ -419,12 +404,17 @@ mod tests {
         scan_max_composite_entity, script_utils_content, strip_cjs, SCRIPT_UTILS_STUB,
     };
     use crate::scene::Project;
+    use std::path::PathBuf;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dcl-one-sdk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
 
     #[test]
     fn composites_have_scripts_requires_script_instances() {
-        let dir =
-            std::env::temp_dir().join(format!("dcl-one-sdk-hasscripts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch("hasscripts");
         std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
         assert!(!composites_have_scripts(&dir));
         std::fs::write(
@@ -444,9 +434,7 @@ mod tests {
 
     #[test]
     fn composites_have_scripts_counts_binary_entries_in_instanceable_composites() {
-        let dir =
-            std::env::temp_dir().join(format!("dcl-one-sdk-binscripts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch("binscripts");
         std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
         std::fs::write(
             dir.join("assets/scene/main.composite"),
@@ -459,9 +447,7 @@ mod tests {
 
     #[test]
     fn non_instanceable_composites_do_not_flip_the_script_gate() {
-        let dir =
-            std::env::temp_dir().join(format!("dcl-one-sdk-badscripts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch("badscripts");
         std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
         std::fs::write(
             dir.join("assets/scene/main.composite"),
@@ -480,8 +466,7 @@ mod tests {
 
     #[test]
     fn non_instanceable_composite_skip_is_reported() {
-        let dir = std::env::temp_dir().join(format!("dcl-one-sdk-skipnote-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch("skipnote");
         std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
         std::fs::write(
             dir.join("assets/scene/main.composite"),
@@ -498,9 +483,7 @@ mod tests {
 
     #[test]
     fn script_utils_stub_for_scriptless_scenes_even_with_the_runtime_installed() {
-        let dir =
-            std::env::temp_dir().join(format!("dcl-one-sdk-scriptgate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch("scriptgate");
         std::fs::create_dir_all(dir.join("node_modules/@dcl/asset-packs")).unwrap();
         std::fs::create_dir_all(dir.join("node_modules/@dcl/sdk-commands/dist/logic")).unwrap();
         std::fs::write(
@@ -540,9 +523,7 @@ mod tests {
 
     #[test]
     fn max_composite_entity_scans_every_parseable_composite() {
-        let dir =
-            std::env::temp_dir().join(format!("dcl-one-sdk-maxentity-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch("maxentity");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         assert_eq!(scan_max_composite_entity(&dir), 0);
         std::fs::write(

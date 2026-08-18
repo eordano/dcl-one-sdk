@@ -1,0 +1,9 @@
+{
+  "name": "golden-no-main",
+  "version": "1.0.0",
+  "devDependencies": {
+    "@dcl/js-runtime": "7.26.0",
+    "@dcl/sdk": "7.26.0",
+    "typescript": "6.0.3"
+  }
+}

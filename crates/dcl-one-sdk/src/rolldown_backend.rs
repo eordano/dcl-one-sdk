@@ -48,11 +48,6 @@ fn bundler_options(project: &Project, opts: &EsbuildOptions) -> Result<BundlerOp
         }]),
         cwd: Some(project.root.clone()),
         file: Some(opts.outfile.display().to_string()),
-        // A scene loads exactly one file (scene.json `main`), so there is
-        // nowhere to publish extra chunks. Without this, any scene using a
-        // dynamic import trips rolldown's "multiple chunks need output.dir,
-        // not output.file" error; inlining them keeps the single-file contract
-        // and matches what the esbuild backend does.
         code_splitting: Some(CodeSplittingMode::Bool(false)),
         format: Some(OutputFormat::Cjs),
         platform: Some(Platform::Browser),

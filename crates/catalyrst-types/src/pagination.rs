@@ -36,7 +36,7 @@ pub fn get_pagination_params(pairs: &[(String, String)], max_limit: i64) -> Page
     let offset = match offset_raw.and_then(|s| s.parse::<i64>().ok()) {
         Some(n) if n >= 0 => n,
         _ => match page_raw.and_then(|s| s.parse::<i64>().ok()) {
-            Some(p) if p >= 0 => p * limit,
+            Some(p) if p >= 0 => p.saturating_mul(limit),
             _ => 0,
         },
     };

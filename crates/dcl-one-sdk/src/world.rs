@@ -562,10 +562,6 @@ mod tests {
 
     #[test]
     fn browser_headers_verify_exactly_like_key_signed_ones() {
-        // The browser flow's only job is to turn a wallet's personal_sign into
-        // the same auth chain the key path builds locally. Sign the minted
-        // payload the way MetaMask would, then check the shared validator
-        // recovers the signer.
         use axum::http::{HeaderMap, HeaderName, HeaderValue};
         use catalyrst_crypto::signed_fetch::verify_signed_fetch;
 

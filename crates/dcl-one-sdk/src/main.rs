@@ -133,8 +133,6 @@ enum Command {
             help = "Serve comms locally so the preview needs no comms service"
         )]
         offline_comms: bool,
-        #[arg(long, hide = true)]
-        mini_comms: bool,
         #[arg(long = "multi-instance", hide = true)]
         multi_instance: bool,
         #[arg(long = "no-client", hide = true)]
@@ -147,13 +145,13 @@ enum Command {
         mobile: bool,
         #[arg(
             long,
-            help = "Do not run the abgen asset-bundle sidecar. It is on by default and needs no install \u{2014} every dcl-one-sdk binary embeds abgen (ABGEN_BIN runs a different one). Upstream sdk-commands has no sidecar, so this is how to get its unoptimized preview"
+            help = "Do not run the abgen asset-bundle sidecar, and stop forwarding local-ab=true with it. The sidecar is on by default and needs no install \u{2014} every dcl-one-sdk binary embeds abgen (ABGEN_BIN runs a different one). Upstream sdk-commands has no sidecar, so this is how to get its unoptimized preview"
         )]
         no_asset_bundles: bool,
         #[arg(
             long = "asset-bundles",
             conflicts_with = "no_asset_bundles",
-            help = "Serve asset bundles the way upstream does: forwards local-ab=true, so the Explorer derives the base from the realm and fetches {realm}/optimized-assets (proxied to the sidecar) instead of taking a separate optimized-assets-url"
+            help = "Accepted for upstream CLI parity and does nothing: forwarding local-ab=true is now the default"
         )]
         asset_bundles: bool,
         #[arg(
@@ -161,6 +159,24 @@ enum Command {
             help = "Enable the MCP server in the Explorer (forwarded into the desktop deep link)"
         )]
         mcp: bool,
+        #[arg(
+            long = "error-source-lines-context",
+            value_name = "N",
+            help = "Extra source lines either side of a scene error's line (default 0 \u{2014} just the line itself); --error-source-lines-before/-after override one side"
+        )]
+        error_lines_context: Option<u32>,
+        #[arg(
+            long = "error-source-lines-before",
+            value_name = "N",
+            help = "Source lines to show BEFORE a scene error's line"
+        )]
+        error_source_lines_before: Option<u32>,
+        #[arg(
+            long = "error-source-lines-after",
+            value_name = "N",
+            help = "Source lines to show AFTER a scene error's line"
+        )]
+        error_source_lines_after: Option<u32>,
         #[arg(
             long = "mcp-port",
             value_name = "PORT",
@@ -275,12 +291,21 @@ enum Command {
         #[command(subcommand)]
         command: WorldCommand,
     },
+    /// Generate main.crdt from a scene's composites into an arbitrary file.
+    /// Hidden: it exists so the native generator's bytes can be diffed against a
+    /// node data-layer dump without running a build.
+    #[command(hide = true)]
+    CrdtGen {
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Build the prebuilt SDK runtime chunks that ship in the vendored blob.
-    ///
-    /// Hidden because it is a step of `scripts/build-base-blob.py`, not a scene
-    /// command: `--dir` must point at a throwaway scene whose `node_modules` is
-    /// the full blob install tree (including `@dcl/asset-packs` and
-    /// `@dcl/sdk-commands`, neither of which the blob itself ships).
+    /// Hidden: a step of `scripts/build-base-blob.py`, so `--dir` must be a
+    /// throwaway scene whose `node_modules` is the full blob install tree
+    /// (including `@dcl/asset-packs` and `@dcl/sdk-commands`, which the blob
+    /// itself does not ship).
     #[command(hide = true)]
     VendorChunks {
         #[arg(long, default_value = ".")]
@@ -307,8 +332,6 @@ enum WorldCommand {
 }
 
 #[derive(Subcommand)]
-// A clap argv enum is parsed once and lives on one stack frame; boxing the
-// large `Set` payload would cost flatten-compatibility for zero real gain.
 #[allow(clippy::large_enum_variant)]
 enum WorldSettingsCommand {
     #[command(about = "Print the current settings of a world")]
@@ -369,8 +392,6 @@ enum WorldPermissionsCommand {
     },
 }
 
-/// The 5-arg block every signed world-mutation subcommand repeats: which content server to
-/// hit, how to sign (headless key vs. browser), and how to drive the local signing page.
 #[derive(Args)]
 struct SignedWriteArgs {
     #[arg(long)]
@@ -461,6 +482,18 @@ async fn run(command: Command) -> Result<()> {
             yes,
             node_modules_only,
         }),
+        Command::CrdtGen { dir, out } => {
+            let generated = dcl_one_sdk::crdt_gen::generate(&dir)?
+                .ok_or_else(|| anyhow::anyhow!("no .composite files under {}", dir.display()))?;
+            std::fs::write(&out, &generated.bytes)?;
+            println!(
+                "{} bytes from {} composite(s) -> {}",
+                generated.bytes.len(),
+                generated.composites,
+                out.display()
+            );
+            Ok(())
+        }
         Command::VendorChunks {
             dir,
             out_core,
@@ -501,9 +534,6 @@ async fn run(command: Command) -> Result<()> {
                 let project = scene::Project::load(&opts.dir)?;
                 let fs = watch::FsWatcher::new(&project.root)?;
                 let mut steps = ux::Steps::new(4);
-                // The session type-checks after every rebuild, so the loop
-                // reports errors as they are introduced rather than only for the
-                // tree as it stood at startup.
                 let session = watch::WatchSession::create(project, &opts, true, &mut steps).await?;
                 steps.done("Watching for changes (ctrl-c to stop)");
                 tokio::select! {
@@ -526,14 +556,16 @@ async fn run(command: Command) -> Result<()> {
             data_layer,
             ignore_composite,
             offline_comms,
-            mini_comms,
             multi_instance,
             no_client,
             mobile,
             no_asset_bundles,
-            asset_bundles,
+            asset_bundles: _,
             mcp,
             mcp_port,
+            error_lines_context,
+            error_source_lines_before,
+            error_source_lines_after,
             explorer_params,
             tunnel,
             tunnel_token,
@@ -557,9 +589,6 @@ async fn run(command: Command) -> Result<()> {
             if ci {
                 ux::note("--ci has no effect yet");
             }
-            if mini_comms {
-                ux::note("--mini-comms has no effect (the built-in ws-room relay is always on)");
-            }
             if multi_instance {
                 ux::note("--multi-instance has no effect (the join block always prints a 2nd-instance deep link)");
             }
@@ -575,13 +604,15 @@ async fn run(command: Command) -> Result<()> {
                 ignore_composite,
                 offline_comms,
                 mobile,
-                // --asset-bundles still needs the sidecar: local-ab makes the
-                // explorer fetch from {realm}/optimized-assets, which this
-                // server proxies TO the sidecar. Only --no-asset-bundles is off.
                 ab_sidecar: !no_asset_bundles,
-                local_ab: asset_bundles,
+                local_ab: !no_asset_bundles,
                 mcp,
                 mcp_port,
+                source_context: start::SourceContext::resolve(
+                    error_lines_context,
+                    error_source_lines_before,
+                    error_source_lines_after,
+                ),
                 explorer_params,
                 data_layer,
                 tunnel,
@@ -745,7 +776,7 @@ async fn watch_workspace(ws: &workspace::Workspace, opts: &build::BuildOptions) 
         if member.skip_type_check {
             ux::note("type check skipped (--skip-type-check)");
         } else {
-            match build::type_check(session.project()).await {
+            match build::type_check(session.project(), build::Reloaded::Yes).await {
                 Ok(()) => {
                     tracing::info!("type checking completed without errors");
                     steps.done("Type check passed");

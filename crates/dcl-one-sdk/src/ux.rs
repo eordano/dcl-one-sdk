@@ -5,8 +5,6 @@ use std::time::Duration;
 
 static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Record the CLI-wide --verbose / RUST_LOG choice so far-flung output paths
-/// (sidecar relays, banners) can consult it without threading a flag through.
 pub fn set_verbose(on: bool) {
     VERBOSE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
@@ -33,7 +31,6 @@ pub struct UserError {
     what: String,
     why: Option<String>,
     try_next: Vec<String>,
-    docs: Option<String>,
     source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 
@@ -43,18 +40,12 @@ impl UserError {
             what: what.into(),
             why: None,
             try_next: try_next.0,
-            docs: None,
             source: None,
         }
     }
 
     pub fn why(mut self, why: impl Into<String>) -> Self {
         self.why = Some(why.into());
-        self
-    }
-
-    pub fn docs(mut self, url: impl Into<String>) -> Self {
-        self.docs = Some(url.into());
         self
     }
 
@@ -93,6 +84,13 @@ fn stdout_color() -> bool {
     color_allowed(std::io::stdout().is_terminal())
 }
 
+fn tint(color: bool, sgr: &str, body: &str) -> String {
+    match color {
+        true => format!("\x1b[{sgr}m{body}\x1b[0m"),
+        false => body.to_string(),
+    }
+}
+
 fn find_user(err: &anyhow::Error) -> Option<&UserError> {
     err.chain().find_map(|c| c.downcast_ref::<UserError>())
 }
@@ -116,30 +114,20 @@ fn fallback(err: &anyhow::Error) -> UserError {
     )
 }
 
+fn arrow_line(color: bool, label: &str, text: &str) -> String {
+    format!(
+        "  {} {text}\n",
+        tint(color, "36", &format!("\u{2192} {label}:"))
+    )
+}
+
 fn write_block(out: &mut String, prefix: &str, sgr: &str, u: &UserError, color: bool) {
-    if color {
-        out.push_str(&format!("\x1b[{sgr}m{prefix}\x1b[0m {}\n", u.what));
-    } else {
-        out.push_str(&format!("{prefix} {}\n", u.what));
-    }
-    if let Some(why) = &u.why {
-        for line in why.lines() {
-            if color {
-                out.push_str(&format!("  \x1b[2m{line}\x1b[0m\n"));
-            } else {
-                out.push_str(&format!("  {line}\n"));
-            }
-        }
+    out.push_str(&format!("{} {}\n", tint(color, sgr, prefix), u.what));
+    for line in u.why.iter().flat_map(|why| why.lines()) {
+        out.push_str(&format!("  {}\n", tint(color, "2", line)));
     }
     for step in &u.try_next {
-        if color {
-            out.push_str(&format!("  \x1b[36m\u{2192} try:\x1b[0m {step}\n"));
-        } else {
-            out.push_str(&format!("  \u{2192} try: {step}\n"));
-        }
-    }
-    if let Some(docs) = &u.docs {
-        out.push_str(&format!("  docs: {docs}\n"));
+        out.push_str(&arrow_line(color, "try", step));
     }
 }
 
@@ -155,13 +143,11 @@ pub fn render(err: &anyhow::Error, verbose: bool, color: bool) -> String {
             out.push_str(&format!("    {i}: {cause}\n"));
         }
     } else if err.chain().count() > 1 && !out.contains("--verbose") {
-        if color {
-            out.push_str(
-                "  \x1b[36m\u{2192} more:\x1b[0m re-run with --verbose for the full error chain\n",
-            );
-        } else {
-            out.push_str("  \u{2192} more: re-run with --verbose for the full error chain\n");
-        }
+        out.push_str(&arrow_line(
+            color,
+            "more",
+            "re-run with --verbose for the full error chain",
+        ));
     }
     out
 }
@@ -191,34 +177,24 @@ impl Steps {
     }
 
     pub fn done(&mut self, message: impl AsRef<str>) {
-        if stdout_color() {
-            println!(
-                "\x1b[1m[{}/{}]\x1b[0m {}",
-                self.next,
-                self.total,
-                message.as_ref()
-            );
-        } else {
-            println!("[{}/{}] {}", self.next, self.total, message.as_ref());
-        }
+        let counter = format!("[{}/{}]", self.next, self.total);
+        println!(
+            "{} {}",
+            tint(stdout_color(), "1", &counter),
+            message.as_ref()
+        );
         self.next += 1;
     }
 }
 
-/// A step that may be slow. Stays silent while it is quick, and once it passes
-/// [`SLOW_AFTER`] starts redrawing a single line with the elapsed time, so a
-/// long step is visibly alive without scrolling anything away. `done()` on the
-/// parent `Steps` prints the real result over it.
-///
-/// Only draws on a terminal: piped output and CI logs get nothing, because a
-/// carriage-return spinner in a log file is noise, not progress.
+/// A step that redraws its elapsed time in place once it passes [`SLOW_AFTER`].
+/// Terminal only: a carriage-return spinner in a piped log is noise, not
+/// progress.
 pub struct Slow {
-    label: String,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Below this, a step finishes fast enough that announcing it is just churn.
 const SLOW_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Slow {
@@ -226,13 +202,8 @@ impl Slow {
         let label = label.into();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if !stdout_color() {
-            return Slow {
-                label,
-                stop,
-                handle: None,
-            };
+            return Slow { stop, handle: None };
         }
-        let l = label.clone();
         let s = stop.clone();
         let handle = std::thread::spawn(move || {
             let began = std::time::Instant::now();
@@ -244,7 +215,7 @@ impl Slow {
                     continue;
                 }
                 use std::io::Write;
-                print!("\r\x1b[2K  {l} {}s", waited.as_secs());
+                print!("\r\x1b[2K  {label} {}s", waited.as_secs());
                 let _ = std::io::stdout().flush();
                 drawn = true;
             }
@@ -255,7 +226,6 @@ impl Slow {
             }
         });
         Slow {
-            label,
             stop,
             handle: Some(handle),
         }
@@ -271,54 +241,184 @@ impl Drop for Slow {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-        let _ = &self.label;
     }
 }
 
 pub fn note(message: impl AsRef<str>) {
-    if stdout_color() {
-        println!("\x1b[2m{}\x1b[0m", message.as_ref());
-    } else {
-        println!("{}", message.as_ref());
+    println!("{}", tint(stdout_color(), "2", message.as_ref()));
+}
+
+fn note_indented(sgr: &str, message: &str) {
+    println!(
+        "  {}",
+        tint(stdout_color(), sgr, &format!("\u{2192} {message}"))
+    );
+}
+
+/// An indented arrow in green, shaped like the `\u{2192} try:` lines of the failure
+/// block still on screen above it: for something broken working again.
+pub fn note_good(message: impl AsRef<str>) {
+    note_indented("32", message.as_ref());
+}
+
+/// [`note_good`]'s arrow in [`note`]'s dim register: something that came up,
+/// rather than something that recovered.
+pub fn note_arrow(message: impl AsRef<str>) {
+    note_indented("2", message.as_ref());
+}
+
+/// A scene's own error, as the running client saw it. Deliberately not a
+/// `UserError`: those are OUR failures, in our voice. This is the developer's
+/// TypeScript, so it leads with their source line.
+pub fn scene_error(message: &str, at: &str, frames: &[crate::start::scene_logs::Frame]) {
+    let color = stderr_color();
+    let mut out = String::new();
+    let dim = |s: &str| tint(color, "2", s);
+
+    let blamed_ix = frames.iter().position(|f| f.is_user_code);
+    let blamed = blamed_ix.map(|ix| &frames[ix]);
+    let where_ = match blamed {
+        Some(f) => format!("{}:{}", f.file, f.line),
+        None => "your scene".to_string(),
+    };
+    match color {
+        true => out.push_str(&format!(
+            "\n  \x1b[1;31m\u{2718} scene error\x1b[0m \x1b[2min\x1b[0m \x1b[1m{where_}\x1b[0m"
+        )),
+        false => out.push_str(&format!("\n  x scene error in {where_}")),
     }
+    if !at.is_empty() {
+        out.push_str(&format!("  {}", dim(at)));
+    }
+    out.push('\n');
+    out.push_str(&format!("    {}\n", sanitize(message)));
+
+    if let Some(f) = blamed {
+        for (n, text) in &f.window {
+            let gutter = format!("{n:>5} \u{2502} ");
+            let hot = *n == f.line;
+            let painted = match hot {
+                true => tint(color, "31", &gutter),
+                false => dim(&gutter),
+            };
+            out.push_str(&format!("{painted}{}\n", sanitize(text)));
+            if !hot {
+                continue;
+            }
+            let lead = text.len() - text.trim_start().len();
+            let pad = gutter.chars().count() + (f.col.saturating_sub(1) as usize).max(lead);
+            out.push_str(&format!("{}{}\n", " ".repeat(pad), tint(color, "31", "^")));
+        }
+    }
+
+    for (ix, f) in frames.iter().enumerate() {
+        if Some(ix) == blamed_ix {
+            continue;
+        }
+        let at = format!("    at {}:{}:{}", f.file, f.line, f.col);
+        match f.is_user_code {
+            true => {
+                out.push_str(&format!("{at}\n"));
+                if let Some((n, text)) = f.window.iter().find(|(n, _)| *n == f.line) {
+                    out.push_str(&format!(
+                        "{}{}\n",
+                        dim(&format!("{n:>5} \u{2502} ")),
+                        sanitize(text)
+                    ));
+                }
+            }
+            false => out.push_str(&format!("{}\n", dim(&at))),
+        }
+    }
+    eprint!("{out}");
+}
+
+/// Client text comes off the wire, so it must not be able to move the cursor,
+/// clear the screen or forge a line of our output.
+fn sanitize(s: &str) -> String {
+    const MAX: usize = 300;
+    let mut out: String = s
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\t')
+        .take(MAX)
+        .collect();
+    if s.chars().count() > MAX {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 pub fn note_stderr(message: impl AsRef<str>) {
-    if stderr_color() {
-        eprintln!("\x1b[2m{}\x1b[0m", message.as_ref());
-    } else {
-        eprintln!("{}", message.as_ref());
+    eprintln!("{}", tint(stderr_color(), "2", message.as_ref()));
+}
+
+/// Re-open dim after a nested colour has reset it. Pass as `restore` to
+/// [`fmt_elapsed_tinted`] from anything printed through [`note`].
+pub const RESTORE_DIM: &str = "\x1b[2m";
+
+/// Under 50ms is the cost of doing the work at all and gets no colour;
+/// colouring every number trains the eye to ignore all of them.
+fn elapsed_sgr(d: Duration) -> Option<&'static str> {
+    match d {
+        d if d > Duration::from_millis(200) => Some("31"),
+        d if d > Duration::from_millis(50) => Some("33"),
+        _ => None,
     }
 }
 
+pub fn elapsed_is_notable(d: Duration) -> bool {
+    elapsed_sgr(d).is_some()
+}
+
+/// `restore` is re-emitted after the colour resets, because a nested `\x1b[0m`
+/// clears the surrounding style too. Pass `""` from a default-styled line,
+/// [`RESTORE_DIM`] from a dim one.
+pub fn fmt_elapsed_tinted(d: Duration, restore: &str) -> String {
+    tinted(d, restore, stdout_color())
+}
+
+/// Colour is a parameter, not ambient tty state: reading the tty here left the
+/// tinted branch untestable, so the assertion passed under redirected output
+/// while proving nothing, and failed in a terminal.
+fn tinted(d: Duration, restore: &str, color: bool) -> String {
+    let text = fmt_elapsed(d);
+    match (color, elapsed_sgr(d)) {
+        (true, Some(sgr)) => format!("\x1b[{sgr}m{text}\x1b[0m{restore}"),
+        _ => text,
+    }
+}
+
+/// A duration at three significant figures, in the largest unit that keeps it
+/// above 1. The fourth digit of a wall-clock measurement is scheduler noise.
 pub fn fmt_elapsed(d: Duration) -> String {
-    // Both grouped tiers cap at 9,999, so grouping is at most one comma.
-    fn grouped(n: u32, unit: &str) -> String {
-        if n < 1_000 {
-            format!("{n}{unit}")
-        } else {
-            format!("{},{:03}{unit}", n / 1_000, n % 1_000)
+    fn sig3(v: f64) -> String {
+        match v {
+            v if v < 10.0 => format!("{v:.2}"),
+            v if v < 100.0 => format!("{v:.1}"),
+            _ => format!("{v:.0}"),
         }
     }
-    let secs = d.as_secs();
-    if secs < 10 {
-        let micros = secs as u32 * 1_000_000 + d.subsec_micros();
-        if micros < 10_000 {
-            grouped(micros, "\u{00b5}s")
-        } else {
-            grouped(micros / 1_000, "ms")
-        }
-    } else if secs < 600 || (secs == 600 && d.subsec_nanos() == 0) {
-        format!("{:.2}s", d.as_secs_f64())
-    } else {
-        // Work in rounded centiseconds so 11m59.999s carries to 12m rather
-        // than printing "11m:60.00s".
-        let cs = (d.as_secs_f64() * 100.0).round() as u64;
-        let h = cs / 360_000;
-        let m = (cs % 360_000) / 6_000;
-        let s = (cs % 6_000) as f64 / 100.0;
-        format!("{h}h:{m:02}m:{s:05.2}s")
+    fn prints_below(v: f64, limit: f64) -> bool {
+        sig3(v).parse::<f64>().unwrap_or(v) < limit
     }
+
+    let secs = d.as_secs_f64();
+    let ms = secs * 1_000.0;
+    if ms < 1.0 {
+        return format!("{}\u{00b5}s", d.as_micros());
+    }
+    if ms < 1_000.0 && prints_below(ms, 1_000.0) {
+        return format!("{} ms", sig3(ms));
+    }
+    if secs < 60.0 && prints_below(secs, 60.0) {
+        return format!("{} sec", sig3(secs));
+    }
+    let whole_secs = secs.round() as u64;
+    if whole_secs < 3_600 {
+        return format!("{}min {}sec", whole_secs / 60, whole_secs % 60);
+    }
+    let whole_mins = (secs / 60.0).round() as u64;
+    format!("{}hr {}min", whole_mins / 60, whole_mins % 60)
 }
 
 pub fn fmt_bytes(n: u64) -> String {
@@ -392,20 +492,53 @@ mod tests {
     #[test]
     fn fmt_elapsed_tiers() {
         assert_eq!(fmt_elapsed(Duration::from_micros(320)), "320\u{00b5}s");
-        assert_eq!(fmt_elapsed(Duration::from_micros(1_234)), "1,234\u{00b5}s");
-        assert_eq!(fmt_elapsed(Duration::from_micros(9_999)), "9,999\u{00b5}s");
-        assert_eq!(fmt_elapsed(Duration::from_micros(9_999_999)), "9,999ms");
-        assert_eq!(fmt_elapsed(Duration::from_millis(10)), "10ms");
-        assert_eq!(fmt_elapsed(Duration::from_millis(2_321)), "2,321ms");
-        assert_eq!(fmt_elapsed(Duration::from_millis(9_999)), "9,999ms");
-        assert_eq!(fmt_elapsed(Duration::from_millis(10_000)), "10.00s");
-        assert_eq!(fmt_elapsed(Duration::from_secs(600)), "600.00s");
-        assert_eq!(fmt_elapsed(Duration::from_millis(683_450)), "0h:11m:23.45s");
+        assert_eq!(fmt_elapsed(Duration::from_micros(999)), "999\u{00b5}s");
+        assert_eq!(fmt_elapsed(Duration::from_micros(1_000)), "1.00 ms");
+
+        assert_eq!(fmt_elapsed(Duration::from_micros(1_320)), "1.32 ms");
+        assert_eq!(fmt_elapsed(Duration::from_micros(12_400)), "12.4 ms");
+        assert_eq!(fmt_elapsed(Duration::from_millis(143)), "143 ms");
+        assert_eq!(fmt_elapsed(Duration::from_millis(1_230)), "1.23 sec");
+        assert_eq!(fmt_elapsed(Duration::from_millis(12_500)), "12.5 sec");
+        assert_eq!(fmt_elapsed(Duration::from_millis(59_900)), "59.9 sec");
+        assert_eq!(fmt_elapsed(Duration::from_secs(84)), "1min 24sec");
+        assert_eq!(fmt_elapsed(Duration::from_secs(10_920)), "3hr 2min");
+
+        assert_eq!(fmt_elapsed(Duration::from_micros(999_700)), "1.00 sec");
+        assert_eq!(fmt_elapsed(Duration::from_millis(59_970)), "1min 0sec");
+        assert_eq!(fmt_elapsed(Duration::from_millis(3_599_700)), "1hr 0min");
+
+        assert_eq!(fmt_elapsed(Duration::from_millis(999)), "999 ms");
+        assert_eq!(fmt_elapsed(Duration::from_secs(1)), "1.00 sec");
+        assert_eq!(fmt_elapsed(Duration::from_secs(60)), "1min 0sec");
+        assert_eq!(fmt_elapsed(Duration::from_secs(3_600)), "1hr 0min");
+        assert_eq!(fmt_elapsed(Duration::from_secs(3_599)), "59min 59sec");
+    }
+
+    #[test]
+    fn only_a_duration_worth_worrying_about_gets_a_colour() {
+        assert_eq!(elapsed_sgr(Duration::from_millis(50)), None);
+        assert_eq!(elapsed_sgr(Duration::from_micros(999)), None);
+        assert_eq!(elapsed_sgr(Duration::from_millis(51)), Some("33"));
+        assert_eq!(elapsed_sgr(Duration::from_millis(200)), Some("33"));
+        assert_eq!(elapsed_sgr(Duration::from_millis(201)), Some("31"));
+        assert_eq!(elapsed_sgr(Duration::from_secs(3)), Some("31"));
+
+        for d in [Duration::from_millis(5), Duration::from_secs(3)] {
+            assert_eq!(tinted(d, RESTORE_DIM, false), fmt_elapsed(d));
+        }
         assert_eq!(
-            fmt_elapsed(Duration::from_millis(3_723_400)),
-            "1h:02m:03.40s"
+            tinted(Duration::from_secs(3), RESTORE_DIM, true),
+            "\x1b[31m3.00 sec\x1b[0m\x1b[2m"
         );
-        assert_eq!(fmt_elapsed(Duration::from_millis(719_999)), "0h:12m:00.00s");
+        assert_eq!(
+            tinted(Duration::from_millis(120), "", true),
+            "\x1b[33m120 ms\x1b[0m"
+        );
+        assert_eq!(
+            tinted(Duration::from_millis(5), RESTORE_DIM, true),
+            "5.00 ms"
+        );
     }
 
     #[test]

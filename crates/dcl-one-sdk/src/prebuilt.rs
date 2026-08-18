@@ -126,10 +126,6 @@ pub fn remove_stale_smart_chunk(root: &Path, smart_rel: &str) {
     let _ = std::fs::remove_file(root.join(smart_rel));
 }
 
-// ---------------------------------------------------------------------------
-// blob-build time
-// ---------------------------------------------------------------------------
-
 /// Build both chunks from a scene whose `node_modules` is the full install tree
 /// — this is what `scripts/build-base-blob.py` calls through the hidden
 /// `vendor-chunks` subcommand, and the only place either chunk is ever
@@ -160,7 +156,6 @@ pub async fn build_chunks(dir: &Path, out_core: &Path, out_smart: &Path) -> Resu
     let core_keys = split::core_registry_keys(&project);
     let smart_keys = split::smart_registry_keys();
 
-    // ---- core -------------------------------------------------------------
     std::fs::write(
         work.join("composite-slot.js"),
         "export const compositeFromLoader = {}\n",
@@ -189,7 +184,6 @@ pub async fn build_chunks(dir: &Path, out_core: &Path, out_smart: &Path) -> Resu
     )
     .await?;
 
-    // ---- smart ------------------------------------------------------------
     let script_utils = entrypoint::script_utils_source(&project).ok_or_else(|| {
         anyhow::Error::from(UserError::new(
             "cannot build the smart-item chunk: the real ~sdk/script-utils runtime is missing",
@@ -314,8 +308,6 @@ mod tests {
         )
         .unwrap();
         assert!(verify_requires(&chunk, &["@dcl/sdk/ecs"]).is_ok());
-        // `~system/*` alone is never enough to make a chunk valid: the SDK
-        // specifier has to be a published registry key.
         assert!(verify_requires(&chunk, &[]).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }

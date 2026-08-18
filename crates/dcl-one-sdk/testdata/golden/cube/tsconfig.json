@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "jsx": "react",
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "moduleResolution": "bundler"
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "extends": "@dcl/sdk/types/tsconfig.ecs7.json"
+}

@@ -97,9 +97,6 @@ pub fn is_relevant(root: &Path, path: &Path) -> bool {
         return false;
     };
     let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
-    // Dot-dirs cover .dcl-one, .git and — load-bearing — .dcl-optimized-assets:
-    // abgen revalidates (writes) in there on every manifest request, so watching
-    // it would re-trigger SCENE_UPDATE and reload the scene forever.
     if first.is_some_and(|f| f.starts_with('.') || matches!(f, "node_modules" | "bin")) {
         return false;
     }
@@ -118,10 +115,10 @@ pub fn is_model(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("glb") || e.eq_ignore_ascii_case("gltf"))
 }
 
-// Deletion is judged by what is on disk, not by the notify event kind: an
-// atomic editor save (write + rename over) and a trash-style delete (rename
-// away) end with the path present/absent either way, which is all the
-// explorer needs to pick UMT_CHANGE vs UMT_REMOVE.
+/// Splits a batch into (model, removed) pairs and everything else. Deletion is
+/// judged by what is on disk, not by the notify event kind: an atomic save and a
+/// trash-style delete both end with the path present/absent, which is all the
+/// explorer needs to pick UMT_CHANGE vs UMT_REMOVE.
 fn partition_batch(paths: Vec<PathBuf>) -> (Vec<(PathBuf, bool)>, Vec<PathBuf>) {
     let (mut models, code): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| is_model(p));
     models.sort();
@@ -139,9 +136,9 @@ fn partition_batch(paths: Vec<PathBuf>) -> (Vec<(PathBuf, bool)>, Vec<PathBuf>) 
 struct SplitState {
     sdk_opts: EsbuildOptions,
     registry: Vec<&'static str>,
-    /// The `~sdk/script-utils` module the chunk was last built with. Composite
-    /// edits can flip it between the stub and the real runtime (upstream's
-    /// scenes-without-scripts gate) without changing any registry key.
+    /// The `~sdk/script-utils` module the chunk was last built with: a composite
+    /// edit can flip it between the stub and the real runtime with no registry
+    /// key changing.
     script_utils: String,
     generated_dir: PathBuf,
 }
@@ -221,20 +218,22 @@ impl WatchSession {
                 None => {
                     esbuild::bundle(&project, &sdk_opts).await?;
                     tracing::info!("sdk chunk saved {}", sdk_opts.outfile.display());
-                    steps.done(format!(
-                        "SDK chunk saved {} ({})",
-                        ux::rel_to(&project.root, &sdk_opts.outfile),
-                        ux::fmt_elapsed(started.elapsed())
+                    steps.done(crate::build::saved(
+                        "SDK chunk",
+                        &project.root,
+                        &sdk_opts.outfile,
+                        started,
                     ));
                 }
             }
             let started = Instant::now();
             esbuild::bundle(&project, &scene_opts).await?;
             tracing::info!("scene chunk saved {}", scene_opts.outfile.display());
-            steps.done(format!(
-                "Scene chunk saved {} ({})",
-                ux::rel_to(&project.root, &scene_opts.outfile),
-                ux::fmt_elapsed(started.elapsed())
+            steps.done(crate::build::saved(
+                "Scene chunk",
+                &project.root,
+                &scene_opts.outfile,
+                started,
             ));
             smart_installed = crate::build::install_smart_chunk(
                 &project,
@@ -336,8 +335,6 @@ impl WatchSession {
                 }
                 Ok(None) => false,
             };
-            // Nothing to refresh on the prebuilt path: the chunk is shipped, so
-            // its registry cannot change while the scene is being edited.
             if self.prebuilt.is_none() {
                 refresh_sdk_chunk_cli(&self.project, &mut self.split, composites_changed).await;
             }
@@ -348,9 +345,6 @@ impl WatchSession {
                         self.es_opts.outfile.display(),
                         ux::fmt_elapsed(started.elapsed())
                     );
-                    // Adding or removing the first smart item flips which
-                    // chunks the scene needs, so re-run the decision on every
-                    // successful scene rebuild rather than only at startup.
                     match crate::build::install_smart_chunk(
                         &self.project,
                         self.prebuilt.as_ref(),
@@ -367,7 +361,7 @@ impl WatchSession {
                     ux::note(format!(
                         "\u{21bb} rebuilt {} ({})",
                         ux::rel_to(&self.project.root, &self.es_opts.outfile),
-                        ux::fmt_elapsed(started.elapsed())
+                        ux::fmt_elapsed_tinted(started.elapsed(), ux::RESTORE_DIM)
                     ));
                     notify(ReloadEvent::Scene);
                     if self.type_checking {
@@ -412,11 +406,6 @@ async fn regenerate_composites(
     let generated = entrypoint::generate(project, ignore_composite, custom_entry_point, true)?;
     tracing::info!("composites changed, regenerated all-composites.js");
     if !ignore_composite {
-        // Renaming an entity in the editor is a composite edit like any other,
-        // and the whole point of generating the names is that they cannot fall
-        // out of step with the composite. Regenerating the crdt here but not the
-        // names would leave a live-reloading scene compiling against a stale
-        // enum until the next full build.
         match crate::entity_names::write_if_changed(&project.root) {
             Ok(Some(n)) => tracing::info!(
                 "composites changed, regenerated {} ({n} name(s))",
@@ -434,9 +423,6 @@ async fn regenerate_composites(
 
 async fn refresh_sdk_chunk_cli(project: &Project, sp: &mut SplitState, composites_changed: bool) {
     let keys = split::registry_keys(project);
-    // A composite edit can add the first script (or remove the last one),
-    // flipping the freshly regenerated ~sdk/script-utils between the stub and
-    // the real runtime with no registry-key change, so re-read it from disk.
     let script_utils = if composites_changed {
         std::fs::read_to_string(sp.generated_dir.join("script-utils.js")).unwrap_or_default()
     } else {
@@ -506,8 +492,6 @@ mod tests {
         assert!(!under_root("node_modules/foo/bar.js"));
         assert!(!under_root(".dcl-one/all-composites.js"));
         assert!(!under_root(".git/hooks/pre-commit.ts"));
-        // abgen writes into .dcl-optimized-assets on every manifest request;
-        // watching it would loop hot reload forever.
         assert!(!under_root(".dcl-optimized-assets/out/b64-x/mac/model.glb"));
         assert!(!under_root(
             ".dcl-optimized-assets/cache/content/deadbeef.gltf"

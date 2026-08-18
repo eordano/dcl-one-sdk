@@ -48,9 +48,6 @@ pub async fn get_context_files(dir: &Path, api_base: &str, offline: bool) -> Res
         ux::note("run this inside a project folder, or scaffold one with: dcl-one-sdk init");
         return Ok(());
     };
-    // States what was found, not that it is valid: this only checks which
-    // manifests exist, never their contents, and claiming validity for a
-    // scene.json it has not parsed is a promise it cannot keep.
     println!("\u{2713} {kind} project");
 
     let written = crate::skills::install(&root)?;
@@ -326,8 +323,6 @@ mod tests {
     #[tokio::test]
     async fn offline_writes_the_skill_and_never_dials_out() {
         let scene = TempScene::new("offline");
-        // An unroutable base: if --offline dialled it, this would hang rather
-        // than return, so passing at all is the assertion.
         get_context_files(&scene.0, "http://198.51.100.1/contents", true)
             .await
             .unwrap();

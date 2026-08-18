@@ -1,15 +1,17 @@
 //! Human-facing landing page served at `/` for browser requests.
 //!
-//! Explorers never load this: they resolve the realm through `/about` and the
-//! live-reload clients upgrade `/` to a websocket. Only a person pasting the
-//! preview URL into a browser sees HTML, so the page previews the scene the
-//! way Decentraland surfaces it — a What's On style card, the parcel layout,
-//! spawn points and permissions — plus the join links.
+//! No JavaScript and no form anywhere, by test: every affordance is an `<a>`,
+//! a `<details>` or a `:hover`, and the stylesheet is inlined.
+//!
+//! Hence deploy prints a command rather than offering a button: a publish
+//! route would be an unauthenticated loopback POST, and any page open in
+//! another tab can aim a cross-origin form at loopback — a stray click
+//! elsewhere would sign and publish the developer's scene.
 
 use super::{forwarded_host, forwarded_prefix, forwarded_proto, AppState};
 use crate::joinblock::{self, desktop_deep_link, mobile_deep_link, scene_title, web_join_url};
 use crate::netinfo;
-use crate::scene::b64_hash;
+use crate::scene::b64_content_hash;
 use axum::http::{header, HeaderMap};
 use axum::response::{IntoResponse, Response};
 use serde_json::Value;
@@ -28,7 +30,6 @@ pub(super) fn page(st: &AppState, headers: &HeaderMap) -> Response {
     let lan_realm =
         netinfo::share_ip(&netinfo::enumerate()).map(|ip| format!("http://{ip}:{}", st.port));
     let mobile_realm = match &lan_realm {
-        // A phone cannot reach the host's loopback; prefer the LAN address.
         Some(lan) if host.starts_with("127.") || host.starts_with("localhost") => lan.clone(),
         _ => realm.clone(),
     };
@@ -50,7 +51,6 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// "16" for 16 or [16,16]; "0–4" for [0,4].
 fn coord(v: Option<&Value>) -> String {
     match v {
         Some(Value::Array(range)) => {
@@ -120,8 +120,6 @@ fn parse_parcels(scene_json: &Value) -> (Vec<(i64, i64)>, (i64, i64)) {
     (parcels, base)
 }
 
-/// Mini-map of the parcel layout (north up), base parcel accented, spawn
-/// points dotted at their in-scene position.
 fn parcels_svg(parcels: &[(i64, i64)], base: (i64, i64), spawns: &[Value]) -> String {
     if parcels.is_empty() {
         return String::new();
@@ -139,8 +137,6 @@ fn parcels_svg(parcels: &[(i64, i64)], base: (i64, i64), spawns: &[Value]) -> St
     );
     for (x, y) in parcels {
         let px = (x - min_x) * (CELL + GAP);
-        // north (higher y) renders at the top; the coordinate labels make the
-        // orientation and the base parcel self-describing
         let py = (max_y - y) * (CELL + GAP);
         let is_base = (*x, *y) == base;
         let fill = if is_base { "#ff2d55" } else { "#2a2b37" };
@@ -158,7 +154,6 @@ fn parcels_svg(parcels: &[(i64, i64)], base: (i64, i64), spawns: &[Value]) -> St
         let pos = spawn.get("position");
         let sx = coord_mid(pos.and_then(|p| p.get("x")));
         let sz = coord_mid(pos.and_then(|p| p.get("z")));
-        // spawn positions are meters relative to the base parcel's SW corner
         let gx = base.0 as f64 + sx / 16.0 - min_x as f64;
         let gy = base.1 as f64 + sz / 16.0 - min_y as f64;
         let cx = gx * (CELL + GAP) as f64;
@@ -224,49 +219,34 @@ fn permission_chips(scene_json: &Value) -> String {
         .collect()
 }
 
-/// The scene.json fields that configure how the scene runs, shown verbatim
-/// (dotted key paths, raw values) rather than paraphrased.
-fn setup_rows(scene_json: &Value) -> String {
-    let mut rows: Vec<(String, String)> = Vec::new();
-    let mut push = |key: &str, v: Option<&Value>| {
-        if let Some(v) = v {
-            let shown = match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            rows.push((key.to_string(), shown));
-        }
-    };
-    push("main", scene_json.get("main"));
-    push("runtimeVersion", scene_json.get("runtimeVersion"));
-    push("ecs7", scene_json.get("ecs7"));
-    push(
-        "worldConfiguration.name",
-        scene_json
-            .get("worldConfiguration")
-            .and_then(|w| w.get("name")),
-    );
-    if let Some(toggles) = scene_json.get("featureToggles").and_then(|t| t.as_object()) {
-        for (k, v) in toggles {
-            let key = format!("featureToggles.{k}");
-            rows.push((
-                key,
-                match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                },
-            ));
-        }
+const WORLDS_CONTENT_SERVER: &str = "https://worlds-content-server.decentraland.org";
+
+/// Single-quoted for `/bin/sh`: on macOS every Creator Hub scene root lives
+/// under "Application Support", so the pasted command must survive spaces.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Must resolve the same way `deploy::net::resolve_target_from` does, so the
+/// command shown is the command that runs.
+fn deploy_target(scene_json: &Value, default_target: Option<&str>) -> (String, String) {
+    let world = scene_json
+        .get("worldConfiguration")
+        .and_then(|w| w.get("name"))
+        .and_then(|n| n.as_str());
+    if let Some(world) = world {
+        return (
+            format!("world {world} on {WORLDS_CONTENT_SERVER}"),
+            format!(" --target-content {WORLDS_CONTENT_SERVER}"),
+        );
     }
-    rows.iter()
-        .map(|(k, v)| {
-            format!(
-                r#"<div class="kv"><span class="k">{}</span><code>{}</code></div>"#,
-                esc(k),
-                esc(v)
-            )
-        })
-        .collect()
+    match default_target.map(str::trim) {
+        Some(target) if !target.is_empty() => (target.to_string(), String::new()),
+        _ => (
+            "a healthy catalyst from the public Genesis City rotation".to_string(),
+            String::new(),
+        ),
+    }
 }
 
 fn thumbnail(st: &AppState, prefix: &str) -> Option<String> {
@@ -280,9 +260,467 @@ fn thumbnail(st: &AppState, prefix: &str) -> Option<String> {
     if !abs.is_file() {
         return None;
     }
-    let hash = b64_hash(&abs.display().to_string(), &st.machine);
+    let hash = b64_content_hash(&abs.display().to_string(), &st.machine);
     Some(format!("{prefix}/content/contents/{hash}"))
 }
+
+/// Kept out of the `format!` template because every CSS brace would otherwise
+/// have to be doubled.
+const STYLE: &str = r##"
+:root {
+  color-scheme: dark light;
+  --page: #0e0d11;
+  --panel: #161518;
+  --panel-2: #242129;
+  --wash: #201e25;
+  --line: rgba(255,255,255,.08);
+  --line-strong: rgba(255,255,255,.1);
+  --line-soft: rgba(255,255,255,.06);
+  --fill-1: rgba(255,255,255,.04);
+  --fill-2: rgba(255,255,255,.06);
+  --fill-3: rgba(255,255,255,.08);
+  --fill-4: rgba(255,255,255,.1);
+  --fill-5: rgba(255,255,255,.12);
+  --text: #fcfcfc;
+  --ink-85: rgba(255,255,255,.85);
+  --ink-7: rgba(255,255,255,.7);
+  --ink-6: rgba(255,255,255,.6);
+  --ink-45: rgba(255,255,255,.5);
+  --brand: #ff2d55;
+  --brand-cta: #d80029;
+  --brand-hover: #ff4d70;
+  --brand-ink: #ff6b87;
+  --on-brand: #fff;
+  --success: #34ce77;
+  --online: #57df41;
+  --warning: #fe9c2a;
+  --error: #fb3b3b;
+  --info: #2196f3;
+  --offline: #a09ba8;
+  --glass: rgba(13,12,15,.92);
+  --shadow-bar: 0 2px 14px rgba(0,0,0,.35);
+  --shadow-panel: 0 8px 24px rgba(0,0,0,.35);
+  /* the mini-map's literal hexes are counted by a unit test, so recolour it
+     here: a `fill` declaration beats the SVG presentation attribute */
+  --map-cell: var(--fill-3);
+  --map-label: var(--ink-45);
+  --map-dot: #fff;
+  --map-dot-stroke: var(--page);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --r-control: 10px;
+  --r-card: 14px;
+  --r-panel: 18px;
+  --r-pill: 999px;
+  --s-1: 4px;
+  --s-1-5: 6px;
+  --s-2: 8px;
+  --s-2-5: 10px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 40px;
+  --s-8: 48px;
+  --dur-fast: 140ms;
+  --ease-out: cubic-bezier(.16,1,.3,1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --page: #f3f2f5;
+    --panel: #ffffff;
+    --panel-2: #f3f2f5;
+    --wash: #f8f7f9;
+    --line: rgba(22,21,24,.14);
+    --line-strong: rgba(22,21,24,.18);
+    --line-soft: rgba(22,21,24,.08);
+    --fill-1: rgba(22,21,24,.04);
+    --fill-2: rgba(22,21,24,.06);
+    --fill-3: rgba(22,21,24,.08);
+    --fill-4: rgba(22,21,24,.1);
+    --fill-5: rgba(22,21,24,.12);
+    --text: rgba(22,21,24,.9);
+    --ink-85: rgba(22,21,24,.85);
+    --ink-7: rgba(22,21,24,.6);
+    --ink-6: rgba(22,21,24,.55);
+    --ink-45: rgba(22,21,24,.6);
+    --brand-ink: #d80029;
+    --glass: rgba(255,255,255,.92);
+    --shadow-bar: 0 1px 3px rgba(22,20,26,.08);
+    --shadow-panel: 0 1px 3px rgba(22,20,26,.06);
+    --map-cell: rgba(22,21,24,.1);
+    --map-label: rgba(22,21,24,.6);
+    --map-dot: #161518;
+    --map-dot-stroke: #fff;
+    /* The dark-page hues fail on white — #34ce77 over its own 14% tint is
+       1.8:1. Darkened until each clears 4.5:1 against --panel. */
+    --success: #0f7a3d;
+    --online: #2b7a15;
+    --warning: #8a4b00;
+    --error: #c11414;
+    --info: #0b5fa5;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  min-height: 100vh;
+  background: var(--page);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--brand-ink); text-decoration: none; }
+a:hover { color: var(--brand-hover); }
+code, pre, .mono { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+img, svg { display: block; max-width: 100%; }
+::selection { background: rgba(255,45,85,.3); color: var(--text); }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 4px; }
+* { scrollbar-width: thin; scrollbar-color: var(--fill-5) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--fill-5); border-radius: 4px; }
+
+.skip {
+  position: absolute; left: -9999px; top: 0; z-index: 200;
+  padding: 6px 12px; background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  font-size: 13px; font-weight: 700;
+}
+.skip:focus { left: var(--s-2); top: var(--s-2); }
+
+.bar {
+  position: sticky; top: 0; z-index: 60;
+  display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;
+  min-height: 60px; padding: var(--s-2-5) var(--s-5);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line); box-shadow: var(--shadow-bar);
+}
+.bar__mark {
+  display: flex; align-items: center; gap: var(--s-2);
+  font-size: 12px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--text); white-space: nowrap;
+}
+.bar__dot {
+  width: 8px; height: 8px; flex: none; border-radius: var(--r-pill);
+  background: var(--online); box-shadow: 0 0 10px rgba(87,223,65,.6);
+}
+.bar__scene {
+  min-width: 0; max-width: 34ch; padding-left: var(--s-3);
+  border-left: 1px solid var(--line);
+  font-size: 13px; font-weight: 600; color: var(--ink-7);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dash {
+  width: 100%; max-width: 1180px; margin: 0 auto;
+  padding: var(--s-5) var(--s-5) var(--s-7);
+  display: flex; flex-direction: column; gap: var(--s-6);
+}
+
+.panel {
+  padding: var(--s-4); background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--r-card);
+}
+.sec { display: flex; flex-direction: column; gap: var(--s-3); }
+/* 60px is .bar's min-height: sticky, so the skip-link target lands under it */
+.sec[id] { scroll-margin-top: calc(60px + var(--s-3)); }
+.sec__head { display: flex; align-items: baseline; gap: var(--s-2-5); flex-wrap: wrap; }
+h2, h3, .panel > h3 {
+  font-size: 12px; font-weight: 700; line-height: 1.4; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-45);
+}
+.sec__count {
+  font-size: 11px; font-weight: 700; letter-spacing: .05em;
+  color: var(--ink-45); font-variant-numeric: tabular-nums;
+}
+.sec__sub, .note {
+  max-width: 72ch; font-size: 12px; line-height: 1.6; color: var(--ink-45);
+}
+.row { display: flex; flex-direction: column; gap: var(--s-2); }
+.row h3 { margin-bottom: 2px; }
+
+.scene {
+  display: grid; grid-template-columns: 132px minmax(0,1fr); gap: var(--s-4);
+  padding: var(--s-4); background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--r-card);
+}
+.cover {
+  width: 100%; aspect-ratio: 16 / 10; object-fit: cover;
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  background: var(--fill-2);
+}
+.cover.placeholder {
+  display: flex; align-items: center; justify-content: center; border: 0;
+  background: linear-gradient(160deg, #3a1660 0%, #25103f 55%, #1a0c2e 100%);
+}
+.cover.placeholder span {
+  font-size: 34px; font-weight: 700; line-height: 1;
+  letter-spacing: -.02em; color: rgba(255,255,255,.85);
+}
+.scene__body { min-width: 0; display: flex; flex-direction: column; gap: var(--s-1-5); }
+.eyebrow {
+  font-size: 11px; font-weight: 700; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--brand-ink);
+}
+.scene__title {
+  font-size: 24px; font-weight: 700; line-height: 1.15;
+  letter-spacing: -.015em; color: var(--text); overflow-wrap: anywhere;
+}
+.pos {
+  font-size: 12px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-45);
+  font-variant-numeric: tabular-nums;
+}
+.pos code { font-size: 11px; letter-spacing: 0; text-transform: none; color: var(--ink-7); }
+.scene p {
+  max-width: 68ch; font-size: 13px; line-height: 1.65; color: var(--ink-6);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tags { display: flex; flex-wrap: wrap; gap: var(--s-1-5); margin-top: 2px; }
+.tag {
+  display: inline-flex; align-items: center; padding: 2px 9px;
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  background: var(--fill-2); color: var(--ink-7);
+  font-size: 11px; font-weight: 600; line-height: 1.5; white-space: nowrap;
+}
+
+.join {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr));
+  gap: var(--s-3);
+}
+.jn {
+  display: flex; flex-direction: column; gap: var(--s-1-5); min-width: 0;
+  padding: var(--s-3) var(--s-4) var(--s-4);
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r-card); color: var(--text);
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.jn:hover {
+  background: var(--panel-2); border-color: var(--ink-45);
+  color: var(--text); text-decoration: none;
+}
+.jn__label {
+  display: flex; align-items: center; gap: var(--s-2);
+  font-size: 11px; font-weight: 700; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-45);
+}
+.jn__hint { font-size: 12px; line-height: 1.5; color: var(--ink-6); }
+.jn__url {
+  display: block; margin-top: auto; padding: var(--s-1-5) var(--s-2);
+  background: var(--fill-1); border: 1px solid var(--line-soft);
+  border-radius: var(--r-control);
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+  color: var(--ink-7); overflow-wrap: anywhere;
+  -webkit-user-select: all; user-select: all;
+}
+.jn:hover .jn__url { color: var(--ink-85); }
+.jn--primary {
+  border-color: color-mix(in srgb, var(--brand) 45%, transparent);
+  background: linear-gradient(180deg,
+      color-mix(in srgb, var(--brand) 10%, transparent) 0%, transparent 60%),
+    var(--panel);
+  box-shadow: 0 0 0 1px rgba(255,45,85,.12);
+}
+.jn--primary .jn__label { color: var(--brand-ink); }
+.jn--primary:hover {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px rgba(255,45,85,.4), 0 4px 20px rgba(255,45,85,.25);
+}
+.jn__cta {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--s-2); align-self: flex-start; height: 34px; padding: 0 18px;
+  border-radius: var(--r-pill); background: var(--brand-cta); color: #fff;
+  font-size: 12px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; white-space: nowrap;
+}
+.jn:hover .jn__cta, .jn__cta:hover { background: var(--brand-hover); color: var(--on-brand); }
+.jn__cta--ghost { background: transparent; border: 1px solid var(--brand); color: var(--brand); }
+.jn:hover .jn__cta--ghost, .jn__cta--ghost:hover {
+  background: color-mix(in srgb, var(--brand) 12%, transparent); color: var(--brand);
+}
+.jn--qr {
+  display: grid; grid-template-columns: minmax(0,1fr) auto;
+  grid-template-rows: repeat(4, auto); column-gap: var(--s-4); align-items: start;
+}
+.jn--qr .jn__label, .jn--qr .jn__hint, .jn--qr .jn__cta, .jn--qr .jn__url { grid-column: 1; }
+.qr { grid-column: 2; grid-row: 1 / span 4; align-self: center; display: block; line-height: 0; }
+.qr img {
+  width: 88px; height: 88px; padding: 5px; background: #fff;
+  border: 1px solid var(--line); border-radius: var(--r-control);
+}
+
+.grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr));
+  gap: var(--s-4); align-items: start;
+}
+.grid > * { min-width: 0; }
+.span-2 { grid-column: span 2; }
+
+.map {
+  display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap;
+  padding: var(--s-2) 0; overflow-x: auto;
+}
+.map svg { flex: none; }
+.map svg rect { fill: var(--map-cell); }
+.map svg rect[fill="#ff2d55"] { fill: var(--brand); }
+.map svg text { fill: var(--map-label); font-family: var(--font-mono); }
+.map svg text[fill="#fff"] { fill: var(--on-brand); }
+.map svg circle { fill: var(--map-dot); stroke: var(--map-dot-stroke); }
+.map .pos { font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--ink-6); }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-1-5); }
+.chip {
+  display: inline-flex; align-items: center; padding: 3px var(--s-2-5);
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  background: var(--fill-2); color: var(--ink-7);
+  font-size: 12px; font-weight: 600; line-height: 1.5;
+}
+.chip.dim { background: var(--fill-1); color: var(--ink-45); }
+.chip.perm {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  font-weight: 700;
+}
+.chip.mono { font-family: var(--font-mono); font-size: 11px; font-weight: 400; }
+
+.kvs {
+  display: flex; flex-direction: column; border: 1px solid var(--line);
+  border-radius: var(--r-control); overflow: hidden;
+}
+.kv {
+  display: grid; grid-template-columns: minmax(120px,190px) minmax(0,1fr);
+  gap: var(--s-2) var(--s-4); align-items: baseline;
+  padding: 9px var(--s-3); border-top: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+.kv:first-child { border-top: 0; }
+.kv:nth-child(even) { background: var(--fill-1); }
+.kv .k {
+  font-size: 11px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--ink-45); overflow-wrap: anywhere;
+}
+.kv code {
+  font-family: var(--font-mono); font-size: 12px; color: var(--ink-85);
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+  -webkit-user-select: all; user-select: all;
+}
+.kv a code { color: var(--brand-ink); text-decoration: underline; text-underline-offset: 2px; }
+.kv a:hover code { color: var(--brand-hover); }
+
+.drawer { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-card); }
+.drawer > summary {
+  display: flex; align-items: center; gap: var(--s-2); list-style: none;
+  cursor: pointer; padding: var(--s-3) var(--s-4); border-radius: var(--r-card);
+  font-size: 12px; font-weight: 700; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-45);
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+.drawer > summary::-webkit-details-marker { display: none; }
+.drawer > summary:hover { color: var(--ink-7); background: var(--fill-1); }
+.drawer > summary::before {
+  content: ""; width: 7px; height: 7px; flex: none; margin-left: 2px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--dur-fast) var(--ease-out);
+}
+.drawer[open] > summary::before { transform: rotate(45deg); }
+.drawer[open] > summary {
+  border-radius: var(--r-card) var(--r-card) 0 0;
+  border-bottom: 1px solid var(--line);
+}
+.drawer > summary .sec__count { margin-left: auto; }
+.drawer__body { display: flex; flex-direction: column; gap: var(--s-3); padding: var(--s-4); }
+
+.reqs {
+  display: flex; flex-direction: column; border: 1px solid var(--line);
+  border-radius: var(--r-control); overflow: hidden;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  color: var(--ink-6); font-variant-numeric: tabular-nums;
+}
+.reqs > div {
+  padding: 5px var(--s-3); border-top: 1px solid var(--line-soft);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.reqs > div:first-child { border-top: 0; }
+.reqs > div:nth-child(even) { background: var(--fill-1); }
+.reqs > div:hover { background: var(--fill-2); color: var(--ink-85); }
+.reqs:empty { display: none; }
+.reqs .st { font-weight: 700; color: var(--ink-45); }
+.reqs .st--ok { color: var(--success); }
+.reqs .st--warn { color: var(--warning); }
+.reqs .st--err { color: var(--error); }
+
+.cmd {
+  display: block; padding: var(--s-2) var(--s-2-5);
+  background: var(--fill-1); border: 1px solid var(--line-soft);
+  border-radius: var(--r-control);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+  color: var(--ink-85); overflow-wrap: anywhere;
+  -webkit-user-select: all; user-select: all;
+}
+
+.u-sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+
+@media (max-width: 1024px) {
+  .span-2 { grid-column: auto; }
+}
+
+@media (max-width: 860px) {
+  .dash { gap: var(--s-5); padding: var(--s-4) var(--s-4) var(--s-6); }
+  .bar { padding: var(--s-2-5) var(--s-4); }
+  .bar__scene { max-width: 22ch; }
+  .join, .grid { grid-template-columns: minmax(0,1fr); }
+}
+
+@media (max-width: 600px) {
+  body { font-size: 13px; }
+  .dash { gap: var(--s-4); padding: var(--s-3) var(--s-3) var(--s-6); }
+  .bar { gap: var(--s-2); padding: var(--s-2) var(--s-3); }
+  .bar__scene { padding-left: var(--s-2); }
+  .scene { grid-template-columns: minmax(0,1fr); gap: var(--s-3); padding: var(--s-3); }
+  .cover { max-width: 180px; }
+  .scene__title { font-size: 20px; }
+  .kv { grid-template-columns: minmax(0,1fr); gap: 2px; padding: var(--s-2) var(--s-3); }
+  .jn--qr { grid-template-columns: minmax(0,1fr); }
+  .qr { grid-column: 1; grid-row: auto; justify-self: start; margin-top: var(--s-2); }
+  .map { gap: var(--s-3); }
+}
+
+@media (pointer: coarse) {
+  .jn, .jn__cta, .drawer > summary { min-height: 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  .bar {
+    position: static; box-shadow: none;
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+  }
+  .drawer[open] > summary { border-bottom: 1px solid var(--line); }
+  .scene, .jn, .panel { break-inside: avoid; }
+}
+"##;
 
 fn render(
     st: &AppState,
@@ -302,6 +740,10 @@ fn render(
         .and_then(|d| d.get("description"))
         .and_then(|d| d.as_str())
         .unwrap_or("");
+    let description_block = match description.is_empty() {
+        true => String::new(),
+        false => format!("<p>{}</p>", esc(description)),
+    };
     let tags: String = scene_json
         .get("tags")
         .and_then(|t| t.as_array())
@@ -312,6 +754,10 @@ fn render(
                 .collect()
         })
         .unwrap_or_default();
+    let tags_block = match tags.is_empty() {
+        true => String::new(),
+        false => format!(r#"<div class="tags">{tags}</div>"#),
+    };
     let position = st.base;
     let (parcels, base) = parse_parcels(&scene_json);
     let spawns: Vec<Value> = scene_json
@@ -321,7 +767,10 @@ fn render(
         .unwrap_or_default();
     let map_svg = parcels_svg(&parcels, base, &spawns);
 
-    let ab = st.optimized_assets_url.get().map(String::as_str);
+    let ab = match st.local_ab {
+        true => None,
+        false => st.optimized_assets_url.get().map(String::as_str),
+    };
     let desktop = desktop_deep_link(realm, position, ab, &st.deep_link_extra);
     let desktop2 = desktop_deep_link(
         realm,
@@ -340,14 +789,10 @@ fn render(
     };
     let qr_img = joinblock::qr_svg_data_url(&mobile)
         .map(|qr| {
-            format!(
-                r#"<a class="qr" href="{m}" title="open in the Decentraland mobile app"><img src="{qr}" alt="" width="96" height="96"></a>"#,
-                m = esc(&mobile)
-            )
+            format!(r#"<span class="qr"><img src="{qr}" alt="" width="96" height="96"></span>"#)
         })
         .unwrap_or_default();
 
-    let setup_rows = setup_rows(&scene_json);
     let world_note = scene_json
         .get("worldConfiguration")
         .and_then(|w| w.get("name"))
@@ -366,15 +811,27 @@ fn render(
             esc(k)
         )
     };
-    let url_link = |url: &str| format!(r#"<a href="{u}"><code>{u}</code></a>"#, u = esc(url));
+    let join_card = |class: &str,
+                     label: &str,
+                     hint: &str,
+                     cta_class: &str,
+                     cta: &str,
+                     url: &str| {
+        format!(
+            r#"<article class="{class}"><span class="jn__label">{label}</span><span class="jn__hint">{hint}</span><a class="{cta_class}" href="{u}">{cta}</a><span class="jn__url">{u}</span></article>"#,
+            u = esc(url)
+        )
+    };
     let web_explorer = joinblock::web_explorer_base();
-    let web_row = kv(
+    let web_card = join_card(
+        "jn",
         "web explorer",
-        url_link(&web_join_url(&web_explorer, realm, position)),
+        "no install — runs in this browser",
+        "jn__cta jn__cta--ghost",
+        "open",
+        &web_join_url(&web_explorer, realm, position),
     );
-    // abgen binds all interfaces; the network link advertises it under the
-    // LAN address the joining device can reach, not this machine's loopback.
-    let network_row = lan_realm
+    let network_card = lan_realm
         .map(|lan| {
             let lan_host = lan
                 .trim_start_matches("http://")
@@ -382,55 +839,59 @@ fn render(
                 .map(|(host, _)| host)
                 .unwrap_or(lan);
             let lan_assets = ab.map(|u| joinblock::swap_url_host(u, lan_host));
-            kv(
+            join_card(
+                "jn",
                 "network · another device",
-                url_link(&desktop_deep_link(
-                    lan,
-                    position,
-                    lan_assets.as_deref(),
-                    &st.deep_link_extra,
-                )),
+                "same wi-fi, different machine",
+                "jn__cta jn__cta--ghost",
+                "launch",
+                &desktop_deep_link(lan, position, lan_assets.as_deref(), &st.deep_link_extra),
             )
         })
         .unwrap_or_default();
-    let link_rows: String = [
-        ("desktop app", &desktop),
-        ("desktop · 2nd instance", &desktop2),
+    let qr_card = format!(
+        r#"<article class="jn jn--qr"><span class="jn__label">qr / mobile app</span><span class="jn__hint">scan with the phone camera</span><a class="jn__cta jn__cta--ghost" href="{m}" title="open in the Decentraland mobile app">open</a><span class="jn__url">{m}</span>{qr_img}</article>"#,
+        m = esc(&mobile)
+    );
+    let join_cards = format!(
+        "{}{}{network_card}{web_card}{qr_card}",
+        join_card(
+            "jn jn--primary",
+            "desktop app",
+            "the installed explorer, this realm",
+            "jn__cta",
+            "launch",
+            &desktop,
+        ),
+        join_card(
+            "jn",
+            "desktop · 2nd instance",
+            "a second client beside the first",
+            "jn__cta jn__cta--ghost",
+            "launch",
+            &desktop2,
+        ),
+    );
+
+    let default_target = std::env::var("DCL_ONE_SDK_DEFAULT_TARGET").ok();
+    let (deploy_dest, deploy_flags) = deploy_target(&scene_json, default_target.as_deref());
+    let deploy_dir = st
+        .projects
+        .first()
+        .map(|p| sh_quote(&p.root.display().to_string()))
+        .unwrap_or_else(|| ".".to_string());
+    let deploy_cmd = format!("dcl-one-sdk deploy --dir {deploy_dir}{deploy_flags}");
+    let deploy_rows: String = [
+        kv("scene", format!("<code>{}</code>", esc(&title))),
+        kv(
+            "publishes to",
+            format!("<code>{}</code>", esc(&deploy_dest)),
+        ),
     ]
     .into_iter()
-    .map(|(label, url)| kv(label, url_link(url)))
-    .chain(std::iter::once(network_row))
-    .chain(std::iter::once(web_row))
-    .chain(std::iter::once(kv(
-        "qr / mobile app",
-        format!("{}{qr_img}", url_link(&mobile)),
-    )))
     .collect();
 
-    let ws_proto = if realm.starts_with("https") {
-        "wss"
-    } else {
-        "ws"
-    };
-    let comms_adapter = if st.offline_comms {
-        "offline:offline".to_string()
-    } else {
-        let host_part = realm.split("://").nth(1).unwrap_or(realm);
-        format!("ws-room:{ws_proto}://{host_part}/mini-comms/room-1")
-    };
-    let abgen = match st.optimized_assets_url.get() {
-        Some(url) => url_link(url),
-        None => r#"<code>not running</code>"#.to_string(),
-    };
-    let server_rows: String = [
-        kv("realm", format!("<code>{}</code>", esc(realm))),
-        kv("comms", format!("<code>{}</code>", esc(&comms_adapter))),
-        kv("asset bundles (abgen)", abgen),
-    ]
-    .into_iter()
-    .collect();
-
-    let request_rows: String = st
+    let requests: Vec<String> = st
         .recent_requests
         .lock()
         .map(|recent| {
@@ -445,11 +906,22 @@ fn render(
                     } else {
                         format!("{}m ago", secs / 60)
                     };
-                    format!("<div>{status} {} · {ago}</div>", esc(line))
+                    let tone = match *status {
+                        s if s >= 500 => "st--err",
+                        s if s >= 400 => "st--warn",
+                        _ => "st--ok",
+                    };
+                    format!(
+                        r#"<div><b class="st {tone}">{status}</b> {} · {ago}</div>"#,
+                        esc(line)
+                    )
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let request_count = requests.len();
+    let request_rows: String = requests.concat();
+
     let more_scenes = if st.projects.len() > 1 {
         let rest: String = st.projects[1..]
             .iter()
@@ -463,99 +935,136 @@ fn render(
             })
             .collect();
         format!(
-            r#"<div class="row"><h3>also in this realm</h3><div class="chips">{rest}</div></div>"#
+            r#"<details class="drawer"><summary>also in this realm<span class="sec__count">{}</span></summary><div class="drawer__body"><div class="chips">{rest}</div></div></details>"#,
+            st.projects.len() - 1
         )
     } else {
         String::new()
     };
+    let map_row = match map_svg.is_empty() && world_note.is_empty() {
+        true => String::new(),
+        false => format!(r#"<h3>parcels</h3><div class="map">{map_svg}{world_note}</div>"#),
+    };
+    let parcels_panel = format!(
+        r#"<div class="panel span-2"><div class="row">{map_row}<h3>spawn points</h3><div class="chips">{spawn_chips}</div></div></div>"#,
+        spawn_chips = spawn_chips(&scene_json),
+    );
+
+    let prefix_esc = esc(prefix);
+    let page_row = |label: &str, path: &str, note: &str| {
+        kv(
+            label,
+            format!(
+                r#"<a href="{prefix_esc}{path}"><code>{path}</code></a> <span class="note">{note}</span>"#
+            ),
+        )
+    };
+    let mut page_rows = vec![
+        page_row(
+            "realm handshake",
+            "/about",
+            "what the explorer reads to enter",
+        ),
+        page_row("scene manifest", "/scene.json", "this scene's scene.json"),
+        page_row("scene list", "/scenes", "explorer compatibility stub"),
+        page_row(
+            "local wearables",
+            "/preview-wearables",
+            "wearables found in this project",
+        ),
+    ];
+    if lan_realm.is_some() {
+        page_rows.push(page_row(
+            "mobile deep link",
+            "/mobile-preview",
+            "the link behind the qr, as json",
+        ));
+    }
+    if st
+        .data_layer
+        .as_ref()
+        .is_some_and(|dl| dl.public_dir.is_some())
+    {
+        page_rows.push(page_row(
+            "visual editor",
+            "/inspector/",
+            "the @dcl/inspector ui on this scene",
+        ));
+    }
+    let page_rows: String = page_rows.concat();
 
     format!(
-        r#"<!doctype html>
+        r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title_esc} — dcl-one-sdk preview</title>
-<style>
-  :root {{ color-scheme: dark; }}
-  * {{ box-sizing: border-box; }}
-  body {{ margin: 0; padding: 2rem 1.25rem 3rem; background: #0d0e12; color: #e8e6f0;
-         font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-         display: flex; justify-content: center; }}
-  main {{ max-width: 52rem; width: 100%; }}
-  a {{ color: #ff2d55; text-decoration: none; }}
-  .hero {{ display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: flex-start; }}
-  .card {{ width: 21rem; max-width: 100%; background: #16171d; border-radius: 16px;
-           overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,.45); }}
-  .cover {{ display: block; width: 100%; aspect-ratio: 16/10; object-fit: cover; }}
-  .cover.placeholder {{ display: flex; align-items: center; justify-content: center;
-        background: linear-gradient(135deg, #ff2d55 0%, #3c1f8f 100%); }}
-  .cover.placeholder span {{ font-size: 4rem; font-weight: 800; color: rgba(255,255,255,.85); }}
-  .card .body {{ padding: .9rem 1rem 1rem; }}
-  .card h1 {{ font-size: 1.1rem; margin: 0 0 .3rem; line-height: 1.3; }}
-  .card .pos {{ color: #8f8ba3; font-size: .85rem; }}
-  .card p {{ margin: .5rem 0 0; color: #b5b1c8; font-size: .85rem;
-             display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }}
-  .tag {{ display: inline-block; background: #2a2b37; color: #c9c5dd; border-radius: 999px;
-          padding: .1rem .6rem; font-size: .75rem; margin: .5rem .3rem 0 0; }}
-  .facts {{ flex: 1; min-width: 16rem; display: flex; flex-direction: column; gap: .9rem; }}
-  .row h3 {{ margin: 0 0 .35rem; font-size: .75rem; text-transform: uppercase;
-             letter-spacing: .08em; color: #8f8ba3; font-weight: 600; }}
-  .chips {{ display: flex; flex-wrap: wrap; gap: .35rem; }}
-  .chip {{ background: #1e1f28; border: 1px solid #2c2d39; border-radius: 8px;
-           padding: .25rem .6rem; font-size: .82rem; color: #d8d5e6; }}
-  .chip.dim {{ color: #8f8ba3; }}
-  .chip.perm {{ border-color: #55361f; background: #251c14; color: #f0b27a; }}
-  .chip.mono {{ font-family: ui-monospace, Menlo, monospace; font-size: .78rem; }}
-  .kvs {{ display: flex; flex-direction: column; gap: .2rem; }}
-  .kv {{ display: flex; gap: .6rem; align-items: baseline; font-size: .84rem; flex-wrap: wrap; }}
-  .kv .k {{ color: #8f8ba3; min-width: 11.5rem; }}
-  .kv code {{ font: .8rem ui-monospace, Menlo, monospace; color: #d8d5e6; overflow-wrap: anywhere; }}
-  .kv a code {{ color: #ff8fa6; }}
-  .row.wide {{ margin-top: 1.75rem; }}
-  .reqs {{ margin-top: .5rem; font: .76rem ui-monospace, Menlo, monospace; color: #8f8ba3;
-           display: flex; flex-direction: column; gap: .15rem; }}
-  .map {{ display: flex; align-items: center; gap: .75rem; }}
-  .map .pos {{ color: #8f8ba3; font-size: .85rem; }}
-  .qr img {{ display: block; background: #fff; border-radius: 8px; padding: 4px; }}
-  .kv:has(.qr) {{ align-items: center; }}
-</style>
+<style>{STYLE}</style>
 </head>
 <body>
-<main>
-  <div class="hero">
-    <div class="card">
-      {hero_media}
-      <div class="body">
-        <h1>{title_esc}</h1>
-        <div class="pos">at {x},{y} · {parcel_count} parcel{parcel_plural}</div>
-        <p>{description_esc}</p>
-        <div>{tags}</div>
-      </div>
+<a class="skip" href="#join">skip to join links</a>
+<h1 class="u-sr-only">{title_esc} &mdash; dcl-one-sdk preview</h1>
+<header class="bar">
+  <div class="bar__mark"><span class="bar__dot"></span>dcl one sdk · preview</div>
+  <div class="bar__scene">{title_esc}</div>
+</header>
+<main class="dash">
+  <article class="scene">
+    {hero_media}
+    <div class="scene__body">
+      <div class="eyebrow">preview scene</div>
+      <h2 class="scene__title">{title_esc}</h2>
+      <div class="pos">at {x},{y} · {parcel_count} parcel{parcel_plural}</div>
+      {description_block}
+      {tags_block}
     </div>
-    <div class="facts">
-      <div class="row"><h3>parcels</h3><div class="map">{map_svg}{world_note}</div></div>
-      <div class="row"><h3>spawn</h3><div class="chips">{spawn_chips}</div></div>
-      <div class="row"><h3>permissions</h3><div class="chips">{permission_chips}</div></div>
-      <div class="row"><h3>setup</h3><div class="kvs">{setup_rows}</div></div>
-      {more_scenes}
-    </div>
-  </div>
+  </article>
 
-  <div class="row wide"><h3>links</h3><div class="kvs">{link_rows}</div></div>
-  <div class="row wide"><h3>server</h3><div class="kvs">{server_rows}</div>
-    <div class="reqs">{request_rows}</div></div>
+  <section id="join" class="sec">
+    <div class="sec__head"><h2>join this preview</h2>
+      <span class="sec__sub">the button launches · the url below it selects whole on a click,
+        ready to copy</span></div>
+    <div class="join">{join_cards}</div>
+  </section>
+
+  <section class="grid">
+    {parcels_panel}
+    <div class="panel"><h3>permissions</h3><div class="chips">{permission_chips}</div></div>
+    {more_scenes}
+  </section>
+
+  <details class="drawer"><summary>recent requests<span class="sec__count">{request_count}</span></summary>
+    <div class="drawer__body"><div class="reqs">{request_rows}</div></div></details>
+
+  <section id="pages" class="sec">
+    <div class="sec__head"><h2>pages on this server</h2>
+      <span class="sec__sub">everything else this preview serves on this port</span></div>
+    <div class="panel"><div class="kvs">{page_rows}</div></div>
+  </section>
+
+  <section id="deploy" class="sec">
+    <div class="sec__head"><h2>deploy</h2>
+      <span class="sec__sub">publish this scene from the terminal</span></div>
+    <div class="panel"><div class="row">
+      <div class="kvs">{deploy_rows}</div>
+      <code class="cmd">{deploy_cmd_esc}</code>
+      <span class="note">signing opens your wallet, so this runs where you are — the preview
+        server has no publish route of its own. The command starts a signing page of its own on
+        a throwaway port and shuts it down once the wallet answers, so it is not listed above.
+        Add <code>--dry-run</code> to pack and hash the entity without touching the network.</span>
+    </div></div>
+  </section>
 </main>
 </body>
 </html>
-"#,
+"##,
         title_esc = esc(&title),
+        deploy_cmd_esc = esc(&deploy_cmd),
         x = position.0,
         y = position.1,
         parcel_count = parcels.len().max(1),
         parcel_plural = if parcels.len() == 1 { "" } else { "s" },
-        description_esc = esc(description),
-        spawn_chips = spawn_chips(&scene_json),
         permission_chips = permission_chips(&scene_json),
     )
 }
@@ -585,6 +1094,29 @@ mod tests {
         assert_eq!(svg.matches("<rect").count(), 4);
         assert_eq!(svg.matches("#ff2d55").count(), 1);
         assert_eq!(svg.matches("<circle").count(), 1);
+    }
+
+    #[test]
+    fn sh_quote_survives_spaces_and_apostrophes() {
+        assert_eq!(
+            sh_quote("/Application Support/x"),
+            "'/Application Support/x'"
+        );
+        assert_eq!(sh_quote("/it's/here"), r"'/it'\''s/here'");
+    }
+
+    #[test]
+    fn deploy_target_names_the_worlds_server_for_a_world_scene() {
+        let world = json!({ "worldConfiguration": { "name": "my.dcl.eth" } });
+        let (dest, flags) = deploy_target(&world, None);
+        assert!(dest.contains("my.dcl.eth"));
+        assert_eq!(flags, format!(" --target-content {WORLDS_CONTENT_SERVER}"));
+        assert_eq!(deploy_target(&world, Some("https://example.org")).1, flags);
+        assert!(deploy_target(&json!({}), None).0.contains("Genesis City"));
+        assert_eq!(
+            deploy_target(&json!({}), Some(" https://example.org ")),
+            ("https://example.org".to_string(), String::new())
+        );
     }
 
     #[test]

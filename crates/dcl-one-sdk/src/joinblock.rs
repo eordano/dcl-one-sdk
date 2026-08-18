@@ -56,8 +56,7 @@ pub struct JoinBlock {
     pub tunnel_hint: bool,
     pub editor: bool,
     pub optimized_assets_url: Option<String>,
-    /// Pre-encoded `&key=value...` appended to every desktop deep link:
-    /// --asset-bundles/--mcp/--mcp-port plus `--` passthrough params.
+    /// Pre-encoded `&key=value...`, appended verbatim to every desktop link.
     pub deep_link_extra: String,
     pub native_hud: bool,
 }
@@ -66,11 +65,8 @@ fn form_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-/// Port of upstream `parsePassthroughParams`: raw CLI tokens after a
-/// standalone `--` become Explorer deep-link query params. `--key=value`,
-/// `--key value` and bare `--key` (mapped to `key=true`) are supported;
-/// tokens that are not flags and not consumed as a value are ignored. A later
-/// occurrence of a key overwrites the earlier one, as in URLSearchParams.
+/// Port of upstream `parsePassthroughParams`: CLI tokens after a standalone
+/// `--` become deep-link params; a repeated key overwrites, as URLSearchParams.
 pub fn parse_passthrough_params(tokens: &[String]) -> Vec<(String, String)> {
     let mut params: Vec<(String, String)> = Vec::new();
     let mut set = |key: String, value: String| match params.iter_mut().find(|(k, _)| *k == key) {
@@ -104,13 +100,8 @@ pub fn parse_passthrough_params(tokens: &[String]) -> Vec<(String, String)> {
     params
 }
 
-/// The extra desktop deep-link params beyond the core set: declared flags
-/// first (--asset-bundles forwards `local-ab=true`; --mcp/--mcp-port forward
-/// verbatim), then passthrough params. Declared flags and the core keys take
-/// precedence over passthrough, matching upstream's `params.has` merge; keys
-/// only some rows carry (`multi-instance`) are deduped per row in
-/// `desktop_link_with` instead, so a passthrough `multi-instance` still
-/// reaches the plain desktop row as upstream would forward it.
+/// Declared flags and core keys beat passthrough, as upstream's `params.has`
+/// merge; per-row keys (`multi-instance`) dedupe in `desktop_link_with`.
 pub fn deep_link_extra(
     local_ab: bool,
     mcp: bool,
@@ -146,11 +137,9 @@ pub fn deep_link_extra(
         .collect()
 }
 
-/// The engine's default startup portable — the movement controller. A web
-/// explorer page on a foreign origin cannot fetch it from the baked public
-/// world host (CORS), so the web link pins the portable to the preview realm's
-/// own same-origin `/world/…` mirror; `portables=` replaces the engine default
-/// with the identical world, just reachable.
+/// The engine's default startup portable: its baked public world host is
+/// CORS-blocked from a foreign web-explorer origin, so `portables=` repoints
+/// it at the realm's own same-origin `/world/…` mirror.
 pub const CONTROLLER_WORLD: &str = "basiccontroller.dcl.eth";
 
 pub fn web_join_url(web_explorer: &str, realm: &str, position: (i64, i64)) -> String {
@@ -158,14 +147,6 @@ pub fn web_join_url(web_explorer: &str, realm: &str, position: (i64, i64)) -> St
         "{web_explorer}/?preview=true&realm={realm}&position={},{}",
         position.0, position.1
     );
-    // Pin the portable only if the mirror can actually serve it. The mirror is
-    // the /world/… proxy, and that proxy answers 501 unless a worlds host is
-    // configured — so pinning unconditionally hands the explorer a URL this
-    // very process knows will fail, and the failure surfaces as a scene with no
-    // movement controller rather than as anything that names the cause.
-    // Unpinned, the engine falls back to its own default portable; that is
-    // CORS-blocked from a foreign origin, which is the behaviour that existed
-    // before the mirror and is no worse than a 501.
     match crate::start::world_base_configured() {
         true => format!(
             "{base}&portables={}",
@@ -175,12 +156,6 @@ pub fn web_join_url(web_explorer: &str, realm: &str, position: (i64, i64)) -> St
     }
 }
 
-// No wrapping quotes and a form-encoded realm/position: launcher-rust
-// parses everything after `decentraland://` as a raw query string, and
-// macOS LaunchServices percent-encodes a literal `"` to %22 (corrupting
-// the first key) and URL-normalizes an unencoded `http://` inside the
-// opaque host down to `http//`. Verified against Decentraland.app 1.18.0:
-// the encoded, quote-free form reaches the Explorer args intact.
 pub fn desktop_deep_link(
     realm: &str,
     position: (i64, i64),
@@ -205,9 +180,6 @@ pub fn mobile_deep_link(realm: &str, position: (i64, i64)) -> String {
     )
 }
 
-/// Rebuild an `http://host:port` URL onto a different host, keeping the port.
-/// Used to advertise the abgen sidecar (bound on all interfaces) under the
-/// address the joining device can actually reach.
 pub fn swap_url_host(url: &str, host: impl std::fmt::Display) -> String {
     match url.rsplit_once(':') {
         Some((_, port)) if port.chars().all(|c| c.is_ascii_digit()) => {
@@ -235,9 +207,6 @@ impl JoinBlock {
         out
     }
 
-    /// The default banner: addresses, warnings, one desktop deep link, and a
-    /// pointer at the landing page (which carries every join option, the QR
-    /// and the scene card). `--verbose` prints the full `body()` instead.
     pub fn compact_body(&self) -> String {
         let mut out = String::new();
         self.push_interface_rows(&mut out);
@@ -255,9 +224,6 @@ impl JoinBlock {
                 self.push_mobile_qr(&mut out, &lan_realm);
             }
         }
-        out.push_str(&format!(
-            "  more:     every join option, QR and scene info: {realm}\n"
-        ));
         out
     }
 
@@ -371,14 +337,6 @@ impl JoinBlock {
             "  desktop (2nd instance): {}\n",
             self.desktop_link_with(&realm, "&multi-instance=true")
         ));
-        // Observed on launcher 1.21.9: with an Explorer already running the
-        // launcher logs "Deeplink handled by passthrough (an Explorer instance
-        // is already running); skipping further steps", brings the existing
-        // window to the front and never forwards the link. The realm is
-        // silently dropped, so the click reads as a dead link when it is really
-        // a live window still sitting on its previous realm. This costs a real
-        // half hour to diagnose from the outside; the 2nd-instance row above is
-        // the way past it.
         out.push_str(
             "  note: an Explorer already running SWALLOWS the plain desktop link \u{2014} it comes\n        to the front still on its old realm. Quit it first, or use the 2nd-instance\n        link above.\n",
         );
@@ -400,8 +358,6 @@ impl JoinBlock {
         if self.editor {
             out.push_str(&format!("  editor:   {realm}/inspector/\n"));
         }
-        // abgen binds all interfaces; advertise it under the LAN address the
-        // joining device can reach instead of this machine's loopback.
         let lan_assets = self
             .optimized_assets_url
             .as_deref()
@@ -452,12 +408,8 @@ impl JoinBlock {
         }
     }
 
-    /// Chrome/Edge gate a website's requests to local addresses behind the
-    /// Local Network Access permission, so the hosted web explorer silently
-    /// fails to reach this preview until the user grants it. The settings
-    /// deep link follows the configured web-explorer origin, never a
-    /// hardcoded decentraland.org, so a DCL_ONE_SDK_WEB_EXPLORER override
-    /// points users at the right site entry.
+    /// Chrome/Edge gate a site's requests to local addresses behind the Local
+    /// Network Access permission, granted per web-explorer origin.
     fn push_local_network_access_note(&self, out: &mut String) {
         let Some(origin) = web_origin(&self.web_explorer) else {
             return;
@@ -597,16 +549,16 @@ mod tests {
     }
 
     #[test]
-    fn compact_body_is_addresses_one_deeplink_and_a_pointer() {
+    fn compact_body_is_addresses_and_one_deeplink() {
         let out = block(full_ifaces(), QrMode::Hint).compact_body();
         assert!(out.contains("  Local:    http://127.0.0.1:5600\n"));
         assert!(out.contains("  Network:  http://10.1.2.20:5600"));
         assert!(out.contains(
             "desktop:  decentraland://realm=http%3A%2F%2F127.0.0.1%3A5600&position=52%2C-68&local-scene=true&dclenv=org"
         ));
-        assert!(out.contains("every join option, QR and scene info: http://127.0.0.1:5600"));
+        assert!(!out.contains("more:"));
+        assert!(!out.contains("every join option"));
         assert!(!out.contains("--verbose"));
-        // everything else moved to the landing page
         assert!(!out.contains("2nd instance"));
         assert!(!out.contains("Join from another device"));
         assert!(!out.contains("mixed content"));
@@ -651,13 +603,8 @@ mod tests {
         ));
     }
 
-    /// The pinned form of the portables mirror, for the configured case.
-    ///
-    /// `web_join_url` decides whether to append it by asking the running
-    /// process whether a worlds host is set, which a unit test cannot flip
-    /// without racing every other test in this binary through the environment.
-    /// So pin the STRING the caller builds instead: if the encoding of the
-    /// mirror URL drifts, this fails right next to the code that builds it.
+    /// Pins the mirror's encoding for the configured case: flipping the real
+    /// worlds-host switch would race every other test in this binary.
     #[test]
     fn portables_pin_grammar() {
         let realm = "http://10.1.2.20:5600";
@@ -689,12 +636,6 @@ mod tests {
         assert!(out.contains(
             "web:      https://decentraland.org/bevy-web/?preview=true&realm=http://10.1.2.20:5600&position=52,-68"
         ));
-        // portables= is pinned to the realm's own /world/… mirror ONLY when a
-        // worlds host is configured, because that is the only time the mirror
-        // can answer; unconfigured it is a 501 and advertising it would hand
-        // the explorer a URL this process knows is dead. Tests run with nothing
-        // configured, so the absence is the case under test here — and the
-        // grammar of the pin itself is covered by `portables_pin_grammar`.
         assert!(
             !out.contains("&portables="),
             "unconfigured worlds host must not advertise the mirror: {out}"
@@ -868,8 +809,6 @@ mod tests {
                 ("flag".to_string(), "true".to_string()),
             ]
         );
-        // `--=x` has its key at index 0 and is ignored; a later occurrence of
-        // a key overwrites the earlier one.
         assert_eq!(
             parse_passthrough_params(&toks(&["--=x", "--k", "one", "--k=two"])),
             vec![("k".to_string(), "two".to_string())]

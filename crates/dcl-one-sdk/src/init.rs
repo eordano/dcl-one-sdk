@@ -487,8 +487,6 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == rel), "blob is missing {rel}");
         }
-        // The descriptor's `.ts` source and its `.proto` are checked in beside
-        // the shim on purpose, and must never ship: 79 KB nothing loads.
         assert!(
             !names
                 .iter()

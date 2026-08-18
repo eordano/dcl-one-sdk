@@ -96,7 +96,9 @@ reuse), so run the whole script, not arbitrary subsets.
   99 crdt_via_sdk_commands, 115 opera_composite, 123 no_node_for_typecheck,
   124 watch_typecheck_rebuilds (asserts the `rebuilt` marker with type
   checking on), 125 smart_chunk_missing, 98 vendor_chunks (hidden
-  `vendor-chunks`)
+  `vendor-chunks`), 126 golden_runtime_compare (builds a golden fixture with
+  this binary and diffs the runtime harness output against the checked-in
+  golden — compare only, it never rewrites; see docs/golden-snapshots.md)
 - start: 36 probe_suite (/about, /, /scenes, /content/contents b64 + 304 + HEAD +
   ignored-file 404 + outside-root 403, entities active/scene, mobile-preview,
   lambdas, inspector 404/redirect/traversal, `/` and `/mini-comms` ws upgrade),
@@ -198,6 +200,21 @@ largest contiguous blocks per file (`llvm-cov show` / lcov `DA:` zeros).
   building composites that exercise every component field kind; the tour's
   composites hit only Transform/MeshRenderer. A composite fixture covering each
   `FieldKind` (map, repeated, enum-by-name, base64 bytes) would close most.
+  Numbers predate the ISchema encoder below and are stale for this file.
+- **schema_crdt.rs** (new since this table): the second of main.crdt's two
+  encoders. crdt_gen serializes `core::*` as protobuf against the vendored
+  @dcl/protocol descriptors; everything else — `inspector::*`,
+  `core-schema::*`, `asset-packs::*` and user-named components — is serialized
+  here against the `jsonSchema` the composite itself carries, which is the only
+  way a user-defined component can be encoded at all. Driven by the golden
+  fixtures in `testdata/{opera,gather,gather2,museum}-main.{composite,crdt}`
+  (each `.crdt` regenerated through the node data-layer when it was committed,
+  @dcl/ecs 7.26.0) and by `tests/schema_parity.rs`, a seeded differential fuzz
+  against @dcl/ecs itself. `scripts/crdt-diff.py` turns any parity failure into
+  a component + entity + schema field path, and `scripts/ischema-oracle.py` is
+  an independent Python reimplementation kept as a third opinion. In production,
+  `DCL_ONE_CRDT_VERIFY=1` runs the node data-layer alongside the native path and
+  logs a decoded diff on any divergence.
 - **composite_norm.rs** 300-310, 213-221, 262-270 (~90 lines, 82%): normalizer
   branches for component shapes absent from the tour composites. Same fix —
   broader composite fixtures (the `docs/composite-tojson-edge-cases.json` set).

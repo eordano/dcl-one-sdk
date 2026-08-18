@@ -131,12 +131,6 @@ pub fn scene_externals(project: &Project) -> Vec<String> {
             "~sdk/script-utils".to_string(),
         ])
         .collect();
-    // `@dcl/asset-packs` is external either because the scene has its own copy
-    // (npm flow: it lands in the SDK chunk) or because the vendored blob ships
-    // the prebuilt smart-item chunk that publishes it. In the blob flow the
-    // package is not on disk at all — its runtime is the chunk and its types
-    // are in the rolled-up ambient `.d.ts` — so `has_asset_packs()` alone would
-    // wrongly ask rolldown to bundle a package that is not there.
     if has_asset_packs(project) || crate::prebuilt::locate(project).is_some() {
         externals.push("@dcl/asset-packs".to_string());
         externals.push("@dcl/asset-packs/*".to_string());
@@ -322,9 +316,6 @@ mod tests {
         for k in REGISTRY_KEYS {
             assert!(seen.insert(*k), "duplicate registry key {k}");
         }
-        // The smart chunk may only shadow `~sdk/script-utils`; anything else
-        // shared between the two lists would make load order silently decide
-        // which implementation a scene gets.
         let core: std::collections::HashSet<_> = REGISTRY_KEYS.iter().collect();
         let mut seen_smart = std::collections::HashSet::new();
         for k in SMART_REGISTRY_KEYS {
@@ -352,7 +343,10 @@ mod tests {
 
     #[test]
     fn detect_split_build_via_loader_marker_or_marker_file() {
-        let root = std::env::temp_dir().join("dcl-one-sdk-split-detect-test");
+        let root = std::env::temp_dir().join(format!(
+            "dcl-one-sdk-split-detect-test-{}",
+            std::process::id()
+        ));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(root.join("bin")).unwrap();
         assert!(!detect_split_build(&root, "bin/index.js"));

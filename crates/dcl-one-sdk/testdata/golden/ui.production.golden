@@ -1,0 +1,78 @@
+(dcl-one-sdk golden v1 ui production)
+TOOLCHAIN sdk=7.26.0 ecs=7.26.0 bundler=rolldown-1.2.4 blob=sha256:bfba3692f31514bd
+SCENE_COMPILED_JS_SIZE_PROD=482.1k bytes
+  ARTIFACT bin/index.js               5883 sha256=dea26fe67f01c565
+  ARTIFACT bin/scene.js               1614 sha256=41a04fea90b727ff
+  ARTIFACT bin/sdk-runtime.js       474613 sha256=33bab9f0f499ea4a
+LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=0
+ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
+  // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
+  "use strict";
+  import * as entrypoint from "<SCENE>/src/index.ts"
+  import { engine, NetworkEntity } from '@dcl/sdk/ecs'
+  import * as sdk from '@dcl/sdk'
+  import { compositeProvider } from '@dcl/sdk/composite-provider'
+  import { compositeFromLoader } from '~sdk/all-composites'
+  import { _initializeScripts } from '~sdk/script-utils'
+  import { compositeFromLoader as __sceneComposites } from './all-composites.js'
+  Object.assign(compositeFromLoader, __sceneComposites)
+
+  false
+
+  // `console.error(e)` drops the frames, and the host captures its own stack at
+  // the call site — this catch block. `e.stack` carries the throw site, so it is
+  // a superset of what upstream prints.
+  function __reportSceneError(e: any) {
+    console.error(e && e.stack ? e.stack : e)
+  }
+
+  if ((entrypoint as any).main !== undefined) {
+    function _INTERNAL_startup_system() {
+      try {
+        _initializeScripts(engine)
+
+        const maybePromise = (entrypoint as any).main()
+        if (maybePromise && typeof maybePromise === 'object' && typeof (maybePromise as unknown as Promise<unknown>).then === 'function') {
+          maybePromise.catch(__reportSceneError)
+        }
+      } catch (e) {
+        __reportSceneError(e)
+      } finally {
+        engine.removeSystem(_INTERNAL_startup_system)
+      }
+    }
+    engine.addSystem(_INTERNAL_startup_system, Infinity)
+  }
+
+  export * from '@dcl/sdk'
+  export * from "<SCENE>/src/index.ts"
+  export * from '~sdk/script-utils'
+  REQUIRE(scene): @dcl/sdk
+  REQUIRE(scene): @dcl/sdk/ecs
+  REQUIRE(scene): @dcl/sdk/react-ecs
+  REQUIRE(scene): ~sdk/all-composites
+  REQUIRE(scene): ~sdk/script-utils
+MAIN_CRDT none (no composite)
+DEPLOY entity=bafkreifkzhmditzbszivhw67vmqz35d25jzxgen64awy7vyz5u4tuyumfm files=4 total=482.3k bytes
+  bafkreidg2u7f44z7ua62ucihpnl4exvobroqdlmbs6fuiigf5lykc7iy3y scene.json 159 bytes
+  bafybeiagimmlavww7momge3jfpkxtniibletbghzk6eybyv4jov777wvl4 bin/sdk-runtime.js 474613 bytes
+  bafkreicbubh6vefxe77weec6q75egmzpg2wdtby5ngjxhmzsvbtont76sm bin/scene.js 1614 bytes
+  bafkreig6ujx6m7ybyvszssokawyhtpqridsfkjvorchc5t5htsdrnfhub4 bin/index.js 5883 bytes
+EVAL bin/index.js
+  READFILE: bin/sdk-runtime.js
+  READFILE: bin/scene.js
+  REQUIRE: ~system/Runtime
+  REQUIRE: ~system/EngineApi
+  REQUIRE: ~system/CommunicationsController
+  REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/EthereumController
+CALL onStart()
+CALL onUpdate(0)
+  Scene: PUT_COMPONENT e=0x200 c=1050 t=1 data={"parent":513,"rightOf":0,"positionType":0,"alignSelf":0,"flexDirection":0,"justifyContent":0,"overflow":0,"display":0,"flexBasisUnit":0,"flexBasis":0,"flexGrow":0,"widthUnit":1,"width":200,"heightUnit":1,"height":40,"minWidthUnit":0,"minWidth":0,"minHeightUnit":0,"minHeight":0,"maxWidthUnit":0,"maxWidth":0,"maxHeightUnit":0,"maxHeight":0,"positionLeftUnit":0,"positionLeft":0,"positionTopUnit":0,"positionTop":0,"positionRightUnit":0,"positionRight":0,"positionBottomUnit":0,"positionBottom":0,"marginLeftUnit":1,"marginLeft":8,"marginTopUnit":1,"marginTop":8,"marginRightUnit":0,"marginRight":0,"marginBottomUnit":0,"marginBottom":0,"paddingLeftUnit":0,"paddingLeft":0,"paddingTopUnit":0,"paddingTop":0,"paddingRightUnit":0,"paddingRight":0,"paddingBottomUnit":0,"paddingBottom":0,"pointerFilter":0,"opacity":1,"zIndex":0}
+  Scene: PUT_COMPONENT e=0x201 c=1050 t=1 data={"parent":0,"rightOf":0,"positionType":1,"alignSelf":0,"flexDirection":0,"justifyContent":0,"overflow":0,"display":0,"flexBasisUnit":0,"flexBasis":0,"flexGrow":0,"widthUnit":3,"width":0,"heightUnit":0,"height":0,"minWidthUnit":0,"minWidth":0,"minHeightUnit":0,"minHeight":0,"maxWidthUnit":0,"maxWidth":0,"maxHeightUnit":0,"maxHeight":0,"positionLeftUnit":1,"positionLeft":0,"positionTopUnit":1,"positionTop":0,"positionRightUnit":1,"positionRight":0,"positionBottomUnit":1,"positionBottom":0,"marginLeftUnit":0,"marginLeft":0,"marginTopUnit":0,"marginTop":0,"marginRightUnit":0,"marginRight":0,"marginBottomUnit":0,"marginBottom":0,"paddingLeftUnit":0,"paddingLeft":0,"paddingTopUnit":0,"paddingTop":0,"paddingRightUnit":0,"paddingRight":0,"paddingBottomUnit":0,"paddingBottom":0,"pointerFilter":0,"opacity":1,"zIndex":0}
+  Scene: PUT_COMPONENT e=0x200 c=1052 t=1 data={"value":"golden","fontSize":16,"textWrap":0}
+CALL onUpdate(0.1)
+CALL onUpdate(0.1)
+CALL onUpdate(0.1)
+HOSTCALLS readFile=2 crdtGetState=1 crdtSendToRenderer=4 sendBatch=4
+CRDT_TRAFFIC messages=3 bytes=166

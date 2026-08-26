@@ -3,7 +3,7 @@ use super::{
 };
 use crate::deploy::collect_publishable_files;
 use crate::live_reload::ReloadFrame;
-use crate::scene::{b64_content_hash, b64_hash, b64_unhash, Project};
+use crate::scene::{b64_content_hash_in_root, b64_hash_in_root, b64_unhash, root_tag, Project};
 use axum::{
     extract::{ws::Message, Path as AxPath, RawQuery, State, WebSocketUpgrade},
     http::{header, HeaderMap, StatusCode},
@@ -31,7 +31,7 @@ pub(super) async fn root(State(st): State<Arc<AppState>>, req: axum::extract::Re
             .and_then(|v| v.to_str().ok())
             .is_some_and(|a| a.contains("text/html"));
         if accepts_html {
-            return super::landing::page(&st, req.headers());
+            return super::landing::page(&st, req.headers(), req.uri().query());
         }
         let prefix = forwarded_prefix(req.headers());
         return Redirect::temporary(&format!("{prefix}/about")).into_response();
@@ -99,8 +99,7 @@ pub(super) fn preview_origin(headers: &HeaderMap) -> String {
 
 /// Where the catalyst back-fill and the world mirror keep fetched content.
 pub(super) fn contents_cache_dir(st: &AppState) -> Option<PathBuf> {
-    st.projects
-        .first()
+    st.first_project()
         .map(|p| p.root.join(".dcl-cache").join("contents"))
 }
 
@@ -122,9 +121,9 @@ pub(super) async fn about(
     } else {
         format!("ws-room:{ws_proto}://{host}{prefix}/mini-comms/room-1")
     };
-    let parcels: Vec<String> = st.projects.iter().flat_map(|p| p.parcels()).collect();
-    let scenes_urn: Vec<String> = st
-        .projects
+    let projects = st.projects();
+    let parcels: Vec<String> = projects.iter().flat_map(|p| p.parcels()).collect();
+    let scenes_urn: Vec<String> = projects
         .iter()
         .map(|p| {
             format!(
@@ -159,11 +158,11 @@ pub(super) async fn scenes() -> Json<Value> {
 }
 
 /// Upstream serves the first project's scene.json off disk (sdk-commands
-/// `endpoints.js`); the in-memory copy is the same document and stays correct
-/// across a composite rebuild.
+/// `endpoints.js`); the in-memory copy is the same document — the watcher and
+/// the landing page's editors both write it back through `set_scene_json`.
 pub(super) async fn scene_json(State(st): State<Arc<AppState>>) -> Response {
-    match st.projects.first() {
-        Some(p) => Json(p.scene_json.clone()).into_response(),
+    match st.first_project() {
+        Some(p) => Json(p.scene_json).into_response(),
         None => (StatusCode::NOT_FOUND, "no scene loaded").into_response(),
     }
 }
@@ -202,7 +201,7 @@ pub(super) async fn preview_wearables(
     let base = format!("{}/content/contents", preview_origin(&headers));
     Json(json!({
         "ok": true,
-        "data": collect_preview_wearables(&st.projects, &base, &st.machine),
+        "data": collect_preview_wearables(&st.projects(), &base, &st.machine),
     }))
 }
 
@@ -220,12 +219,12 @@ fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) ->
         let Ok(mut wearable) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
+        let tag = root_tag(&p.root, machine);
         let contents: Vec<Value> = collect_publishable_files(&p.root)
             .unwrap_or_default()
             .iter()
             .map(|rel| {
-                let abs = p.root.join(rel).display().to_string();
-                let hash = b64_content_hash(&abs, machine);
+                let hash = b64_content_hash_in_root(&tag, rel, &p.root.join(rel));
                 json!({ "key": rel, "url": format!("{base}/{hash}"), "hash": hash })
             })
             .collect();
@@ -238,36 +237,47 @@ fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) ->
     out
 }
 
+/// `/content/contents/{hash}`. Resolution is by PATH, not by content: the hash
+/// splits into the [`crate::scene::root_tag`] of a project and the path inside
+/// it, and the digest half [`crate::scene::b64_content_hash`] appends is never compared
+/// against the file. A hash minted before the file was last edited therefore
+/// returns 200 with the file's CURRENT bytes — deliberately, so a fetch already
+/// in flight when the watcher rebuilds does not fail, and unavoidably, since no
+/// old version is kept anywhere to serve instead. If you need the exact bytes a
+/// hash was minted for, this route cannot give them to you. Pinned by
+/// `tests::a_stale_digest_serves_the_current_bytes`.
+///
+/// A hash of ours that names a project we do not serve 404s rather than being
+/// proxied upstream; a hash that is not ours at all (an IPFS CID) is proxied.
 pub(super) async fn contents(
     method: axum::http::Method,
     State(st): State<Arc<AppState>>,
     AxPath(hash): AxPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(path_str) = b64_unhash(&hash, &st.machine) else {
+    let Some((tag, rel)) = b64_unhash(&hash) else {
         let cache_dir = contents_cache_dir(&st);
         return super::proxy::contents_upstream(method, &hash, &headers, cache_dir.as_deref())
             .await;
     };
-    let path = PathBuf::from(&path_str);
-    let Ok(canonical) = dunce::canonicalize(&path) else {
+    let Some(project) = project_for_tag(&st, &tag) else {
+        tracing::info!(target: "access", "contents {hash} 404 unknown-scene");
         return (StatusCode::NOT_FOUND, "file not found").into_response();
     };
-    let Some(project) = project_for(&st, &canonical) else {
-        return (StatusCode::FORBIDDEN, "outside project root").into_response();
-    };
-    if canonical == project.root {
+    if rel.is_empty() {
         tracing::info!(target: "access", "contents <scene-entity-json> 200");
-        return Json(scene_entity(&st, project)).into_response();
+        return Json(scene_entity(&st, &project)).into_response();
     }
-    if !is_published_hash(&st, project, &hash) {
+    let Ok(canonical) = dunce::canonicalize(project.root.join(&rel)) else {
+        return (StatusCode::NOT_FOUND, "file not found").into_response();
+    };
+    if !canonical.starts_with(&project.root) {
+        return (StatusCode::FORBIDDEN, "outside project root").into_response();
+    }
+    if !is_published_hash(&st, &project, &hash) {
         tracing::info!(target: "access", "contents {hash} 404 not-published");
         return (StatusCode::NOT_FOUND, "not a published content file").into_response();
     }
-    let rel = canonical
-        .strip_prefix(&project.root)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| canonical.display().to_string());
     let Ok(file) = tokio::fs::File::open(&canonical).await else {
         return (StatusCode::NOT_FOUND, "file not found").into_response();
     };
@@ -353,18 +363,13 @@ fn mime_for(path: &std::path::Path) -> &'static str {
     }
 }
 
+/// Whether the hash names a file the scene actually publishes — the check that
+/// keeps a `.dclignore`d file from being read back out. It compares
+/// [`crate::scene::hash_path_part`], so it authorizes a PATH: a request whose
+/// digest is one edit behind the entity's still passes, which is the whole
+/// reason a reload does not 404 requests that were already in flight.
 fn is_published_hash(st: &AppState, project: &Project, hash: &str) -> bool {
-    let requested = crate::scene::hash_path_part(hash);
-    scene_entity(st, project)
-        .get("content")
-        .and_then(|c| c.as_array())
-        .is_some_and(|arr| {
-            arr.iter().any(|e| {
-                e.get("hash")
-                    .and_then(|h| h.as_str())
-                    .is_some_and(|h| crate::scene::hash_path_part(h) == requested)
-            })
-        })
+    published_paths(st, project).contains(crate::scene::hash_path_part(hash))
 }
 
 /// The explorer's asset-bundle verdict, read off the entity as `status`
@@ -394,9 +399,82 @@ fn scene_entity_cached(st: &AppState, project: &Project) -> Value {
             return cached.clone();
         }
     }
-    let entity = build_scene_entity(project, &st.machine);
-    lock_cache(st).insert(project.root.clone(), (Instant::now(), entity.clone()));
+    build_and_cache(st, project).0
+}
+
+/// The published `hash_path_part`s of one generation of a scene entity. Shared,
+/// never mutated: a request that only asks "is this file published?" clones an
+/// `Arc`, not the content list.
+type PublishedPaths = Arc<std::collections::HashSet<String>>;
+
+/// The sets that go with the entities in [`lock_cache`], each stamped with its
+/// entry's `Instant` so the two can only be used together.
+///
+/// It lives here rather than in the entity cache entry because the entry's type
+/// is `(Instant, Value)`, owned by `start::mod`. The stamp is what makes that
+/// safe: a set is returned only when its `Instant` is the one the currently
+/// cached entity carries, and both are written under the entity-cache lock in
+/// [`build_and_cache`], so a set can never outlive the generation it describes —
+/// including when the watcher drops a root's entry to force a rebuild.
+type PublishedMemo = std::collections::HashMap<PathBuf, (Instant, PublishedPaths)>;
+
+fn lock_memo() -> std::sync::MutexGuard<'static, PublishedMemo> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<PublishedMemo>> = std::sync::OnceLock::new();
+    MEMO.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn published_paths_of(entity: &Value) -> std::collections::HashSet<String> {
     entity
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("hash").and_then(|h| h.as_str()))
+                .map(|h| crate::scene::hash_path_part(h).to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The published-path set for the entity currently cached for `project`,
+/// rebuilding the entity if the cache is cold or stale — the membership half of
+/// [`scene_entity_cached`], answered without deep-cloning the content list on
+/// every asset request.
+fn published_paths(st: &AppState, project: &Project) -> PublishedPaths {
+    {
+        let cache = lock_cache(st);
+        if let Some((at, cached)) = cache.get(&project.root) {
+            let at = *at;
+            if at.elapsed() < ENTITY_CACHE_TTL {
+                let mut memo = lock_memo();
+                if let Some((stamp, paths)) = memo.get(&project.root) {
+                    if *stamp == at {
+                        return paths.clone();
+                    }
+                }
+                let paths: PublishedPaths = Arc::new(published_paths_of(cached));
+                memo.insert(project.root.clone(), (at, paths.clone()));
+                return paths;
+            }
+        }
+    }
+    build_and_cache(st, project).1
+}
+
+/// Builds a scene entity and publishes it as one generation: the entity and its
+/// path set go into their two maps under a single hold of the entity-cache lock,
+/// so a racing rebuild cannot leave one root's entity paired with another
+/// build's set.
+fn build_and_cache(st: &AppState, project: &Project) -> (Value, PublishedPaths) {
+    let entity = build_scene_entity(project, &st.machine);
+    let paths: PublishedPaths = Arc::new(published_paths_of(&entity));
+    let at = Instant::now();
+    let mut cache = lock_cache(st);
+    cache.insert(project.root.clone(), (at, entity.clone()));
+    lock_memo().insert(project.root.clone(), (at, paths.clone()));
+    (entity, paths)
 }
 
 pub(super) fn build_scene_entity(project: &Project, machine: &str) -> Value {
@@ -411,11 +489,14 @@ pub(super) fn build_scene_entity(project: &Project, machine: &str) -> Value {
             Vec::new()
         }
     };
+    let tag = root_tag(root, machine);
     let content: Vec<Value> = rels
         .iter()
         .map(|rel| {
-            let abs = root.join(rel).display().to_string();
-            json!({ "file": rel, "hash": b64_content_hash(&abs, machine) })
+            json!({
+                "file": rel,
+                "hash": b64_content_hash_in_root(&tag, rel, &root.join(rel)),
+            })
         })
         .collect();
     let ts = SystemTime::now()
@@ -433,22 +514,33 @@ pub(super) fn build_scene_entity(project: &Project, machine: &str) -> Value {
     })
 }
 
+/// The scene entity id: the project's own [`root_tag`] with an empty path
+/// inside it. Built from the root the server actually serves rather than from
+/// the nearest `scene.json` above it, so it is the exact tag
+/// [`project_for_tag`] matches on.
 pub(super) fn scene_id_for(project: &Project, machine: &str) -> String {
-    b64_hash(&project.root.display().to_string(), machine)
+    b64_hash_in_root(&root_tag(&project.root, machine), "")
 }
 
-pub(super) fn project_for<'a>(
-    st: &'a AppState,
-    canonical: &std::path::Path,
-) -> Option<&'a Project> {
-    st.projects
-        .iter()
+/// The project a hash was minted under. A tag is a digest, so this is the only
+/// way back to a root — and it is what makes the root safe to leave out of the
+/// hash, which used to carry the absolute path in plain base64.
+fn project_for_tag(st: &AppState, tag: &str) -> Option<Project> {
+    st.projects()
+        .into_iter()
+        .find(|p| crate::scene::root_tag(&p.root, &st.machine) == tag)
+}
+
+#[cfg(test)]
+pub(super) fn project_for(st: &AppState, canonical: &std::path::Path) -> Option<Project> {
+    st.projects()
+        .into_iter()
         .filter(|p| canonical.starts_with(&p.root))
         .max_by_key(|p| p.root.components().count())
 }
 
 pub(super) fn entities_for(st: &AppState, pointers: &[String]) -> Vec<Value> {
-    let entities: Vec<Value> = st.projects.iter().map(|p| scene_entity(st, p)).collect();
+    let entities: Vec<Value> = st.projects().iter().map(|p| scene_entity(st, p)).collect();
     if pointers.is_empty() {
         return entities;
     }
@@ -536,6 +628,10 @@ pub(super) async fn entities_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The path-discovering entry point the handlers no longer call: the tests
+    /// mint hashes the way a client's URL arrives, from an absolute path alone,
+    /// so they also pin that both doors still produce the same hash.
+    use crate::scene::b64_content_hash;
 
     struct WearableTmp(PathBuf);
 
@@ -565,6 +661,252 @@ mod tests {
         }
     }
 
+    fn contents_state(projects: Vec<Project>) -> AppState {
+        let (reload_tx, _) = tokio::sync::broadcast::channel(4);
+        AppState {
+            projects: std::sync::RwLock::new(projects),
+            machine: "m".to_string(),
+            reload_tx,
+            offline_comms: true,
+            port: 8000,
+            data_layer: None,
+            entity_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            optimized_assets_url: std::sync::OnceLock::new(),
+            local_ab: false,
+            deep_link_extra: String::new(),
+            mcp: true,
+            mcp_port: crate::joinblock::DEFAULT_EXPLORER_MCP_PORT,
+            allow_remote_deploy: false,
+            deploy_dry_run: true,
+            explorer_params: Vec::new(),
+            recent_requests: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    async fn get_contents_response(st: &Arc<AppState>, hash: &str) -> Response {
+        contents(
+            axum::http::Method::GET,
+            State(st.clone()),
+            AxPath(hash.to_string()),
+            HeaderMap::new(),
+        )
+        .await
+    }
+
+    async fn get_contents(st: &Arc<AppState>, hash: &str) -> StatusCode {
+        get_contents_response(st, hash).await.status()
+    }
+
+    async fn get_contents_body(st: &Arc<AppState>, hash: &str) -> (StatusCode, String) {
+        let response = get_contents_response(st, hash).await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// A one-file scene at `<dir>/gather`, with `bin/index.js` holding `body`.
+    fn published_scene(dir: &std::path::Path, body: &str) -> Project {
+        let root = dir.join("gather");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/index.js"), body).unwrap();
+        let scene_json = json!({
+            "main": "bin/index.js",
+            "runtimeVersion": "7",
+            "scene": { "parcels": ["0,0"], "base": "0,0" }
+        });
+        std::fs::write(root.join("scene.json"), scene_json.to_string()).unwrap();
+        Project {
+            root: root.canonicalize().unwrap(),
+            scene_json,
+        }
+    }
+
+    /// The read side is NOT content-addressed, and this is exactly what that
+    /// means: after an edit, a URL carrying the OLD digest is answered 200 with
+    /// the NEW bytes. Not 404, and not the bytes the digest names — no old
+    /// version is kept to serve, and failing the request would break one
+    /// already in flight when the watcher rewrote the file. The write half does
+    /// hold, and is asserted here too: the edit does change the minted hash.
+    /// Read the guarantee off this test, not off the word "content-addressed".
+    #[tokio::test]
+    async fn a_stale_digest_serves_the_current_bytes() {
+        let tmp = WearableTmp::new("stale-digest");
+        let project = published_scene(&tmp.0, "// first");
+        let js = project.root.join("bin/index.js");
+        let st = Arc::new(contents_state(vec![project]));
+
+        let before = b64_content_hash(&js.display().to_string(), "m");
+        assert_eq!(
+            get_contents_body(&st, &before).await,
+            (StatusCode::OK, "// first".to_string())
+        );
+
+        std::fs::write(&js, "// second, and longer").unwrap();
+        let after = b64_content_hash(&js.display().to_string(), "m");
+        assert_ne!(
+            after, before,
+            "the write side IS content-addressed: an edit must rename the file"
+        );
+        assert_eq!(
+            crate::scene::hash_path_part(&after),
+            crate::scene::hash_path_part(&before),
+            "only the digest half moves; the path half is what the route matches on"
+        );
+
+        assert_eq!(
+            get_contents_body(&st, &before).await,
+            (StatusCode::OK, "// second, and longer".to_string()),
+            "a superseded digest is neither rejected nor honoured — it serves current bytes"
+        );
+        assert_eq!(
+            get_contents_body(&st, &after).await,
+            (StatusCode::OK, "// second, and longer".to_string())
+        );
+
+        let invented = format!("{}.ffffffffffff", crate::scene::hash_path_part(&before));
+        assert_eq!(
+            get_contents_body(&st, &invented).await,
+            (StatusCode::OK, "// second, and longer".to_string()),
+            "a digest that never named any version of this file resolves just the same"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_content_hash_still_resolves_when_it_is_fresh_stale_or_the_scene_id() {
+        let tmp = WearableTmp::new("resolve");
+        let project = published_scene(&tmp.0, "module.exports={}");
+        let st = Arc::new(contents_state(vec![project.clone()]));
+
+        let fresh = b64_content_hash(
+            &project.root.join("bin/index.js").display().to_string(),
+            "m",
+        );
+        assert_eq!(get_contents(&st, &fresh).await, StatusCode::OK);
+
+        let stale = format!("{}.000000000000", crate::scene::hash_path_part(&fresh));
+        assert_ne!(stale, fresh);
+        assert_eq!(
+            get_contents(&st, &stale).await,
+            StatusCode::OK,
+            "a hash minted before the last edit still names the same file"
+        );
+
+        assert_eq!(
+            get_contents(&st, &scene_id_for(&project, "m")).await,
+            StatusCode::OK
+        );
+
+        let tag = crate::scene::root_tag(&project.root, "m");
+        let escape = {
+            use base64::Engine;
+            format!(
+                "b64-{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(format!("{tag}/../../etc/passwd"))
+            )
+        };
+        assert_ne!(get_contents(&st, &escape).await, StatusCode::OK);
+
+        let other_scene = {
+            use base64::Engine;
+            format!(
+                "b64-{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode("0123456789abcdef/bin/index.js")
+            )
+        };
+        assert_eq!(
+            get_contents(&st, &other_scene).await,
+            StatusCode::NOT_FOUND,
+            "a hash minted for a root we do not serve must not be answered from disk"
+        );
+    }
+
+    /// A published tree can contain a second `scene.json` — a vendored scene, a
+    /// folder someone copied in. The files under it are published by THIS scene,
+    /// so their hashes have to name this scene's root. Minting them from the
+    /// absolute path instead makes the nearest `scene.json` the root, which tags
+    /// them under a project the server does not serve: the entity advertises a
+    /// hash, and fetching that hash 404s.
+    #[tokio::test]
+    async fn a_file_under_a_nested_scene_json_is_still_served_by_its_own_scene() {
+        let tmp = WearableTmp::new("nested-root");
+        let project = published_scene(&tmp.0, "// main");
+        std::fs::create_dir_all(project.root.join("sub")).unwrap();
+        std::fs::write(project.root.join("sub/scene.json"), "{}").unwrap();
+        std::fs::write(project.root.join("sub/model.glb"), b"glb").unwrap();
+        let st = Arc::new(contents_state(vec![project.clone()]));
+
+        let entity = build_scene_entity(&project, "m");
+        let hash = entity["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["file"] == json!("sub/model.glb"))
+            .expect("the nested file is published by this scene")["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            b64_unhash(&hash).unwrap(),
+            (root_tag(&project.root, "m"), "sub/model.glb".to_string()),
+            "the entity tagged the file under the nested scene.json, not the \
+             root this server serves it from"
+        );
+        assert_eq!(
+            get_contents_body(&st, &hash).await,
+            (StatusCode::OK, "glb".to_string()),
+            "a hash this very entity advertises must resolve"
+        );
+    }
+
+    /// The published-path set is a cache of one generation of the entity, and
+    /// the thing it must never do is outlive that generation: the watcher drops
+    /// a root's entity so the next request sees the new file list, and a set
+    /// keyed by root alone would keep answering from the old one — serving a
+    /// file `.dclignore` has since excluded, or 404ing one just added.
+    #[tokio::test]
+    async fn dropping_the_cached_entity_drops_its_published_set_too() {
+        let tmp = WearableTmp::new("published-set");
+        let project = published_scene(&tmp.0, "// main");
+        let st = Arc::new(contents_state(vec![project.clone()]));
+        let hash_of =
+            |rel: &str| b64_content_hash(&project.root.join(rel).display().to_string(), "m");
+
+        assert_eq!(
+            get_contents(&st, &hash_of("bin/index.js")).await,
+            StatusCode::OK,
+            "the first request fills both the entity cache and its path set"
+        );
+
+        std::fs::write(project.root.join("late.glb"), b"glb").unwrap();
+        lock_cache(&st).remove(&project.root);
+        assert_eq!(
+            get_contents(&st, &hash_of("late.glb")).await,
+            StatusCode::OK,
+            "a file added since the dropped entity was built is still unpublished"
+        );
+
+        std::fs::write(project.root.join(".dclignore"), "late.glb\n").unwrap();
+        lock_cache(&st).remove(&project.root);
+        assert_eq!(
+            get_contents(&st, &hash_of("late.glb")).await,
+            StatusCode::NOT_FOUND,
+            "a file .dclignore now excludes is still being byte-served"
+        );
+
+        std::fs::remove_file(project.root.join(".dclignore")).unwrap();
+        let fresh = build_scene_entity(&project, &st.machine);
+        lock_cache(&st).insert(project.root.clone(), (Instant::now(), fresh));
+        assert_eq!(
+            get_contents(&st, &hash_of("late.glb")).await,
+            StatusCode::OK,
+            "membership was answered from a set the cached entity did not come from"
+        );
+    }
+
     #[test]
     fn ab_status_tells_the_truth_about_whether_bundles_are_served() {
         let url = std::sync::OnceLock::new();
@@ -584,6 +926,7 @@ mod tests {
     #[test]
     fn a_smart_wearable_is_listed_with_preview_resolvable_urls() {
         let tmp = WearableTmp::new("sw");
+        std::fs::write(tmp.0.join("scene.json"), "{}").unwrap();
         std::fs::write(
             tmp.0.join("wearable.json"),
             r#"{"id":"urn:x","data":{"category":"eyewear"}}"#,
@@ -604,6 +947,12 @@ mod tests {
         assert_eq!(
             model["url"],
             json!(format!("http://x/c/{}", b64_content_hash(&abs, "m")))
+        );
+        assert_eq!(
+            b64_unhash(model["hash"].as_str().unwrap()).unwrap(),
+            (root_tag(&tmp.0, "m"), "model.glb".to_string()),
+            "the url has to name the file inside the wearable's own root, or \
+             /content/contents cannot find it"
         );
     }
 

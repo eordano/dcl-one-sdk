@@ -1,9 +1,20 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dcl_one_sdk::{
-    build, context_files, deploy, init, pack, scene, start, ux, watch, workspace, world,
+    build, context_files, deploy, init, joinblock, pack, scene, start, ux, watch, workspace, world,
 };
 use std::path::PathBuf;
+
+/// Lowest MCP port the Explorer will actually serve on: below this it ignores
+/// the deep link's `mcp-port` and falls back to its own default, which would
+/// leave the scene-log poller waiting on a port nobody opened. Rejecting the
+/// value here keeps the two ends from disagreeing silently.
+const MIN_MCP_PORT: u16 = 1024;
+
+/// The port both ends use when `--mcp-port` is absent.
+fn resolved_mcp_port(mcp_port: Option<u16>) -> u16 {
+    mcp_port.unwrap_or(joinblock::DEFAULT_EXPLORER_MCP_PORT)
+}
 
 #[derive(Parser)]
 #[command(
@@ -156,7 +167,18 @@ enum Command {
         asset_bundles: bool,
         #[arg(
             long,
-            help = "Enable the MCP server in the Explorer (forwarded into the desktop deep link)"
+            help = "Do not enable the Explorer's MCP server, and stop reading the running scene's errors out of it. MCP is on by default: the deep link carries mcp=true and mcp-port, and a scene that throws prints here instead of only in the client's log"
+        )]
+        no_mcp: bool,
+        #[arg(
+            long,
+            help = "Let a machine other than this one press Deploy on the preview's /deploy page. Off by default: publishing signs with this machine's wallet, and the preview port is unauthenticated"
+        )]
+        allow_remote_deploy: bool,
+        #[arg(
+            long,
+            conflicts_with = "no_mcp",
+            help = "Accepted for parity with earlier releases and does nothing: enabling the Explorer's MCP server is now the default"
         )]
         mcp: bool,
         #[arg(
@@ -180,7 +202,9 @@ enum Command {
         #[arg(
             long = "mcp-port",
             value_name = "PORT",
-            help = "Port for the Explorer's MCP server (forwarded into the desktop deep link)"
+            conflicts_with = "no_mcp",
+            value_parser = clap::value_parser!(u16).range(i64::from(MIN_MCP_PORT)..=i64::from(u16::MAX)),
+            help = "Port for the Explorer's MCP server (1024-65535), forwarded into the desktop deep link. Defaults to the Explorer's own default port, so both ends agree without being told"
         )]
         mcp_port: Option<u16>,
         #[arg(
@@ -561,7 +585,9 @@ async fn run(command: Command) -> Result<()> {
             mobile,
             no_asset_bundles,
             asset_bundles: _,
-            mcp,
+            no_mcp,
+            allow_remote_deploy,
+            mcp: _,
             mcp_port,
             error_lines_context,
             error_source_lines_before,
@@ -606,8 +632,9 @@ async fn run(command: Command) -> Result<()> {
                 mobile,
                 ab_sidecar: !no_asset_bundles,
                 local_ab: !no_asset_bundles,
-                mcp,
-                mcp_port,
+                mcp: !no_mcp,
+                allow_remote_deploy,
+                mcp_port: resolved_mcp_port(mcp_port),
                 source_context: start::SourceContext::resolve(
                     error_lines_context,
                     error_source_lines_before,
@@ -798,5 +825,101 @@ async fn watch_workspace(ws: &workspace::Workspace, opts: &build::BuildOptions) 
             None => Ok(()),
         },
         _ = tokio::signal::ctrl_c() => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut argv = vec!["dcl-one-sdk", "start"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+            .unwrap_or_else(|e| panic!("expected `start {args:?}` to parse: {e}"))
+            .command
+    }
+
+    /// (no_mcp, mcp, mcp_port) of a parsed `start`.
+    fn mcp_flags(args: &[&str]) -> (bool, bool, Option<u16>) {
+        match parse(args) {
+            Command::Start {
+                no_mcp,
+                mcp,
+                mcp_port,
+                ..
+            } => (no_mcp, mcp, mcp_port),
+            _ => panic!("not a start command"),
+        }
+    }
+
+    fn start_err(args: &[&str]) -> clap::Error {
+        let mut argv = vec!["dcl-one-sdk", "start"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv) {
+            Ok(_) => panic!("expected `start {args:?}` to be rejected"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn mcp_is_on_by_default_and_agrees_with_the_explorers_own_port() {
+        assert_eq!(mcp_flags(&[]), (false, false, None));
+        assert_eq!(
+            resolved_mcp_port(None),
+            joinblock::DEFAULT_EXPLORER_MCP_PORT
+        );
+        assert_eq!(resolved_mcp_port(Some(9111)), 9111);
+    }
+
+    #[test]
+    fn bare_mcp_is_accepted_and_changes_nothing() {
+        assert_eq!(mcp_flags(&["--mcp"]), (false, true, None));
+        let (no_mcp, _, mcp_port) = mcp_flags(&["--mcp"]);
+        assert_eq!((no_mcp, resolved_mcp_port(mcp_port)), {
+            let (d_no_mcp, _, d_port) = mcp_flags(&[]);
+            (d_no_mcp, resolved_mcp_port(d_port))
+        });
+    }
+
+    #[test]
+    fn no_mcp_conflicts_with_mcp_and_with_mcp_port() {
+        assert_eq!(mcp_flags(&["--no-mcp"]), (true, false, None));
+        assert_eq!(
+            start_err(&["--mcp", "--no-mcp"]).kind(),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            start_err(&["--no-mcp", "--mcp-port", "8123"]).kind(),
+            ErrorKind::ArgumentConflict
+        );
+    }
+
+    /// The Explorer clamps anything below 1024 to its own default and serves
+    /// there, while the scene-log poller would keep polling the port we asked
+    /// for: reject the value instead of letting the two ends disagree.
+    #[test]
+    fn mcp_port_rejects_values_the_explorer_would_not_serve() {
+        for bad in ["0", "1", "1023", "70000", "abc"] {
+            let err = start_err(&["--mcp-port", bad]);
+            assert_eq!(
+                err.kind(),
+                ErrorKind::ValueValidation,
+                "--mcp-port {bad} should be rejected"
+            );
+        }
+        assert!(Cli::try_parse_from(["dcl-one-sdk", "start", "--mcp-port", "-1"]).is_err());
+        let msg = start_err(&["--mcp-port", "0"]).to_string();
+        assert!(
+            msg.contains("--mcp-port") && msg.contains("1024") && msg.contains("65535"),
+            "unhelpful error: {msg}"
+        );
+        assert_eq!(mcp_flags(&["--mcp-port", "1024"]).2, Some(1024));
+        assert_eq!(mcp_flags(&["--mcp-port", "65535"]).2, Some(65535));
+        assert_eq!(
+            mcp_flags(&["--mcp-port", "8123"]).2,
+            Some(joinblock::DEFAULT_EXPLORER_MCP_PORT)
+        );
     }
 }

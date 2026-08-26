@@ -79,6 +79,16 @@ fn bad_tunnel_url(raw: &str, why: &str) -> anyhow::Error {
 
 pub const TOKEN_ENV: &str = "DCL_ONE_SDK_TUNNEL_TOKEN";
 
+/// Stamped on every request this agent replays into the local server.
+///
+/// The replay goes to `http://127.0.0.1:{port}`, so the local server sees a
+/// loopback peer no matter where the request came from — a gate that means
+/// "the human at this keyboard" cannot be written against the peer address
+/// alone. Deliberately in the `x-forwarded-` namespace, because the header
+/// loop below strips every client-supplied header with that prefix: a caller
+/// can neither forge this nor suppress it.
+pub const FORWARDED_HEADER: &str = "x-forwarded-via-dcl-tunnel";
+
 pub fn resolve_token(
     flag: Option<String>,
     file: Option<&std::path::Path>,
@@ -565,6 +575,7 @@ async fn run_http_channel(
         request = request.header(name, value);
     }
     request = request
+        .header(FORWARDED_HEADER, "1")
         .header("x-forwarded-proto", &fwd.proto)
         .header("x-forwarded-prefix", &fwd.prefix);
     if !fwd.host.is_empty() {

@@ -151,6 +151,7 @@ fn wait_for_file(path: &Path, timeout: Duration) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs DCL_ONE_SDK_TEST_NODE_MODULES + node: drives a real @dcl/rpc client against the data layer; see docs/testing.md"]
 async fn data_layer_rpc_edit_saves_composite_and_reloads() {
     let Some(node_modules) = sandbox_node_modules() else {
         return;

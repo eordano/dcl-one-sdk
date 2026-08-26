@@ -85,6 +85,7 @@ async fn wait_for_log_marker(log_path: &Path, marker: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs DCL_ONE_SDK_TEST_NODE_MODULES: type-checks a real scene through the preview server; see docs/testing.md"]
 async fn failed_initial_build_keeps_serving_and_recovers_on_fix() {
     let Some(node_modules) = sandbox_node_modules() else {
         return;

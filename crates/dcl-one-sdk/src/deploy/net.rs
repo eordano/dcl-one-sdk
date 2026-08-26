@@ -68,7 +68,7 @@ pub(super) async fn resolve_target_from(
         (None, Some(tc)) => Ok(tc.trim_end_matches('/').to_string()),
         (Some(t), None) => catalyst_content_url(t).await,
         (None, None) => {
-            if let Ok(t) = std::env::var("DCL_ONE_SDK_DEFAULT_TARGET") {
+            if let Some(t) = env_default_target() {
                 return default_env_target(&t).await;
             }
             if let Some(w) = world {
@@ -126,6 +126,17 @@ pub(super) fn url_path(base: &str) -> String {
         Some(i) => rest[i..].to_string(),
         None => String::new(),
     }
+}
+
+/// A blank `DCL_ONE_SDK_DEFAULT_TARGET` means "unset", not "deploy to the empty
+/// string": it sanitizes to a bare "https:", which no server answers. The
+/// landing page reads it the same way when it prints the deploy command, so
+/// both have to fall through to the world branch or the rotation together.
+pub fn env_default_target() -> Option<String> {
+    std::env::var("DCL_ONE_SDK_DEFAULT_TARGET")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 pub fn sanitize_catalyst_url(t: &str) -> String {
@@ -795,4 +806,49 @@ fn rejected(code: u16, body: &str, pointers: &[String]) -> anyhow::Error {
         u = u.why(body);
     }
     u.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn resolved(raw: &str, world: Option<&str>, headless: bool) -> Result<String> {
+        std::env::set_var("DCL_ONE_SDK_DEFAULT_TARGET", raw);
+        let out = resolve_target_from(None, None, world, headless, TargetConsent::default()).await;
+        std::env::remove_var("DCL_ONE_SDK_DEFAULT_TARGET");
+        out
+    }
+
+    /// A blank `DCL_ONE_SDK_DEFAULT_TARGET` used to sanitize to a bare
+    /// "https:" and be deployed to. The landing page already reads a blank
+    /// value as unset when it prints the deploy command, so every reader has
+    /// to fall through the same way or the printed command and the real
+    /// target disagree.
+    #[tokio::test]
+    async fn a_blank_default_target_env_is_unset_on_worlds_and_land() {
+        for raw in ["", "   "] {
+            let world = resolved(raw, Some("my.dcl.eth"), false).await;
+            let err = format!(
+                "{:#}",
+                world.expect_err("blank env must not become a target")
+            );
+            assert!(err.contains("needs an explicit server"), "{raw:?}: {err}");
+
+            let land = resolved(raw, None, true).await;
+            let err = format!(
+                "{:#}",
+                land.expect_err("blank env must not become a target")
+            );
+            assert!(err.contains("no deploy target given"), "{raw:?}: {err}");
+
+            std::env::set_var("DCL_ONE_SDK_DEFAULT_TARGET", raw);
+            let worlds_server = crate::world::resolve_target(None);
+            std::env::remove_var("DCL_ONE_SDK_DEFAULT_TARGET");
+            let err = format!(
+                "{:#}",
+                worlds_server.expect_err("blank env must not become a worlds server")
+            );
+            assert!(err.contains("no worlds server given"), "{raw:?}: {err}");
+        }
+    }
 }

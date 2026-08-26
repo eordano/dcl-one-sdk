@@ -1,9 +1,22 @@
+use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_dcl-one-sdk");
+
+/// Every child this file spawns is bounded by this.
+///
+/// Not a nicety: the product's own waits are user-scale, not test-scale.
+/// `deploy` without a key hands off to the browser linker and waits
+/// `DCL_ONE_SDK_LINKER_TIMEOUT_SECS`, which defaults to **600 seconds** — so one
+/// test that reaches that path by mistake turns this file into a twelve-minute
+/// CI outage that still ends green. `Command::output()` has no timeout at all,
+/// so nothing used to stop that. Now it fails in a minute, naming the argv that
+/// hung, which is a bug report instead of an outage.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(60);
 
 const SCENE_OK: &str =
     r#"{"main":"bin/index.js","runtimeVersion":"7","scene":{"parcels":["0,0"],"base":"0,0"}}"#;
@@ -51,7 +64,7 @@ impl Drop for Fixture {
     }
 }
 
-fn run(args: &[&str], envs: &[(&str, &str)]) -> Output {
+fn cli(args: &[&str], envs: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(BIN);
     cmd.args(args);
     for k in [
@@ -66,11 +79,184 @@ fn run(args: &[&str], envs: &[(&str, &str)]) -> Output {
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    cmd.output().unwrap()
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+/// A child's piped stream, drained by a thread so it is readable *while* the
+/// child is still running and can never fill its pipe and deadlock.
+struct Tail {
+    buf: Arc<Mutex<Vec<u8>>>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Tail {
+    fn spawn(mut src: impl Read + Send + 'static) -> Self {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buf);
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = src.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(&chunk[..n]);
+            }
+        });
+        Tail {
+            buf,
+            reader: Some(reader),
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.buf.lock().unwrap_or_else(PoisonError::into_inner))
+            .into_owned()
+    }
+
+    /// Everything, after the writer end is gone. Only valid once the child has
+    /// exited; before that use [`Tail::text`].
+    fn finish(&mut self) -> Vec<u8> {
+        if let Some(r) = self.reader.take() {
+            let _ = r.join();
+        }
+        self.buf
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+fn wait_bounded(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + limit;
+    let mut nap = Duration::from_millis(1);
+    loop {
+        match child.try_wait().expect("waiting on the CLI child") {
+            Some(status) => return Some(status),
+            None if Instant::now() >= deadline => return None,
+            None => {
+                std::thread::sleep(nap);
+                nap = (nap * 2).min(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// SIGTERM first, SIGKILL only as a backstop.
+///
+/// `start` tears its abgen sidecar down on SIGTERM
+/// (`asset_bundles::kill_sidecar_group`). A SIGKILLed preview server runs no
+/// such handler, and because the sidecar is spawned into its own process group
+/// it does not die with the parent either — so it is orphaned onto the
+/// developer's machine, holding a port and three quarters of the CPUs' worth of
+/// worker threads, once for every run of this file.
+fn terminate(child: &mut Child) -> ExitStatus {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    if let Some(status) = wait_bounded(child, Duration::from_secs(15)) {
+        return status;
+    }
+    let _ = child.kill();
+    child.wait().expect("reaping the CLI child")
+}
+
+fn run(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    run_with_limit(args, envs, CHILD_TIMEOUT)
+}
+
+fn run_with_limit(args: &[&str], envs: &[(&str, &str)], limit: Duration) -> Output {
+    let mut child = cli(args, envs).spawn().unwrap();
+    let mut out = Tail::spawn(child.stdout.take().unwrap());
+    let mut err = Tail::spawn(child.stderr.take().unwrap());
+    let Some(status) = wait_bounded(&mut child, limit) else {
+        let stderr = err.text();
+        let stdout = out.text();
+        terminate(&mut child);
+        panic!(
+            "`dcl-one-sdk {}` was still running after {limit:?} and was killed.\n\
+             A CLI error path must not wait on a user: check for a fall-through to the \
+             browser linker, whose default wait is {}s.\nstdout so far: {stdout}\n\
+             stderr so far: {stderr}",
+            args.join(" "),
+            dcl_one_sdk::linker::DEFAULT_TIMEOUT_SECS,
+        );
+    };
+    Output {
+        status,
+        stdout: out.finish(),
+        stderr: err.finish(),
+    }
 }
 
 fn stderr_of(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The bound on [`run`], exercised on the one CLI path that really does wait on
+/// a human: `deploy` with no key hands off to the browser linker and sits there
+/// for `DCL_ONE_SDK_LINKER_TIMEOUT_SECS`, default 600. A test that lands on that
+/// path by accident used to take the ten minutes and then pass, which is how a
+/// six-second file turns into a twelve-minute CI outage nobody can attribute.
+#[test]
+fn a_cli_run_that_waits_on_a_human_fails_the_test_instead_of_waiting_with_it() {
+    let f = Fixture::new("bound");
+    f.write("scene.json", SCENE_OK);
+    f.write("bin/index.js", "module.exports = {}\n");
+    let dir = f.dir_arg();
+    let args = [
+        "deploy",
+        "--dir",
+        &dir,
+        "--skip-build",
+        "--target-content",
+        "http://127.0.0.1:9",
+        "--no-browser",
+    ];
+    // Long enough that a `run` with no bound would sit here, short enough that
+    // this test still finishes if the bound is ever removed again.
+    let envs = [("DCL_ONE_SDK_LINKER_TIMEOUT_SECS", "25")];
+
+    let began = Instant::now();
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_with_limit(&args, &envs, Duration::from_secs(2))
+    }));
+    std::panic::set_hook(hook);
+    let elapsed = began.elapsed();
+
+    let panic = outcome.err().unwrap_or_else(|| {
+        panic!(
+            "run_with_limit waited out a child that hangs for 25s under a 2s bound \
+             and returned normally after {elapsed:?}: the bound is not being applied"
+        )
+    });
+    let message = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| "<non-string panic>".to_string());
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "the bound fired only after {elapsed:?}"
+    );
+    assert!(
+        message.contains("still running after"),
+        "the failure must say the child was killed, not just fail: {message}"
+    );
+    assert!(
+        message.contains("--target-content"),
+        "the failure must name the argv that hung: {message}"
+    );
+    assert!(
+        message.contains(&dcl_one_sdk::linker::DEFAULT_TIMEOUT_SECS.to_string()),
+        "the failure must point at the product default that causes this: {message}"
+    );
 }
 
 fn assert_contract(out: &Output, tmp: &Path, what_contains: &str) {
@@ -466,44 +652,119 @@ fn g23_tunnel_url_invalid() {
     assert_verbose_chain(&args, &[]);
 }
 
+/// pids of every abgen running out of `root`, which is one preview server's
+/// private TMPDIR — so the answer is that server's sidecars and nobody else's.
+#[cfg(unix)]
+fn sidecars_under(root: &Path) -> Vec<i32> {
+    let needle = root.to_string_lossy().into_owned();
+    let out = Command::new("ps")
+        .args(["-Ao", "pid=,command="])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains(&needle) && l.contains("abgen"))
+        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+        .collect()
+}
+
 #[test]
 fn g24_tunnel_unreachable_warns_and_keeps_serving() {
     let f = Fixture::new("g24");
     f.write("scene.json", SCENE_OK);
+    // Its own TMPDIR. Two reasons: the preview server inflates its embedded
+    // abgen there, so the copy is guaranteed cold and this test exercises the
+    // slow start rather than depending on a warm machine; and the sidecar is
+    // then identifiable by path, which is what lets the orphan assertion below
+    // tell this run's sidecar from every other one on the box.
+    let tmpdir = f.path().join("tmp");
+    std::fs::create_dir_all(&tmpdir).unwrap();
     let dir = f.dir_arg();
-    let mut cmd = Command::new(BIN);
-    cmd.args([
-        "start",
-        "--dir",
-        &dir,
-        "--port",
-        "0",
-        "--skip-build",
-        "--no-watch",
-        "--tunnel",
-        "ws://127.0.0.1:9",
-    ]);
-    for k in [
-        "DCL_PRIVATE_KEY",
-        "RUST_LOG",
-        "NO_COLOR",
-        "DCL_ONE_SDK_DEFAULT_TARGET",
-        "DCL_ONE_SDK_LINKER_TIMEOUT_SECS",
-    ] {
-        cmd.env_remove(k);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut cmd = cli(
+        &[
+            "start",
+            "--dir",
+            &dir,
+            "--port",
+            "0",
+            "--skip-build",
+            "--no-watch",
+            "--tunnel",
+            "ws://127.0.0.1:9",
+        ],
+        &[],
+    );
+    cmd.env("TMPDIR", &tmpdir);
     let mut child = cmd.spawn().unwrap();
-    std::thread::sleep(Duration::from_secs(6));
+    let mut out = Tail::spawn(child.stdout.take().unwrap());
+    let mut err = Tail::spawn(child.stderr.take().unwrap());
+
+    // Poll for the warning; do not sleep a fixed interval and hope.
+    //
+    // The tunnel warning is printed after the join block, which is printed
+    // after the abgen sidecar reports ready, which on a cold machine is behind
+    // a 36 MB inflate out of the binary — 6.9s when this was written. The
+    // fixed 6s sleep this replaces therefore failed outright on any machine
+    // that had not already unpacked this exact build's sidecar, and passed only
+    // because CI happened to be warm.
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    while !err.text().contains("warning: tunnel connection failed") {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the preview server must keep serving while the tunnel retries; it exited\n\
+             stdout: {}\nstderr: {}",
+            out.text(),
+            err.text()
+        );
+        assert!(
+            Instant::now() < deadline,
+            "no tunnel warning within {CHILD_TIMEOUT:?}\nstdout: {}\nstderr: {}",
+            out.text(),
+            err.text()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(
         child.try_wait().unwrap().is_none(),
         "the preview server must keep serving while the tunnel retries"
     );
-    child.kill().unwrap();
-    let out = child.wait_with_output().unwrap();
-    let err = stderr_of(&out);
+
+    #[cfg(unix)]
+    let sidecars = {
+        let pids = sidecars_under(&tmpdir);
+        assert!(
+            !pids.is_empty(),
+            "no abgen sidecar under {}: the orphan check below would assert nothing. \
+             If `start` legitimately stopped spawning one, delete this block on purpose.\n\
+             stdout: {}",
+            tmpdir.display(),
+            out.text()
+        );
+        pids
+    };
+
+    terminate(&mut child);
+    let err = String::from_utf8_lossy(&err.finish()).into_owned();
+    let _ = out.finish();
+
+    // The sidecar must die with the server it belongs to. It is spawned into
+    // its own process group, so nothing in the OS does this for us: `start`
+    // has to do it on the way out, and if it stops, every preview a developer
+    // or a CI job ever ran stays resident.
+    #[cfg(unix)]
+    {
+        let gone = Instant::now() + Duration::from_secs(20);
+        while !sidecars_under(&tmpdir).is_empty() {
+            assert!(
+                Instant::now() < gone,
+                "abgen {:?} outlived the preview server it belongs to (still {:?} after SIGTERM)",
+                sidecars,
+                sidecars_under(&tmpdir)
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     assert!(
         err.contains("warning: tunnel connection failed"),
         "stderr: {err}"
@@ -710,17 +971,19 @@ fn g32_dir_does_not_exist() {
     assert_verbose_chain(&args, &[]);
 }
 
-fn provisioned_scene() -> PathBuf {
-    PathBuf::from(
-        std::env::var("DCL_ONE_SDK_TEST_SCENE")
-            .expect("set DCL_ONE_SDK_TEST_SCENE to a scene checkout with node_modules installed"),
-    )
+/// The scene checkout t2/t6 borrow a real `node_modules` from. Goes through the
+/// testgate rather than `expect`, so `--include-ignored` without the variable
+/// fails naming the variable and pointing at the opt-out, instead of unwrapping.
+fn provisioned_scene() -> Option<PathBuf> {
+    catalyrst_testgate::require_env("DCL_ONE_SDK_TEST_SCENE").map(PathBuf::from)
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs DCL_ONE_SDK_TEST_SCENE: an installed scene checkout to borrow node_modules from, so the real compiler runs; see docs/testing.md"]
 fn t2_syntax_error_renders_code_frame() {
-    let src = provisioned_scene();
+    let Some(src) = provisioned_scene() else {
+        return;
+    };
     let f = Fixture::new("t2");
     f.write("scene.json", SCENE_OK);
     f.write("tsconfig.json", TSCONFIG);
@@ -738,9 +1001,11 @@ fn t2_syntax_error_renders_code_frame() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs DCL_ONE_SDK_TEST_SCENE: an installed scene checkout to borrow node_modules from, so the real compiler runs; see docs/testing.md"]
 fn t6_type_error_framing_and_skip_tip() {
-    let src = provisioned_scene();
+    let Some(src) = provisioned_scene() else {
+        return;
+    };
     let f = Fixture::new("t6");
     f.write("scene.json", SCENE_OK);
     f.write("tsconfig.json", TSCONFIG);

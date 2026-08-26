@@ -1,4 +1,6 @@
 mod content_cache;
+mod deploy_page;
+mod edit;
 mod editor;
 mod http;
 mod landing;
@@ -78,7 +80,13 @@ pub struct StartOptions {
     /// no second reachable address.
     pub local_ab: bool,
     pub mcp: bool,
-    pub mcp_port: Option<u16>,
+    /// Let a non-loopback peer press Deploy. Off by default: the publish
+    /// button signs with the wallet of the machine hosting the preview, and
+    /// the port is otherwise unauthenticated.
+    pub allow_remote_deploy: bool,
+    /// Already defaulted by the caller, so the deep link and the log reader
+    /// cannot disagree about which port the client opened.
+    pub mcp_port: u16,
     /// How much of the developer's source to quote around a scene error.
     pub source_context: SourceContext,
     /// Raw tokens after a standalone `--`, forwarded into the desktop deep
@@ -119,12 +127,14 @@ impl Default for SourceContext {
 }
 
 struct AppState {
-    projects: Vec<Project>,
+    /// Behind a lock because the landing page's editors rewrite scene.json at
+    /// runtime: every reader takes a snapshot, and `set_scene_json` /
+    /// `refresh_scene_json` are the only writers.
+    projects: std::sync::RwLock<Vec<Project>>,
     machine: String,
     reload_tx: broadcast::Sender<ReloadFrame>,
     offline_comms: bool,
     port: u16,
-    base: (i64, i64),
     data_layer: Option<DataLayerState>,
     entity_cache: Mutex<HashMap<PathBuf, (Instant, Value)>>,
     /// The sidecar's own address, set once abgen reports ready. This is what
@@ -140,11 +150,88 @@ struct AppState {
     /// Pre-encoded `&key=value...` appended to every desktop deep link
     /// (local-ab/--mcp/--mcp-port and `--` passthrough params).
     deep_link_extra: String,
+    /// The ingredients of the line above, kept so the landing page can rebuild
+    /// it for a knob the visitor turns — the mcp pair on or off, extra params
+    /// typed into the page — instead of trying to edit the encoded string.
+    mcp: bool,
+    mcp_port: u16,
+    allow_remote_deploy: bool,
+    /// Publish as a dry run: build, pack and mint the entity id, then stop
+    /// before signing or uploading. Only the test suite sets it, and it exists
+    /// because every gate test works by BREAKING a gate — without this, a test
+    /// that neuters the token check falls through to a real deploy against a
+    /// real content server. The suite must not be one deleted line away from
+    /// publishing.
+    deploy_dry_run: bool,
+    explorer_params: Vec<String>,
     /// Ring buffer of the latest requests, shown on the landing page.
     recent_requests: Mutex<VecDeque<(String, u16, Instant)>>,
 }
 
-const RECENT_REQUESTS_CAP: usize = 32;
+impl AppState {
+    /// A snapshot, not a guard: no handler holds the lock across an await, and
+    /// the vec is a handful of small documents.
+    fn projects(&self) -> Vec<Project> {
+        self.projects
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn first_project(&self) -> Option<Project> {
+        self.projects
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first()
+            .cloned()
+    }
+
+    /// The first scene's base parcel, read live so a parcels edit moves every
+    /// link and page that names a position.
+    fn base(&self) -> (i64, i64) {
+        self.first_project()
+            .map(|p| joinblock::base_coords(&p.scene_json))
+            .unwrap_or((0, 0))
+    }
+
+    fn set_scene_json(&self, root: &std::path::Path, scene_json: Value) {
+        let mut projects = self
+            .projects
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(project) = projects.iter_mut().find(|p| p.root == root) {
+            project.scene_json = scene_json;
+        }
+    }
+
+    /// Re-read scene.json off disk, keeping the last good copy through a
+    /// mid-edit syntax error. Called on every watch batch, so a hand edit
+    /// reaches the landing page and the entity metadata like a page edit does.
+    fn refresh_scene_json(&self, root: &std::path::Path) {
+        if let Ok(bytes) = std::fs::read(root.join("scene.json")) {
+            if let Ok(scene_json) = serde_json::from_slice(&bytes) {
+                self.set_scene_json(root, scene_json);
+            }
+        }
+    }
+}
+
+/// The buffer is what bounds what is held; `RECENT_REQUESTS_SHOWN` bounds what
+/// is drawn. A few hundred short lines is nothing to hold and covers a whole
+/// scene load, which is the run someone opening the drawer reads it to
+/// understand.
+const RECENT_REQUESTS_CAP: usize = 200;
+
+/// How much of a request path the log keeps.
+///
+/// The path is a string a stranger chose — any LAN or tunnel peer can put one
+/// in this buffer just by asking for it — and `RECENT_REQUESTS_CAP` of them are
+/// held in memory and re-rendered into every page this server serves. Without a
+/// cap, one request with a 7000-character path is retained and echoed whole,
+/// and 200 of them are megabytes of attacker-chosen text on every render. A
+/// real path is a scene file; anything longer is not information the reader
+/// loses by having it cut.
+const MAX_LOGGED_PATH: usize = 120;
 
 const ENTITY_CACHE_TTL: Duration = Duration::from_millis(500);
 
@@ -183,12 +270,11 @@ pub async fn start(opts: StartOptions) -> Result<()> {
 
     let (reload_tx, _) = broadcast::channel::<ReloadFrame>(32);
     let state = Arc::new(AppState {
-        projects: workspace.projects.clone(),
+        projects: std::sync::RwLock::new(workspace.projects.clone()),
         machine: machine_id(),
         reload_tx: reload_tx.clone(),
         offline_comms: opts.offline_comms,
         port,
-        base: joinblock::base_coords(&first.scene_json),
         data_layer,
         entity_cache: Mutex::new(HashMap::new()),
         optimized_assets_url: std::sync::OnceLock::new(),
@@ -196,13 +282,22 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         deep_link_extra: joinblock::deep_link_extra(
             opts.local_ab,
             opts.mcp,
-            opts.mcp_port,
+            opts.mcp.then_some(opts.mcp_port),
             &opts.explorer_params,
         ),
+        mcp: opts.mcp,
+        mcp_port: opts.mcp_port,
+        allow_remote_deploy: opts.allow_remote_deploy,
+        deploy_dry_run: false,
+        explorer_params: opts.explorer_params.clone(),
         recent_requests: Mutex::new(VecDeque::new()),
     });
-    if let Some(mcp_port) = opts.mcp.then_some(opts.mcp_port).flatten() {
-        scene_logs::spawn(mcp_port, workspace.projects.clone(), opts.source_context);
+    match scene_log_port(opts.mcp, opts.mcp_port, port) {
+        Some(mcp_port) => {
+            scene_logs::spawn(mcp_port, workspace.projects.clone(), opts.source_context)
+        }
+        None if opts.mcp => ux::report_watch(&mcp_port_clash(port).into()),
+        None => {}
     }
 
     let comms_state = Arc::new(crate::comms::CommsState::default());
@@ -213,7 +308,107 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         prepare_single(&opts, first.clone(), &state, &reload_tx).await?
     };
 
-    let app = Router::new()
+    let app = build_router(state.clone(), comms_state);
+
+    let mut sidecar = if opts.ab_sidecar {
+        crate::asset_bundles::spawn_sidecar(port, &first.root)
+    } else {
+        None
+    };
+    let banner_state = state.clone();
+    let scene_count = workspace.projects.len();
+    let is_multi = workspace.is_multi();
+    let scene_json = first.scene_json.clone();
+    let mobile = opts.mobile;
+    let local_ab = opts.local_ab;
+    let tunnel_token = opts.tunnel_token.clone();
+    tokio::spawn(async move {
+        let optimized_assets_url = match sidecar.as_mut() {
+            Some(s) => {
+                if s.wait_ready().await {
+                    ux::note_arrow(format!(
+                        "Selected abgen backend: {} at {}",
+                        s.backend_label(),
+                        s.url
+                    ));
+                    let _ = banner_state.optimized_assets_url.set(s.url.clone());
+                    Some(s.url.clone())
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let ifaces = netinfo::enumerate();
+        let unreachable = probe_unreachable(&ifaces, port).await;
+        let block = JoinBlock {
+            title: joinblock::scene_title(&scene_json),
+            position: banner_state.base(),
+            port,
+            ifaces,
+            web_explorer: joinblock::web_explorer_base(),
+            qr: if mobile { QrMode::Print } else { QrMode::Hint },
+            unreachable,
+            tunnel_hint: trunk_url.is_none(),
+            editor: banner_state.data_layer.is_some(),
+            optimized_assets_url: banner_ab_url(local_ab, optimized_assets_url),
+            deep_link_extra: banner_state.deep_link_extra.clone(),
+            native_hud: true,
+            native_bin: joinblock::detect_native_bin(),
+        };
+        if is_multi {
+            ux::note(format!(
+                "workspace preview: {scene_count} scenes served in one realm"
+            ));
+        }
+        steps.done(block.heading());
+        if ux::verbose() {
+            println!("{}", block.body());
+        } else {
+            println!("{}", block.compact_body());
+        }
+        if let Some(trunk_url) = trunk_url {
+            let events = crate::tunnel::spawn(crate::tunnel::AgentConfig {
+                trunk_url,
+                token: tunnel_token,
+                local_port: port,
+            });
+            spawn_tunnel_printer(events, block.clone());
+        }
+        // From here the output is a watch session: events get a clock in the
+        // left gutter, and the address re-floats every hundred lines, because
+        // by the time anyone wants to open it on a phone this banner is a
+        // thousand lines up.
+        ux::set_session_note(session_note(port));
+    });
+    let result = tokio::select! {
+        r = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        ) => r.context("serving"),
+        _ = shutdown_signal() => Ok(()),
+    };
+    crate::asset_bundles::kill_sidecar_group();
+    result
+}
+
+/// The line the watch session re-floats: the address someone else on the
+/// network can actually reach, not the loopback one they cannot.
+fn session_note(port: u16) -> String {
+    let host = netinfo::share_ip(&netinfo::enumerate())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    format!("you are running the dcl-one-sdk at http://{host}:{port}")
+}
+
+/// Everything this server answers, in one place a test can drive.
+///
+/// Built here rather than inline in `start` so the routing table is reachable
+/// without a scene build, a watcher and a tunnel: a route registered but never
+/// fetched is a page whose disappearance no test can notice, and every page
+/// this server draws carries a header button pointing at `/deploy`.
+fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>) -> Router {
+    Router::new()
         .route("/", get(root))
         .route("/about", get(about))
         .route("/scenes", get(scenes))
@@ -244,76 +439,15 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .route("/inspector/{*path}", get(inspector_asset))
         .with_state(state.clone())
         .merge(crate::comms::routes(comms_state))
-        .layer(middleware::from_fn_with_state(state.clone(), access_log))
-        .layer(tower_http::cors::CorsLayer::permissive());
-
-    let mut sidecar = if opts.ab_sidecar {
-        crate::asset_bundles::spawn_sidecar(port, &first.root)
-    } else {
-        None
-    };
-    let banner_state = state.clone();
-    let scene_count = workspace.projects.len();
-    let is_multi = workspace.is_multi();
-    let scene_json = first.scene_json.clone();
-    let mobile = opts.mobile;
-    let local_ab = opts.local_ab;
-    let tunnel_token = opts.tunnel_token.clone();
-    tokio::spawn(async move {
-        let optimized_assets_url = match sidecar.as_mut() {
-            Some(s) => {
-                if s.wait_ready().await {
-                    ux::note_arrow(format!("Serving asset bundles (abgen JIT): {}", s.url));
-                    let _ = banner_state.optimized_assets_url.set(s.url.clone());
-                    Some(s.url.clone())
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
-        let ifaces = netinfo::enumerate();
-        let unreachable = probe_unreachable(&ifaces, port).await;
-        let block = JoinBlock {
-            title: joinblock::scene_title(&scene_json),
-            position: banner_state.base,
-            port,
-            ifaces,
-            web_explorer: joinblock::web_explorer_base(),
-            qr: if mobile { QrMode::Print } else { QrMode::Hint },
-            unreachable,
-            tunnel_hint: trunk_url.is_none(),
-            editor: banner_state.data_layer.is_some(),
-            optimized_assets_url: banner_ab_url(local_ab, optimized_assets_url),
-            deep_link_extra: banner_state.deep_link_extra.clone(),
-            native_hud: true,
-        };
-        if is_multi {
-            ux::note(format!(
-                "workspace preview: {scene_count} scenes served in one realm"
-            ));
-        }
-        steps.done(block.heading());
-        if ux::verbose() {
-            println!("{}", block.body());
-        } else {
-            println!("{}", block.compact_body());
-        }
-        if let Some(trunk_url) = trunk_url {
-            let events = crate::tunnel::spawn(crate::tunnel::AgentConfig {
-                trunk_url,
-                token: tunnel_token,
-                local_port: port,
-            });
-            spawn_tunnel_printer(events, block.clone());
-        }
-    });
-    let result = tokio::select! {
-        r = axum::serve(listener, app) => r.context("serving"),
-        _ = shutdown_signal() => Ok(()),
-    };
-    crate::asset_bundles::kill_sidecar_group();
-    result
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .merge(
+            Router::new()
+                .route("/deploy", get(deploy_page::route).post(deploy_page::start))
+                .route("/scene-json", post(edit::scene_json))
+                .route("/scene-thumbnail", post(edit::thumbnail))
+                .with_state(state.clone()),
+        )
+        .layer(middleware::from_fn_with_state(state, access_log))
 }
 
 /// The `optimized-assets-url` the join block should advertise, given whether the
@@ -330,6 +464,47 @@ fn banner_ab_url(local_ab: bool, sidecar_url: Option<String>) -> Option<String> 
         true => None,
         false => sidecar_url,
     }
+}
+
+/// Which port the scene-log poller should read, or `None` when it must not run
+/// at all.
+///
+/// The poller POSTs `127.0.0.1:{mcp_port}/unity-explorer-mcp` every 700ms. The
+/// default client port is 8123 and `--mcp` is on by default, so
+/// `start --port 8123` aims that loop at THIS server: every poll is a 404 this
+/// process serves itself, and with `RECENT_REQUESTS_CAP` at 200 the whole
+/// request log on the landing page turns into self-traffic within minutes.
+/// (The link would not work either — the client cannot bind a port this server
+/// is already holding.) So the poller is skipped and the clash is reported,
+/// rather than quietly drowning the one page that shows what real clients
+/// asked for.
+fn scene_log_port(mcp: bool, mcp_port: u16, server_port: u16) -> Option<u16> {
+    match mcp && mcp_port != server_port {
+        true => Some(mcp_port),
+        false => None,
+    }
+}
+
+/// What to print when the client's MCP port is this server's own port.
+fn mcp_port_clash(port: u16) -> UserError {
+    let other = port.saturating_add(1).max(1024);
+    UserError::new(
+        format!(
+            "scene errors will not print \u{2014} --mcp-port {port} is the port this preview bound"
+        ),
+        TrySteps::one(format!(
+            "dcl-one-sdk start --port {port} --mcp-port {other}"
+        ))
+        .and(format!(
+            "or move the preview instead \u{2014} dcl-one-sdk start --port {other}"
+        ))
+        .and("or turn the reader off \u{2014} dcl-one-sdk start --no-mcp"),
+    )
+    .why(format!(
+        "the reader would poll http://127.0.0.1:{port}/unity-explorer-mcp, which is this server: \
+         it would answer its own polls 404 several times a second and fill the landing page's \
+         request log with them, and the client cannot open that port while this server holds it"
+    ))
 }
 
 /// Resolves on SIGINT (ctrl-c) or, on unix, SIGTERM.
@@ -573,6 +748,19 @@ async fn retry_initial_build(
     }
 }
 
+/// Push the change to whatever clients are listening, and say so.
+///
+/// The line is not decoration. A model change sends a targeted `UpdateModel`
+/// frame naming one file, which reads as if only that asset is refetched — but
+/// the client does not act on the distinction: `LocalSceneDevelopmentController`
+/// routes BOTH `UpdateScene` and `UpdateModel` into `TryReloadSceneAsync`, over
+/// a `TODO` saying discriminating them is still to do. So an asset save reloads
+/// the whole scene, and the terminal should not imply otherwise.
+///
+/// `broadcast::Sender::send` reports how many receivers took the frame, which
+/// is the difference between "the scene reloaded" and "nothing was listening" —
+/// the case where a developer waits for a change that cannot arrive because no
+/// client is connected.
 fn notify_reload(
     root: &std::path::Path,
     scene: &str,
@@ -580,11 +768,26 @@ fn notify_reload(
     tx: &broadcast::Sender<ReloadFrame>,
     event: ReloadEvent,
 ) {
+    state.refresh_scene_json(root);
     lock_cache(state).remove(root);
+    let mut clients = 0;
     for frame in live_reload::reload_frames(root, scene, &state.machine, &event) {
-        let _ = tx.send(frame);
+        clients = tx.send(frame).unwrap_or(0);
     }
-    tracing::info!("scene update pushed");
+    match clients {
+        0 => ux::note_absent(reload_note(0)),
+        n => ux::note_arrow(reload_note(n)),
+    }
+    tracing::info!("scene update pushed to {clients} client(s)");
+}
+
+/// What the push actually achieved, in the words the reader needs.
+fn reload_note(clients: usize) -> String {
+    match clients {
+        0 => "no client connected".to_string(),
+        1 => "reload issued".to_string(),
+        n => format!("reload issued to {n} clients"),
+    }
 }
 
 async fn run_watch(
@@ -714,14 +917,36 @@ async fn access_log(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-")
         .to_string();
-    tracing::info!(target: "access", "{method} {path} {status} {len}");
+    let line = log_line(&method, &path);
+    tracing::info!(target: "access", "{line} {status} {len}");
+    record_request(&st, line, status);
+    resp
+}
+
+/// The one line the request log keeps for a request, cut to
+/// [`MAX_LOGGED_PATH`] on a char boundary so a multi-byte path is trimmed
+/// rather than split.
+fn log_line(method: &axum::http::Method, path: &str) -> String {
+    if path.len() <= MAX_LOGGED_PATH {
+        return format!("{method} {path}");
+    }
+    let mut cut = MAX_LOGGED_PATH;
+    while !path.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{method} {}\u{2026}", &path[..cut])
+}
+
+/// Push one line into the ring buffer, dropping the oldest past the cap. A
+/// poisoned lock loses the line rather than the request: nothing here is worth
+/// failing a response over.
+fn record_request(st: &AppState, line: String, status: u16) {
     if let Ok(mut recent) = st.recent_requests.lock() {
-        recent.push_back((format!("{method} {path}"), status, Instant::now()));
+        recent.push_back((line, status, Instant::now()));
         while recent.len() > RECENT_REQUESTS_CAP {
             recent.pop_front();
         }
     }
-    resp
 }
 
 fn forwarded_proto(headers: &HeaderMap) -> &'static str {
@@ -739,7 +964,9 @@ fn forwarded_prefix(headers: &HeaderMap) -> String {
         .get("x-forwarded-prefix")
         .and_then(|v| v.to_str().ok())
         .map(|p| p.trim().trim_end_matches('/'))
-        .filter(|p| p.starts_with('/'))
+        .filter(|p| {
+            p.starts_with('/') && !p.starts_with("//") && !p.contains(':') && !p.contains('\\')
+        })
         .map(str::to_string)
         .unwrap_or_default()
 }
@@ -863,17 +1090,21 @@ mod tests {
     fn state(projects: Vec<Project>) -> AppState {
         let (reload_tx, _) = broadcast::channel(4);
         AppState {
-            projects,
+            projects: std::sync::RwLock::new(projects),
             machine: "test-machine".to_string(),
             reload_tx,
             offline_comms: true,
             port: 0,
-            base: (0, 0),
             data_layer: None,
             entity_cache: Mutex::new(HashMap::new()),
             optimized_assets_url: std::sync::OnceLock::new(),
             local_ab: true,
             deep_link_extra: String::new(),
+            mcp: true,
+            mcp_port: crate::joinblock::DEFAULT_EXPLORER_MCP_PORT,
+            allow_remote_deploy: false,
+            deploy_dry_run: true,
+            explorer_params: Vec::new(),
             recent_requests: Mutex::new(VecDeque::new()),
         }
     }
@@ -997,18 +1228,21 @@ mod tests {
         assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/about");
     }
 
-    #[tokio::test]
-    async fn root_serves_a_landing_page_to_browsers() {
-        let tmp = Tmp::new("landing");
-        let a = member(&tmp, "scene-a", &["0,0"]);
-        let st = Arc::new(state(vec![a]));
-        let req = axum::extract::Request::builder()
-            .uri("/")
-            .header("host", "127.0.0.1:8000")
-            .header("accept", "text/html,application/xhtml+xml")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = root(State(st.clone()), req).await;
+    /// The landing page exactly as a browser receives it: through `root`, with
+    /// the headers and the query string a visitor would send. Tests that
+    /// rebuild the page's strings for themselves prove nothing about the page.
+    async fn landing_body(st: &Arc<AppState>, uri: &str, headers: &[(&str, &str)]) -> String {
+        let mut req = axum::extract::Request::builder()
+            .uri(uri)
+            .header("accept", "text/html,application/xhtml+xml");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = root(
+            State(st.clone()),
+            req.body(axum::body::Body::empty()).unwrap(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp
             .headers()
@@ -1020,12 +1254,119 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    /// `/deploy`'s posture is still no JavaScript at all: a script or an
+    /// inline handler added there sits beside a button that publishes.
+    fn assert_no_javascript(body: &str) {
+        let body = body.to_lowercase();
+        assert!(!body.contains("<script"), "no script element");
+        assert!(!body.contains("javascript:"), "no javascript: url");
+        let posts = body.matches(r#"method="post""#).count();
+        if posts > 0 {
+            assert_eq!(posts, 1, "one POST on this server, the publish button");
+            assert!(
+                body.contains(r#"name="token""#),
+                "a POST without the token would be forgeable cross-origin"
+            );
+            assert!(
+                body.contains(r#"name="fingerprint""#),
+                "a POST without the payload fingerprint could publish something \
+                 other than what the page showed"
+            );
+        }
+        assert_no_inline_handlers(&body);
+    }
+
+    /// The landing page ships exactly its own two scripts — the `#edit-data`
+    /// JSON blob and the inline editor — and nothing else executable: no third
+    /// script however hostile the input, nothing loaded from anywhere, no
+    /// `javascript:` url, no inline handler, and still no POSTing form.
+    fn assert_only_the_landing_scripts(body: &str) {
+        let lower = body.to_lowercase();
+        assert_eq!(
+            lower.matches("<script").count(),
+            2,
+            "the data blob and the editor script, nothing more"
+        );
+        assert!(body.contains(r#"<script type="application/json" id="edit-data">"#));
+        assert!(
+            !lower.contains("<script src"),
+            "no script loads from anywhere"
+        );
+        assert!(!lower.contains("javascript:"), "no javascript: url");
+        assert!(
+            !lower.contains(r#"method="post""#),
+            "the page's mutations are fetches to the gated routes, not forms"
+        );
+        assert_no_inline_handlers(&lower);
+    }
+
+    fn assert_no_inline_handlers(lower: &str) {
+        for (attr, _) in lower.match_indices(" on") {
+            let rest = &lower[attr + 3..];
+            let name_len = rest
+                .find(|c: char| !c.is_ascii_alphabetic())
+                .unwrap_or(rest.len());
+            assert!(
+                !(name_len > 0 && rest[name_len..].starts_with('=')),
+                "inline event handler: on{}",
+                &rest[..name_len]
+            );
+        }
+    }
+
+    /// A form on any page here must be a GET aimed back at the page that drew
+    /// it: a GET carries no side effect, so a page you happen to have open
+    /// still cannot make this server do anything, which is what the blanket
+    /// no-form rule used to buy. `action` is the whole expected attribute
+    /// value, so behind a proxy it has to carry the forwarded prefix.
+    fn assert_forms_are_gets(body: &str, action: &str, count: usize) {
+        for form in body.match_indices("<form").map(|(i, _)| &body[i..]) {
+            let tag = &form[..form.find('>').expect("unterminated <form")];
+            assert!(
+                tag.contains(r#"method="get""#),
+                "every form must be a GET: {tag}"
+            );
+            assert!(
+                tag.contains(&format!(r#"action="{action}""#)),
+                "a form may only target this page (expected {action}): {tag}"
+            );
+        }
+        assert_eq!(
+            body.matches("<form").count(),
+            count,
+            "the page draws exactly {count} form(s)"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_serves_a_landing_page_to_browsers() {
+        let tmp = Tmp::new("landing");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let st = Arc::new(state(vec![a]));
+        let body = landing_body(&st, "/", &[("host", "127.0.0.1:8000")]).await;
         assert!(body.contains("dcl-one-sdk"));
         assert!(body.contains("decentraland://realm=http%3A%2F%2F127.0.0.1%3A8000"));
-        assert!(body.contains(
+        assert_eq!(
+            body.matches(r#"id="launch""#).count(),
+            1,
+            "one launch button, for the selected target"
+        );
+        assert!(
+            !body.contains("https://decentraland.org/bevy-web/"),
+            "the web target is not the selected one"
+        );
+        let web = landing_body(&st, "/?where=web", &[("host", "127.0.0.1:8000")]).await;
+        assert!(web.contains(
             "https://decentraland.org/bevy-web/?preview=true&amp;realm=http://127.0.0.1:8000"
         ));
+        assert!(
+            !web.contains("decentraland://realm="),
+            "and then the desktop card is the one that is gone"
+        );
+        assert_eq!(web.matches(r#"id="launch""#).count(), 1);
 
         let must = |needle: &str| {
             body.find(needle)
@@ -1035,25 +1376,53 @@ mod tests {
             must(r#"class="scene""#) < must(r#"id="join""#),
             "the scene card comes before the join cards"
         );
-        let panel = must(r#"<div class="panel span-2">"#);
+        let panel = must(r#"<div class="panel"><div class="row row--map">"#);
         let next_panel = body[panel + 1..]
             .find(r#"<div class="panel"#)
             .map_or(body.len(), |i| i + panel + 1);
         assert!(
-            panel < must("<h3>parcels</h3>")
-                && must("<h3>parcels</h3>") < must("<h3>spawn points</h3>")
-                && must("<h3>spawn points</h3>") < next_panel,
+            panel < must("<h2>Parcels</h2>")
+                && must("<h2>Parcels</h2>") < must("<h2>Spawn points</h2>")
+                && must("<h2>Spawn points</h2>") < next_panel,
             "spawn points fold into the parcels panel"
         );
         assert!(
-            must(r#"id="deploy""#) > must("recent requests"),
-            "deploy is the last section"
+            must(r#"id="requests""#) > must(r#"id="join""#),
+            "the request log is the last section"
         );
-        assert!(body.contains("dcl-one-sdk deploy --dir "));
-        for page in ["/about", "/scenes", "/scene.json", "/preview-wearables"] {
+        assert!(
+            body.contains(r#"<a class="bar__cta" href="/deploy">Deploy</a>"#),
+            "the header carries the deploy button"
+        );
+        assert!(
+            body.contains(r#"<h1 class="scene__title" id="edit-title""#)
+                && !body.contains(r#"class="u-sr-only""#),
+            "the visible title is the h1, and it is the title editor: {body}"
+        );
+        assert!(
+            !body.contains(r#"id="deploy""#),
+            "and the landing page no longer carries a deploy section"
+        );
+        assert!(
+            !body.contains("--dir"),
+            "the page never names the scene path"
+        );
+        for page in [
+            "/about",
+            "/scenes",
+            "/scene.json",
+            "/preview-wearables",
+            "/deploy",
+        ] {
             assert!(body.contains(&format!(r#"href="{page}""#)), "{page} linked");
         }
-        assert!(!body.contains("<form"), "no form, so nothing to POST to");
+        assert_forms_are_gets(&body, "/", 1);
+        let form = body.find("<form").expect("the knob form");
+        let end = body[form..].find("</form>").expect("unterminated form") + form;
+        for knob in [r#"name="where""#, r#"name="mcp""#, r#"name="opt""#] {
+            let at = body.find(knob).unwrap_or_else(|| panic!("missing {knob}"));
+            assert!(at > form && at < end, "{knob} must ride inside the form");
+        }
         for gone in [
             "comms ws-room",
             "abgen ready",
@@ -1086,34 +1455,44 @@ mod tests {
             scene_json,
         };
         let st = Arc::new(state(vec![project]));
-        let req = axum::extract::Request::builder()
-            .uri("/")
-            .header("host", "127.0.0.1:8000")
-            .header("accept", "text/html")
-            .header("x-forwarded-proto", "https")
-            .header("x-forwarded-host", "tunnel.example")
-            .header("x-forwarded-prefix", "/t/abc123defg/")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = root(State(st), req).await;
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("https://tunnel.example/t/abc123defg"));
+        let fwd = [
+            ("host", "127.0.0.1:8000"),
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "tunnel.example"),
+            ("x-forwarded-prefix", "/t/abc123defg/"),
+        ];
+        let body = landing_body(&st, "/", &fwd).await;
         assert!(body.contains("https%3A%2F%2Ftunnel.example%2Ft%2Fabc123defg"));
-        assert!(!body.contains("<script>"));
+        assert!(!body.contains("a <script> title"));
         assert!(body.contains("a &lt;script&gt; title"));
+        let web = landing_body(&st, "/?where=web", &fwd).await;
+        assert!(web.contains("https://tunnel.example/t/abc123defg"));
+        assert!(!web.contains("a <script> title"));
+
+        assert!(
+            body.contains(r#"<a class="bar__cta" href="/t/abc123defg/deploy">Deploy</a>"#),
+            "the header button keeps the forwarded prefix"
+        );
+        assert_forms_are_gets(&body, "/t/abc123defg/", 1);
+        for page in ["/about", "/scenes", "/scene.json", "/deploy"] {
+            assert!(
+                body.contains(&format!(r#"href="/t/abc123defg{page}""#)),
+                "{page} keeps the forwarded prefix"
+            );
+        }
+        assert!(
+            !body.contains(r#"href="/deploy""#),
+            "and no link is left pointing at the unprefixed root"
+        );
     }
 
-    /// The landing page's module doc claims it carries no JavaScript, and the
-    /// design leans on it: every affordance is an `<a>`, a `<details>` or a
-    /// `:hover`. The nearest existing assertion is `!contains("<script>")` in
-    /// the escaping test above, which is about a scene TITLE and would pass
-    /// with `<script src=…>` or an `onclick=` on the page — so the claim needs
-    /// its own test or it is just a comment.
+    /// The landing page ships its editor script, and that is the whole
+    /// JavaScript budget: however hostile the query string, nothing else
+    /// executable may appear — not a third script, not a handler attribute,
+    /// not a `javascript:` href — because everything reflected into the page
+    /// is either allowlisted or escaped.
     #[tokio::test]
-    async fn the_landing_page_carries_no_javascript() {
+    async fn the_landing_page_ships_only_its_own_script() {
         let tmp = Tmp::new("landing-nojs");
         let root_dir = tmp.0.join("scene-x");
         std::fs::create_dir_all(root_dir.join("bin")).unwrap();
@@ -1132,31 +1511,559 @@ mod tests {
             scene_json,
         };
         let st = Arc::new(state(vec![project]));
-        let req = axum::extract::Request::builder()
-            .uri("/")
-            .header("host", "127.0.0.1:8000")
-            .header("accept", "text/html")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = root(State(st), req).await;
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap().to_lowercase();
-        assert!(!body.contains("<script"), "no script element");
-        assert!(!body.contains("javascript:"), "no javascript: url");
-        assert!(!body.contains("<form"), "no form element");
-        for (attr, _) in body.match_indices(" on") {
-            let rest = &body[attr + 3..];
-            let name_len = rest
-                .find(|c: char| !c.is_ascii_alphabetic())
-                .unwrap_or(rest.len());
+        let body = landing_body(&st, "/", &[("host", "127.0.0.1:8000")]).await;
+        assert_only_the_landing_scripts(&body);
+        assert_forms_are_gets(&body, "/", 1);
+
+        let hostile = concat!(
+            "/?spawn=%3Cscript%3Ealert%281%29%3C%2Fscript%3E",
+            "&opt=%22+onload%3Dalert%281%29",
+            "&where=%22%3E%3Cimg+src%3Dx+onerror%3Dalert%281%29%3E",
+            "&mcp=javascript%3Aalert%281%29",
+            "&args=--gatekeeper-url%3Dhttps%3A%2F%2Fevil.example",
+            "&%3Cscript%3E=%3Cscript%3E",
+        );
+        let poisoned = landing_body(&st, hostile, &[("host", "127.0.0.1:8000")]).await;
+        assert_only_the_landing_scripts(&poisoned);
+        assert_forms_are_gets(&poisoned, "/", 1);
+        for smuggled in ["alert(1)", "gatekeeper-url", "evil.example", "onerror"] {
             assert!(
-                !(name_len > 0 && rest[name_len..].starts_with('=')),
-                "inline event handler: on{}",
-                &rest[..name_len]
+                !poisoned.contains(smuggled),
+                "attacker-chosen {smuggled:?} reached the page"
             );
         }
+        assert!(poisoned.contains(r#"id="launch""#));
+        assert!(poisoned.contains(r#"name="spawn""#), "this scene names one");
+    }
+
+    /// The request log is the one part of this page built out of strings a
+    /// stranger chose: any LAN or tunnel peer puts one in the buffer just by
+    /// asking for it. Every `AppState` constructor here starts the buffer
+    /// empty, so until this test `id="requests"` was asserted present while
+    /// every row was the empty string and the `esc()` on the way in was never
+    /// once executed.
+    #[tokio::test]
+    async fn the_request_log_replays_a_hostile_path_escaped_and_newest_first() {
+        let tmp = Tmp::new("reqlog");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let st = Arc::new(state(vec![a]));
+        let method = axum::http::Method::GET;
+        record_request(&st, log_line(&method, "/<script>alert(1)</script>"), 404);
+        record_request(&st, log_line(&method, "/newest.glb"), 200);
+
+        let body = landing_body(&st, "/", &[("host", "127.0.0.1:8000")]).await;
+        assert!(
+            body.contains("GET /&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "the path is replayed escaped"
+        );
+        assert_only_the_landing_scripts(&body);
+        assert!(
+            body.find("/newest.glb").unwrap() < body.find("&lt;script&gt;").unwrap(),
+            "newest first, so the log reads as a tail of what just happened"
+        );
+        assert!(
+            body.contains(r#"<summary>Recent requests<span"#)
+                && body.contains(r#"class="sec__count">2</span>"#),
+            "the count is the buffer's, on the drawer that holds it: {body}"
+        );
+        assert!(
+            body.contains(r#"<b class="st st--warn">404</b>"#)
+                && body.contains(r#"<b class="st st--ok">200</b>"#),
+            "each row carries its own status tone"
+        );
+    }
+
+    /// The buffer bounds the section, so the eviction is the only thing
+    /// keeping a long-running preview's page from growing without limit.
+    #[test]
+    fn the_request_log_forgets_the_oldest_past_its_cap() {
+        let tmp = Tmp::new("reqcap");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let st = state(vec![a]);
+        let method = axum::http::Method::GET;
+        for i in 0..RECENT_REQUESTS_CAP + 5 {
+            record_request(&st, log_line(&method, &format!("/{i}.glb")), 200);
+        }
+        let recent = st.recent_requests.lock().unwrap();
+        assert_eq!(recent.len(), RECENT_REQUESTS_CAP);
+        assert_eq!(
+            recent.front().unwrap().0,
+            "GET /5.glb",
+            "the oldest five go"
+        );
+        assert_eq!(
+            recent.back().unwrap().0,
+            format!("GET /{}.glb", RECENT_REQUESTS_CAP + 4)
+        );
+    }
+
+    /// A path is attacker-chosen, unbounded, retained, and re-rendered into
+    /// every response. Cut it on the way in rather than on the way out, so the
+    /// unbounded version is never held at all.
+    #[test]
+    fn a_path_too_long_to_be_a_path_is_cut_before_it_is_kept() {
+        let method = axum::http::Method::GET;
+        assert_eq!(
+            log_line(&method, "/about"),
+            "GET /about",
+            "short paths whole"
+        );
+
+        let long = format!("/{}", "a".repeat(7000));
+        let line = log_line(&method, &long);
+        assert!(
+            line.len() < MAX_LOGGED_PATH + 8,
+            "a 7000-character path is not retained: kept {} bytes",
+            line.len()
+        );
+        assert!(line.starts_with("GET /aaa") && line.ends_with('\u{2026}'));
+
+        let wide = format!("/{}", "\u{2764}".repeat(2000));
+        let cut = log_line(&method, &wide);
+        assert!(cut.ends_with('\u{2026}'));
+        assert!(
+            cut.trim_start_matches("GET /")
+                .trim_end_matches('\u{2026}')
+                .chars()
+                .all(|c| c == '\u{2764}'),
+            "no replacement or split character: {cut}"
+        );
+    }
+
+    /// The whole app on a real socket, so a test can ask it the way a browser
+    /// does — through the routing table and the access-log layer, instead of
+    /// reaching past both to call one handler.
+    async fn serve(st: &Arc<AppState>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let app = build_router(st.clone(), Arc::new(crate::comms::CommsState::default()));
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        (addr, handle)
+    }
+
+    /// `/deploy` is registered in the router `start` builds, and every page
+    /// this server draws carries a header button pointing at it — but no test
+    /// ever fetched it, so deleting the route would have left the suite green
+    /// behind a button that 404s. Fetched here through the real router, not by
+    /// calling the handler, because the registration is the untested half.
+    /// The note has to distinguish a push that landed from one that went
+    /// nowhere: with no client attached, `broadcast::send` reports zero
+    /// receivers, and a developer staring at "reload issued" while nothing
+    /// moves is the exact confusion this line exists to prevent.
+    #[test]
+    fn the_reload_note_says_whether_anything_received_it() {
+        assert_eq!(reload_note(1), "reload issued");
+        assert_eq!(reload_note(3), "reload issued to 3 clients");
+        let none = reload_note(0);
+        assert!(none.contains("no client connected"), "{none}");
+        assert!(!none.contains("reload issued"), "{none}");
+    }
+
+    /// A model save is not a targeted refetch, whatever the frame implies:
+    /// the client routes UpdateModel and UpdateScene alike into
+    /// TryReloadSceneAsync. Both events must therefore report a reload, and
+    /// this pins the pair so a future "only the asset reloaded" claim has to
+    /// change a test rather than just the copy.
+    #[tokio::test]
+    async fn both_a_scene_and_a_model_change_report_a_reload() {
+        let tmp = Tmp::new("reloadnote");
+        let project = member(&tmp, "scene-a", &["0,0"]);
+        let root = project.root.clone();
+        let st = Arc::new(state(vec![project]));
+        let (tx, _keep) = broadcast::channel::<ReloadFrame>(8);
+        let mut rx = tx.subscribe();
+
+        for event in [
+            ReloadEvent::Scene,
+            ReloadEvent::Model {
+                path: root.join("assets/spiral.glb"),
+                removed: false,
+            },
+        ] {
+            notify_reload(&root, "scene-a", &st, &tx, event);
+            // Two frames per push: the SCENE_UPDATE text and the binary. Both
+            // reach a live subscriber, which is what makes the count non-zero.
+            assert!(rx.try_recv().is_ok(), "text frame");
+            assert!(rx.try_recv().is_ok(), "binary frame");
+        }
+    }
+
+    #[tokio::test]
+    async fn deploy_is_a_page_this_server_actually_serves() {
+        let tmp = Tmp::new("deployroute");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let scene_dir = a.root.display().to_string();
+        let st = Arc::new(state(vec![a]));
+        let (addr, server) = serve(&st).await;
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/deploy"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "the header button leads here");
+        assert!(resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        let body = resp.text().await.unwrap();
+        server.abort();
+        assert!(
+            body.contains("dcl-one-sdk deploy"),
+            "the page still prints the command, for anyone who wants to run it"
+        );
+        assert!(
+            body.contains(r#"method="post""#) && body.contains(r#"name="token""#),
+            "the publish button is live for a loopback caller"
+        );
+        assert_no_javascript(&body);
+        assert!(
+            !body.contains(&scene_dir) && !body.contains("deployroute"),
+            "the page never names the scene directory"
+        );
+    }
+
+    /// The publish gates, driven through the real router. Each of the three is
+    /// asserted by breaking it and watching the POST be refused — a deploy
+    /// that ran here would build and sign a scene, so these are the tests that
+    /// keep an unauthenticated port from being a publish button.
+    #[tokio::test]
+    async fn publishing_refuses_a_forged_or_stale_post() {
+        let tmp = Tmp::new("deploypost");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let st = Arc::new(state(vec![a]));
+        let (addr, server) = serve(&st).await;
+        let client = reqwest::Client::new();
+
+        let page = client
+            .get(format!("http://{addr}/deploy"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let field = |name: &str| {
+            let at = page
+                .find(&format!(r#"name="{name}" value=""#))
+                .unwrap_or_else(|| panic!("no {name} field on the page"));
+            let from = page[at..].find("value=\"").unwrap() + at + 7;
+            page[from..][..page[from..].find('"').unwrap()].to_string()
+        };
+        let token = field("token");
+        let print = field("fingerprint");
+        assert!(!token.is_empty() && !print.is_empty());
+
+        let poster = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let post = |form: Vec<(&'static str, String)>| {
+            let c = poster.clone();
+            async move {
+                c.post(format!("http://{addr}/deploy"))
+                    .form(&form)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            }
+        };
+
+        assert_eq!(
+            post(vec![
+                ("token", "not-the-token".to_string()),
+                ("fingerprint", print.clone()),
+            ])
+            .await,
+            403,
+            "a forged token must not start a deploy"
+        );
+
+        assert_eq!(
+            post(vec![
+                ("token", token.clone()),
+                ("fingerprint", "0000stale0000".to_string()),
+            ])
+            .await,
+            303,
+            "a stale fingerprint redirects rather than publishing"
+        );
+        let after = client
+            .get(format!("http://{addr}/deploy"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            after.contains("Nothing was published"),
+            "and it says so: {after:.400}"
+        );
+        server.abort();
+    }
+
+    /// The editors' write path end to end, through the real router: a
+    /// same-origin POST from loopback rewrites scene.json on disk, and every
+    /// read surface — the landing page, `/scene.json`, `/about`'s parcel list
+    /// — serves the edit at once, because the state behind them was updated
+    /// too, not just the file.
+    #[tokio::test]
+    async fn a_scene_edit_reaches_disk_state_and_every_page() {
+        let tmp = Tmp::new("editflow");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let root = a.root.clone();
+        let st = Arc::new(state(vec![a]));
+        let (addr, server) = serve(&st).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/scene-json"))
+            .json(&json!({
+                "title": "Renamed Stage",
+                "description": "Now with a description.",
+                "tags": ["events", "theatre"],
+                "parcels": ["0,0", "1,0"],
+            }))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let echoed: Value = resp.json().await.unwrap();
+        assert_eq!(status, 200, "{echoed}");
+        assert_eq!(echoed["display"]["title"], json!("Renamed Stage"));
+
+        let disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("scene.json")).unwrap())
+                .unwrap();
+        assert_eq!(disk["display"]["title"], json!("Renamed Stage"));
+        assert_eq!(disk["scene"]["parcels"], json!(["0,0", "1,0"]));
+        assert_eq!(
+            disk["main"],
+            json!("bin/index.js"),
+            "untouched keys survive"
+        );
+
+        let page = client
+            .get(format!("http://{addr}/"))
+            .header("accept", "text/html")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("Renamed Stage"));
+        assert!(page.contains("2 parcels"));
+        assert!(page.contains("events"));
+
+        let served: Value = client
+            .get(format!("http://{addr}/scene.json"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(served["display"]["title"], json!("Renamed Stage"));
+
+        let about: Value = client
+            .get(format!("http://{addr}/about"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            about["configurations"]["localSceneParcels"],
+            json!(["0,0", "1,0"]),
+            "the realm advertises the new layout"
+        );
+        server.abort();
+    }
+
+    /// Every way a stranger's page could aim a POST at the editor, refused
+    /// before it touches disk: a cross-origin `Origin`, a cross-site
+    /// `Sec-Fetch-Site`, a tunnel replay, and a body field the page never
+    /// drew an editor for.
+    #[tokio::test]
+    async fn a_forged_scene_edit_never_touches_disk() {
+        let tmp = Tmp::new("editforge");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let root = a.root.clone();
+        let before = std::fs::read_to_string(root.join("scene.json")).unwrap();
+        let st = Arc::new(state(vec![a]));
+        let (addr, server) = serve(&st).await;
+        let client = reqwest::Client::new();
+        let post = |headers: Vec<(&'static str, &'static str)>, body: Value| {
+            let client = client.clone();
+            let url = format!("http://{addr}/scene-json");
+            async move {
+                let mut req = client.post(url).json(&body);
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
+                req.send().await.unwrap().status().as_u16()
+            }
+        };
+
+        let title = json!({ "title": "Forged" });
+        assert_eq!(
+            post(vec![("origin", "https://evil.example")], title.clone()).await,
+            403,
+            "a cross-origin POST is refused"
+        );
+        assert_eq!(
+            post(vec![("sec-fetch-site", "cross-site")], title.clone()).await,
+            403
+        );
+        assert_eq!(
+            post(vec![(crate::tunnel::FORWARDED_HEADER, "1")], title.clone()).await,
+            403,
+            "a tunnel replay arrives on a loopback socket and is still refused"
+        );
+        assert_eq!(
+            post(vec![], json!({ "realm": "https://evil.example" })).await,
+            422,
+            "a field the page has no editor for is refused, not ignored"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("scene.json")).unwrap(),
+            before,
+            "nothing above touched the file"
+        );
+
+        let own: &'static str = format!("http://{addr}").leak();
+        assert_eq!(
+            post(vec![("origin", own)], title).await,
+            200,
+            "the page's own origin is the one that works"
+        );
+        server.abort();
+    }
+
+    /// The thumbnail route writes the image where scene.json will find it,
+    /// repoints `display.navmapThumbnail`, and refuses bytes that are not the
+    /// image type they claim.
+    #[tokio::test]
+    async fn a_thumbnail_upload_lands_in_the_scene_and_scene_json() {
+        let tmp = Tmp::new("editthumb");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let root = a.root.clone();
+        let st = Arc::new(state(vec![a]));
+        let (addr, server) = serve(&st).await;
+        let client = reqwest::Client::new();
+
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0u8; 24]);
+        let resp = client
+            .post(format!("http://{addr}/scene-thumbnail"))
+            .header("content-type", "image/png")
+            .body(png.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let answer: Value = resp.json().await.unwrap();
+        assert_eq!(answer["navmapThumbnail"], json!("scene-thumbnail.png"));
+        assert_eq!(
+            std::fs::read(root.join("scene-thumbnail.png")).unwrap(),
+            png
+        );
+        let disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("scene.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            disk["display"]["navmapThumbnail"],
+            json!("scene-thumbnail.png")
+        );
+
+        let forged = client
+            .post(format!("http://{addr}/scene-thumbnail"))
+            .header("content-type", "image/png")
+            .body(b"GIF89a not a png".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            forged.status().as_u16(),
+            415,
+            "the magic bytes decide, not the header"
+        );
+        server.abort();
+    }
+
+    /// `access_log` is a layer, so every test that calls a handler directly
+    /// walks straight past it. Drive the real server and look at what it
+    /// retained: the buffer is unauthenticated, attacker-writable state that
+    /// every page re-renders.
+    #[tokio::test]
+    async fn the_access_log_keeps_one_bounded_line_per_request() {
+        let tmp = Tmp::new("accesslog");
+        let a = member(&tmp, "scene-a", &["0,0"]);
+        let st = Arc::new(state(vec![a]));
+        let (addr, server) = serve(&st).await;
+        let client = reqwest::Client::new();
+        let long = format!("/{}", "a".repeat(4000));
+        client.get(format!("http://{addr}{long}")).send().await.ok();
+        client.get(format!("http://{addr}/about")).send().await.ok();
+        server.abort();
+
+        let recent: Vec<(String, u16)> = st
+            .recent_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(line, status, _)| (line.clone(), *status))
+            .collect();
+        assert_eq!(recent.len(), 2, "one line per request: {recent:?}");
+        assert!(
+            recent[0].0.len() < MAX_LOGGED_PATH + 8,
+            "a 4000-character path must not be retained whole, kept {} bytes",
+            recent[0].0.len()
+        );
+        assert!(recent[0].0.ends_with('\u{2026}'), "{}", recent[0].0);
+        assert_eq!(recent[0].1, 404, "and the status it really got");
+        assert_eq!(recent[1], ("GET /about".to_string(), 200));
+    }
+
+    /// `--mcp` is on by default and its default port is 8123, so
+    /// `start --port 8123` aimed the scene-log poller at this very server: a
+    /// 404 POST to itself several times a second, which fills a 200-entry
+    /// request log in about seven minutes and buries every real client.
+    #[test]
+    fn the_scene_log_reader_never_polls_this_server() {
+        let mcp = crate::joinblock::DEFAULT_EXPLORER_MCP_PORT;
+        assert_eq!(
+            scene_log_port(true, mcp, 8000),
+            Some(mcp),
+            "the normal case"
+        );
+        assert_eq!(
+            scene_log_port(true, mcp, mcp),
+            None,
+            "start --port {mcp} must not start a poller aimed at itself"
+        );
+        assert_eq!(scene_log_port(false, mcp, 8000), None, "--no-mcp");
+        assert_eq!(scene_log_port(false, mcp, mcp), None);
+
+        let said = ux::render(&mcp_port_clash(mcp).into(), false, false);
+        assert!(said.contains(&format!("--mcp-port {mcp}")), "{said}");
+        assert!(said.contains("--mcp-port 8124"), "a way out: {said}");
+        assert!(said.contains("--no-mcp"), "and a way to silence it: {said}");
     }
 
     fn state_with_data_layer(public_dir: PathBuf) -> AppState {
@@ -1164,12 +2071,11 @@ mod tests {
         let (_tx, port_rx) = tokio::sync::watch::channel(1234u16);
         std::mem::forget(_tx);
         AppState {
-            projects: vec![],
+            projects: std::sync::RwLock::new(vec![]),
             machine: "test-machine".to_string(),
             reload_tx,
             offline_comms: true,
             port: 0,
-            base: (0, 0),
             data_layer: Some(DataLayerState {
                 port_rx,
                 public_dir: Some(public_dir),
@@ -1178,6 +2084,11 @@ mod tests {
             optimized_assets_url: std::sync::OnceLock::new(),
             local_ab: true,
             deep_link_extra: String::new(),
+            mcp: true,
+            mcp_port: crate::joinblock::DEFAULT_EXPLORER_MCP_PORT,
+            allow_remote_deploy: false,
+            deploy_dry_run: true,
+            explorer_params: Vec::new(),
             recent_requests: Mutex::new(VecDeque::new()),
         }
     }

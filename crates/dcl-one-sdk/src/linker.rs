@@ -111,6 +111,22 @@ async fn info(State(st): State<Arc<LinkerState>>) -> Json<Value> {
             },
         );
     }
+    // The deep link is what actually reaches the realm this deploy landed in.
+    // decentraland.org forwards `realm` only for realms it whitelists, so for
+    // anything self-hosted its play URL silently drops the realm and boots
+    // Genesis instead; it stays here as a labelled fallback, not the answer.
+    let realm_url = match &d.world {
+        Some(w) => catalyrst_types::world_realm_url(&d.target_content, w),
+        None => d
+            .target_content
+            .trim_end_matches('/')
+            .trim_end_matches("/content")
+            .to_string(),
+    };
+    let deep_link = catalyrst_types::realm_deep_link(
+        &realm_url,
+        catalyrst_types::parse_position(Some(&d.base_parcel)),
+    );
     let play_url = match &d.world {
         Some(w) => format!("https://decentraland.org/play/?realm={w}"),
         None => format!(
@@ -128,6 +144,8 @@ async fn info(State(st): State<Arc<LinkerState>>) -> Json<Value> {
         "timestamp": ts,
         "deletePayload": delete_payload,
         "multiScene": d.multi_scene,
+        "deepLink": deep_link,
+        "realmUrl": realm_url,
         "playUrl": play_url,
         "files": d.prepared.files.iter().map(|(f, h, b)| json!({"file": f, "hash": h, "size": b.len()})).collect::<Vec<_>>(),
     }))
@@ -440,7 +458,7 @@ $("go").onclick=async()=>{
     show("info","Uploading deployment to "+INFO.targetContent+" …");
     const r=await (await fetch("api/sign",{method:"POST",headers:{"content-type":"application/json"},
       body:JSON.stringify({address,signature,entityId:INFO.entityId,deleteSignature})})).json();
-    if(r.ok){show("ok","✓ "+r.message+"\n\nOpen: "+INFO.playUrl+"\n\nYou can close this tab; the command line has finished.");}
+    if(r.ok){show("ok","✓ "+r.message+"\n\nOpen: "+INFO.deepLink+"\n\nIf your browser will not open that link, paste it into the address bar. The decentraland.org page ("+INFO.playUrl+") only forwards realms it whitelists.\n\nYou can close this tab; the command line has finished.");}
     else if(r.fatal){show("err","✗ "+r.error+"\n\nThe command line exited with this error — fix it and re-run the deploy.");}
     else{show("err","✗ "+r.error);btn.disabled=false;}
   }catch(e){show("err","✗ "+(e&&e.message?e.message:e));btn.disabled=false;}

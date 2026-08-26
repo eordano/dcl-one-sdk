@@ -94,6 +94,7 @@ async fn wait_for_about(base: &str, client: &reqwest::Client) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs DCL_ONE_SDK_TEST_NODE_MODULES: builds two real workspace members; see docs/testing.md"]
 async fn two_member_workspace_builds_serves_and_reloads_per_member() {
     let Some(node_modules) = sandbox_node_modules() else {
         return;

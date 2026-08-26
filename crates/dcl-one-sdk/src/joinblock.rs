@@ -59,6 +59,27 @@ pub struct JoinBlock {
     /// Pre-encoded `&key=value...`, appended verbatim to every desktop link.
     pub deep_link_extra: String,
     pub native_hud: bool,
+    /// Native bevy client binary found on this machine (see
+    /// [`detect_native_bin`]); None prints the generic `bevy-explorer` name.
+    pub native_bin: Option<String>,
+}
+
+/// The native bevy client installed on this machine, if any: an explicit
+/// `DCL_ONE_NATIVE_BIN` wins, else `decentra-bevy` (the upstream bevy-explorer
+/// binary name) is looked up on PATH. Upstream rejects unknown flags, so the
+/// printed command must also drop the fork-only `--hud` for it — native_cmd
+/// keys that on the binary name.
+pub fn detect_native_bin() -> Option<String> {
+    if let Ok(explicit) = std::env::var("DCL_ONE_NATIVE_BIN") {
+        if !explicit.is_empty() {
+            return Some(explicit);
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("decentra-bevy"))
+        .find(|candidate| candidate.is_file())
+        .map(|_| "decentra-bevy".to_string())
 }
 
 fn form_encode(value: &str) -> String {
@@ -100,8 +121,19 @@ pub fn parse_passthrough_params(tokens: &[String]) -> Vec<(String, String)> {
     params
 }
 
+/// The port the Explorer's own MCP server picks when the deep link names none
+/// (`McpServerPlugin.DEFAULT_PORT`). Sending it explicitly costs nothing and
+/// means the preview polls the port the client actually opened, rather than
+/// both sides guessing the same constant independently.
+pub const DEFAULT_EXPLORER_MCP_PORT: u16 = 8123;
+
 /// Declared flags and core keys beat passthrough, as upstream's `params.has`
 /// merge; per-row keys (`multi-instance`) dedupe in `desktop_link_with`.
+///
+/// Both guards compare case-insensitively: the client reads the deep link with
+/// `HttpUtility.ParseQueryString`, whose keys are case-insensitive, so a
+/// passthrough `--REALM=…` would otherwise collide with our own `realm=` and be
+/// handed to the client as the comma-joined value of one key.
 pub fn deep_link_extra(
     local_ab: bool,
     mcp: bool,
@@ -126,7 +158,9 @@ pub fn deep_link_extra(
         params.push(("mcp-port".to_string(), port.to_string()));
     }
     for (key, value) in parse_passthrough_params(passthrough) {
-        if CORE_KEYS.contains(&key.as_str()) || params.iter().any(|(k, _)| *k == key) {
+        if CORE_KEYS.iter().any(|c| c.eq_ignore_ascii_case(&key))
+            || params.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key))
+        {
             continue;
         }
         params.push((key, value));
@@ -142,9 +176,34 @@ pub fn deep_link_extra(
 /// it at the realm's own same-origin `/world/…` mirror.
 pub const CONTROLLER_WORLD: &str = "basiccontroller.dcl.eth";
 
+/// Percent-encodes everything a query value must not carry raw (`&`, `=`, `?`,
+/// `#`, `%`, space, …) while leaving `:` `/` `,` `-` `.` `_` `~` alone, so the
+/// printed URL stays copy-pasteable. `form_encode` would escape the `://` of
+/// every realm and make these rows unreadable.
+fn query_value_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b':'
+            | b'/'
+            | b',' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 pub fn web_join_url(web_explorer: &str, realm: &str, position: (i64, i64)) -> String {
+    let encoded_realm = query_value_encode(realm);
     let base = format!(
-        "{web_explorer}/?preview=true&realm={realm}&position={},{}",
+        "{web_explorer}/?preview=true&realm={encoded_realm}&position={},{}",
         position.0, position.1
     );
     match crate::start::world_base_configured() {
@@ -167,9 +226,8 @@ pub fn desktop_deep_link(
         None => String::new(),
     };
     format!(
-        "decentraland://realm={}&position={}&local-scene=true&dclenv=org{ab}{extra}",
-        form_encode(realm),
-        form_encode(&format!("{},{}", position.0, position.1)),
+        "{}&local-scene=true&dclenv=org{ab}{extra}",
+        catalyrst_types::realm_deep_link(realm, position),
     )
 }
 
@@ -217,6 +275,9 @@ impl JoinBlock {
             out.push_str(&format!("  editor:   {realm}/inspector/\n"));
         }
         out.push_str(&format!("  desktop:  {}\n", self.desktop_link(&realm)));
+        if self.native_bin.is_some() {
+            out.push_str(&format!("  native:   {}\n", self.native_cmd(&realm)));
+        }
         if self.qr == QrMode::Print {
             if let Some(ip) = share_ip(&self.ifaces) {
                 let lan_realm = self.realm(ip);
@@ -265,9 +326,16 @@ impl JoinBlock {
     }
 
     fn native_cmd(&self, realm: &str) -> String {
-        let hud = if self.native_hud { " --hud" } else { "" };
+        let bin = self.native_bin.as_deref().unwrap_or("bevy-explorer");
+        // --hud is the fork's webkit-overlay flag; upstream decentra-bevy
+        // errors out on flags it does not know.
+        let hud = if self.native_hud && bin == "bevy-explorer" {
+            " --hud"
+        } else {
+            ""
+        };
         format!(
-            "bevy-explorer --server {realm} --location {},{} --preview{hud}",
+            "{bin} --server {realm} --location {},{} --preview{hud}",
             self.position.0, self.position.1
         )
     }
@@ -337,6 +405,7 @@ impl JoinBlock {
             "  desktop (2nd instance): {}\n",
             self.desktop_link_with(&realm, "&multi-instance=true")
         ));
+        out.push_str(&format!("  native:   {}\n", self.native_cmd(&realm)));
         out.push_str(
             "  note: an Explorer already running SWALLOWS the plain desktop link \u{2014} it comes\n        to the front still on its old realm. Quit it first, or use the 2nd-instance\n        link above.\n",
         );
@@ -503,6 +572,7 @@ mod tests {
             unreachable: Vec::new(),
             tunnel_hint: false,
             editor: false,
+            native_bin: None,
             optimized_assets_url: None,
             deep_link_extra: String::new(),
             native_hud: true,
@@ -842,6 +912,56 @@ mod tests {
             ],
         );
         assert_eq!(extra, "&mcp=true&custom=a+b");
+    }
+
+    /// The client parses the deep link with `HttpUtility.ParseQueryString`,
+    /// which is case-insensitive: a surviving `REALM=` would not sit beside our
+    /// `realm=`, it would merge into it as `ours,theirs`.
+    #[test]
+    fn deep_link_extra_case_does_not_bypass_the_core_or_declared_guards() {
+        let extra = deep_link_extra(
+            true,
+            true,
+            Some(8123),
+            &[
+                "--REALM=http://evil".to_string(),
+                "--Position=9,9".to_string(),
+                "--Local-Scene=false".to_string(),
+                "--DCLENV=zone".to_string(),
+                "--Optimized-Assets-Url=http://evil".to_string(),
+                "--MCP=false".to_string(),
+                "--MCP-PORT=1".to_string(),
+                "--Local-Ab=false".to_string(),
+                "--custom=ok".to_string(),
+                "--CUSTOM=twice".to_string(),
+            ],
+        );
+        assert_eq!(extra, "&local-ab=true&mcp=true&mcp-port=8123&custom=ok");
+    }
+
+    /// A realm reflected from a proxy header must not be able to open a second
+    /// query param in the web-explorer href.
+    #[test]
+    fn web_join_url_encodes_the_realm() {
+        let url = web_join_url(
+            "https://decentraland.org/bevy-web",
+            "https://evil.example/?realm=http://attacker&x=",
+            (52, -68),
+        );
+        assert_eq!(
+            url,
+            "https://decentraland.org/bevy-web/?preview=true&realm=https://evil.example/%3Frealm%3Dhttp://attacker%26x%3D&position=52,-68"
+        );
+        assert_eq!(url.matches("realm=").count(), 1);
+        assert_eq!(url.matches('&').count(), 2, "only preview/realm/position");
+        assert_eq!(
+            web_join_url(
+                "https://decentraland.org/bevy-web",
+                "http://10.1.2.20:5600",
+                (52, -68)
+            ),
+            "https://decentraland.org/bevy-web/?preview=true&realm=http://10.1.2.20:5600&position=52,-68"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ const FIXTURE_DIR_ENV: &str = "CATALYRST_HASHING_FIXTURES";
 fn fixture_root() -> std::path::PathBuf {
     let env = std::env::var(FIXTURE_DIR_ENV).unwrap_or_else(|_| {
         panic!(
-            "{} not set — point at a checkout of the upstream @dcl/hashing fixtures \
+            "{} not set \u{2014} point at a checkout of the upstream @dcl/hashing fixtures \
              (test/fixtures/hashes) before running these tests.",
             FIXTURE_DIR_ENV
         )

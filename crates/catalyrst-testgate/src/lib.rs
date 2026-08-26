@@ -91,9 +91,42 @@ pub fn pg_unusable<T>(var: &str, detail: &str) -> Option<T> {
     unavailable(&pg_requirement(var), detail)
 }
 
+/// The one line an operator gets in place of an assertion. It has to name the
+/// test, because the harness line right after it says `ok` and that is the only
+/// other thing on screen.
+pub fn skip_notice(test: &str, requirement: &str, detail: &str) -> String {
+    format!(
+        "SKIPPED {test}: {requirement} unavailable ({detail}); \
+         {OPT_OUT} is set, so this test asserted NOTHING and still reports ok\n"
+    )
+}
+
+/// Writes straight to the stderr *file descriptor*, bypassing the thread-local
+/// sink libtest installs.
+///
+/// `eprintln!` goes through `std::io::_eprint`, which libtest redirects into a
+/// per-test capture buffer and then DISCARDS for any test that passes. A skip
+/// passes by construction, so a skip notice printed with `eprintln!` is never
+/// seen: the operator gets `test x ... ok` and nothing else, which is exactly
+/// the "skip masquerading as a pass" this crate exists to prevent. Writing to
+/// fd 2 is not captured, so the notice survives the default `cargo test`.
+fn emit_uncaptured(msg: &str) {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+        // ManuallyDrop: this borrows fd 2, it must never close it.
+        let mut fd2 = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(2) });
+        if fd2.write_all(msg.as_bytes()).is_ok() {
+            return;
+        }
+    }
+    eprint!("{msg}");
+}
+
 fn record_skip(requirement: &str, detail: &str) {
     let test = current_test();
-    eprintln!("SKIPPED {test}: {requirement} unavailable ({detail}); {OPT_OUT} is set");
+    emit_uncaptured(&skip_notice(&test, requirement, detail));
     let Ok(path) = std::env::var(SKIP_LOG) else {
         return;
     };
@@ -107,7 +140,7 @@ fn record_skip(requirement: &str, detail: &str) {
         // format string into one syscall per fragment, so two tests skipping at the
         // same time interleave mid-record and both records are lost. libtest runs
         // tests in parallel by default, so that is the normal case, not the rare
-        // one — and the skiplog is the artifact that is supposed to be read
+        // one -- and the skiplog is the artifact that is supposed to be read
         // *instead of* the pass tally. A record that corrupts under load is worse
         // than no record, because the tally still says "ok".
         let line = format!("{test}\t{requirement}\t{detail}\n");
@@ -150,6 +183,19 @@ mod tests {
         let r = pg_requirement("CATALYRST_EXAMPLE_TEST_PG");
         assert!(r.contains("CATALYRST_EXAMPLE_TEST_PG"), "{r}");
         assert!(r.contains(SHARED_PG), "{r}");
+    }
+
+    #[test]
+    fn a_skip_notice_names_the_test_and_says_it_asserted_nothing() {
+        let n = skip_notice(
+            "drive_a_live_tunnel_origin",
+            "DCL1_TUNNEL_PUBLIC_URL",
+            "unset",
+        );
+        assert!(n.contains("drive_a_live_tunnel_origin"), "{n}");
+        assert!(n.contains("DCL1_TUNNEL_PUBLIC_URL"), "{n}");
+        assert!(n.contains("asserted NOTHING"), "{n}");
+        assert!(n.ends_with('\n'), "{n:?}");
     }
 
     #[test]

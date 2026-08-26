@@ -18,10 +18,10 @@ match upstream closely enough to drop into a supervisor that invokes the npm
 CLI, including flags this binary accepts and ignores. Where it deliberately
 differs: builds are in-process rather than shelling out to node, `main.crdt` is
 generated natively instead of through `@dcl/inspector`, the preview runs an
-asset-bundle sidecar upstream has no equivalent of, content hashes are
-content-addressed rather than path-derived, and scene runtime errors are pulled
-out of the running client and printed in your terminal. Each of those is called
-out below where it matters.
+asset-bundle sidecar upstream has no equivalent of, a preview content hash
+carries a digest of the file's bytes rather than being derived from its path
+alone, and scene runtime errors are pulled out of the running client and
+printed in your terminal. Each of those is called out below where it matters.
 
 ---
 
@@ -105,7 +105,7 @@ generating the loader stub.
 ```
 dcl-one-sdk start [--dir D] [-p|--port N] [--skip-build] [--no-watch]
                   [-m|--mobile] [--data-layer] [--offline-comms]
-                  [--no-asset-bundles] [--mcp --mcp-port N]
+                  [--no-asset-bundles] [--no-mcp] [--mcp-port N]
                   [--tunnel WSS_URL] [-- EXPLORER_PARAMS...]
 ```
 
@@ -117,24 +117,62 @@ supervisors that pass upstream's flags keep working.
 The banner prints the ways in: a `decentraland://` deep link for the desktop
 client, LAN addresses for another device on the network, a web-explorer URL,
 and with `-m` a QR code for a phone. Open `http://127.0.0.1:8000` in a browser
-and you get a page with all of them, the scene's parcels and spawn points, its
-permissions, a request log, the other routes this server exposes, and the
-`deploy` command for this scene.
+and you get one launch button with a column of knobs beside it, plus the
+scene's parcels and spawn points, its permissions, and the log of the requests
+this server has answered.
+
+The knobs are: **where** it opens (this machine, another device, the web
+explorer, a phone), whether the link asks the client to open its **MCP port**,
+which **spawn point** to land on, and checkboxes for the deep-link params worth
+having in a preview loop — `multi-instance` (a second client beside the first),
+`skip-auth-screen`, `landscape-terrain-enabled`, `hub`, `force-open-backpack`.
+There is no free-text field. The page builds the link only out of controls it
+drew: a query key it does not own, or a value it never offered, is dropped
+before the link exists, so the page cannot be made to produce a param the
+client would refuse anyway.
+
+That checkbox list is short on purpose. The client declares around ninety
+launch flags but accepts only sixteen from a deep link (`DeepLinkAllowlist.cs`):
+eight for any realm, and eight more only when the target realm is
+`Uri.IsLoopback`. A key in neither set is dropped for every realm, so a checkbox
+for one would promise a change the client silently discards. Of the sixteen,
+seven are set for you (`realm`, `position`, `local-scene`, `dclenv`, `local-ab`
+while the abgen sidecar runs, and the `mcp`/`mcp-port` pair the MCP knob turns
+off), six are the knobs above (the five checkboxes plus `spawnpoint`), and the
+last three — `community`, `signin`, `authRequestId` — are login and
+notification intents with no place in a preview.
+
+Loopback is not a given, because one of the targets is not: the LAN address
+another device dials is routable, so that client keeps only
+`force-open-backpack` and `spawnpoint` and drops the whole loopback tier —
+including `local-scene` and `local-ab`. The web and phone links read no
+deep-link params at all. The page
+shows this instead of hiding it: pick a target and the knobs its client would
+throw away go grey with the reason beside them, and they are left out of the
+link rather than sent and discarded.
+
+The page renders one launch card — the selected target — and one `GET` form
+back to itself holding every knob, so a change costs one request and no
+JavaScript. A knob the selected target cannot use keeps its value in a hidden
+field, so switching back finds it still set.
 
 **Asset bundles.** An abgen sidecar runs by default on 5147, converting models
 on demand so the client renders optimised assets instead of raw GLBs. Every
 deep link carries `local-ab=true`, which makes the client fetch
 `{realm}/optimized-assets` — proxied by this server to the sidecar. That is one
 port and one firewall approval instead of two, and a LAN or tunnel guest needs
-no second reachable address. `--no-asset-bundles` turns the sidecar off and
-stops forwarding the flag; the two move together, because forwarding it with no
-sidecar points the client at a route that answers 503. `--asset-bundles` is
+no second reachable address. What that guest does *not* get is the flag: like
+`local-scene`, `local-ab` is in the client's loopback-only tier, so a client
+launched at the LAN or tunnel realm drops it and renders raw GLBs however the
+sidecar is configured; the optimisation is real for the machine running the
+preview. `--no-asset-bundles` turns the sidecar off and stops forwarding the
+flag; the two move together, because forwarding it with no sidecar points the
+client at a route that answers 503. `--asset-bundles` is
 accepted for upstream parity and does nothing, since it now describes the
 default.
 
-**Scene errors in your terminal.** Run with `--mcp --mcp-port N` — both are
-required — and a scene that throws prints here instead of vanishing into the
-client's log:
+**Scene errors in your terminal.** On by default — a scene that throws prints
+here instead of vanishing into the client's log:
 
 ```
   ✘ scene error in src/index.ts:41
@@ -145,8 +183,18 @@ client's log:
    45 │   const shelf = buildShelf()
 ```
 
-Nothing is injected into your bundle. The client already collects its scene log
-and exposes it over the MCP server it runs when `--mcp` is set; this polls that.
+Nothing is injected into your bundle. The client already collects its scene
+log and exposes it over an MCP server, which the deep link asks it to start
+(`mcp=true&mcp-port=…`, the Explorer's own default port 8123); this polls that.
+`--no-mcp` turns both halves off together — the link stops asking for the port
+and nothing here reads it — and `--mcp-port N` moves it, within `1024-65535`.
+That range is the client's (`McpServerPlugin`): a port outside it makes the
+client fall back to 8123 while this side keeps polling the port you named, so
+it is refused at parse time rather than turned into silence. `mcp` is in the
+loopback-only tier, so this reaches the "this machine" link and not the LAN
+one. One more clash is refused rather than run: `--mcp-port` equal to the port
+this preview bound would aim the poller at this server, so the poller is
+skipped and the collision is printed with the three ways out of it.
 Frames resolve through the bundle's inline source map, so the quoted line comes
 out of the bundle rather than your source tree. Frames in generated code are
 dropped and library frames stay dim. `--error-source-lines-context N` (and
@@ -156,7 +204,18 @@ threw.
 **Live reload.** Saving a `.ts` rebuilds the scene chunk in a few milliseconds
 and tells the client to reload. Saving a `.glb` sends a message naming that one
 file. Content hashes include a digest of the file's bytes, so an edited asset
-gets a new hash and no cache — ours or the client's — can serve the old one.
+gets a new hash and the client refetches that one asset instead of dropping
+its whole cache.
+
+Only that half is content addressing, and the asymmetry is worth knowing
+before you build anything on these hashes. The digest names a version; it does
+not pin one. `/content/contents/{hash}` resolves on the path part of the hash
+and never compares the digest, so a URL carrying a superseded digest is
+answered `200` with the file's **current** bytes — not `404`, and not the bytes
+that digest named. The preview keeps no old versions, so there are no other
+bytes to serve, and failing the request would break a fetch that was already in
+flight when the watcher rewrote the file. If you need the exact bytes a hash
+was minted for, this server cannot give them to you.
 
 ---
 
@@ -202,6 +261,24 @@ browser: deploy starts a small page on a throwaway port, waits for your wallet,
 and shuts it down once the signature comes back. `DCL_PRIVATE_KEY` signs
 headlessly instead, for CI.
 
+While a preview is running, `/deploy` — the button in the page header — answers
+what this command would do before you run it: which target it would pick (your
+world's content server, your `DCL_ONE_SDK_DEFAULT_TARGET`, or with neither the
+public Genesis City rotation it would walk — the rotation, not a resolved
+address, because health is only known at deploy time), how many files and how
+many megabytes would go up, the largest of them, and which files `.dclignore` is
+keeping out (the ones from directories that are published, not the contents of
+`node_modules`). It also previews the three refusals `deploy` itself raises
+*after* the wallet has signed: a scene not built yet, a file over the 50 MB
+per-file limit, and two names a content server would read as one. It reads no
+file bytes — only the directory entries' sizes, memoised for half a second — so
+it costs milliseconds on a scene of any size, and it is a page rather than a
+button because a publish route on an unauthenticated port would be a publish
+button for anyone who can reach it. The entity id is not shown: it hashes a
+timestamp minted at deploy time, so any value here would be a different one.
+`--dry-run` prints an id, but it mints its own timestamp too — only
+`--timestamp` makes that id the one a real deploy would produce.
+
 Without a target it walks a rotation of public catalysts until one is healthy.
 A world scene needs an explicit `--target-content`, because publishing a world
 to a random Genesis City catalyst is not what you meant.
@@ -240,16 +317,37 @@ exporting one overrides it.
 set of them is pinned by tests — an error that loses its guidance fails the
 build rather than shipping.
 
-**Golden snapshots.** Eight fixture scenes are built and snapshotted into
-`testdata/golden/`: artifact sizes and hashes, the generated entrypoint, decoded
-`main.crdt` messages, deploy CIDs, and a runtime trace of per-frame CRDT
-traffic. Any change to the bundler, the entrypoint generator or the crdt
-encoder shows up as a reviewable diff. Regenerate with
-`scripts/update-goldens.sh`.
+**Running the tests.** `cargo test -p dcl-one-sdk` passes with nothing installed
+but a toolchain and `node`. node is not `#[ignore]`d away: the golden suite's
+runtime tier needs it, and so does `build`'s own type check, so a machine
+without it cannot use this tool at all and a red test is the honest answer. The
+suites that need a resource this repo cannot ship — an installed scene
+`node_modules`, a provisioned scene checkout, a live tunnel — are
+`#[ignore]`d with a reason, so the harness names what it did not run instead
+of counting it as a pass. `docs/testing.md` lists every variable that turns one
+on (`DCL_ONE_SDK_TEST_NODE_MODULES`, `DCL_ONE_SDK_TEST_SCENE`,
+`DCL1_TUNNEL_PUBLIC_URL`) and what `ALLOW_SKIPPED_INTEGRATION` costs you.
+
+**Golden snapshots.** Seven fixture scenes under `testdata/golden/` are built
+and snapshotted into eight goldens (`cube` twice, development and production):
+artifact sizes and hashes, the generated entrypoint, decoded `main.crdt`
+messages, deploy CIDs, and a runtime trace of per-frame CRDT traffic. Any
+change to the bundler, the entrypoint generator or the crdt encoder shows up as
+a reviewable diff. Regenerate with
+`UPDATE_GOLDEN=1 cargo test -p dcl-one-sdk --test golden`.
 
 **Security posture of the preview server.** It binds a local port and serves
 unauthenticated routes, so it is meant for your machine and your LAN, not the
 public internet without a tunnel you control. The landing page carries no
-JavaScript and no form: it cannot be made to mutate server state by a page you
-happen to have open. `/content/contents/{hash}` serves only files the scene
-actually publishes, so a `.dclignored` file cannot be read back out.
+JavaScript, and its one form is a `GET` back to itself: it cannot be made to
+mutate server state by a page you happen to have open. That form is
+allowlist-only in both directions — a query key the page does not own, and a
+value it never drew, are both ignored — so what it accepts reaches only the deep
+links the page draws, never the realm they point at: a core param (`realm`,
+`position`, …) keeps the value this server chose, and nothing a visitor sends is
+reflected back into the page at all. `/content/contents/{hash}` serves only
+files the scene actually publishes, so a `.dclignored` file cannot be read back
+out. That check
+is on the path the hash names, not on its digest: a hash grants access to a
+file, not to one version of it, and it keeps working until that file stops
+being published.

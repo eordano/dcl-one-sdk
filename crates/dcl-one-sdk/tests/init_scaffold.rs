@@ -201,6 +201,7 @@ fn init_creates_a_missing_target_directory() {
 }
 
 #[test]
+#[ignore = "needs DCL_ONE_SDK_TEST_SCENE: an installed scene checkout to borrow node_modules from; see docs/testing.md"]
 fn init_scene_is_immediately_buildable_with_provisioned_node_modules() {
     let Some(src) = catalyrst_testgate::require_env("DCL_ONE_SDK_TEST_SCENE") else {
         return;

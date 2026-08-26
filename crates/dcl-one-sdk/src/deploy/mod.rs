@@ -3,9 +3,9 @@ mod run;
 mod unpublish;
 
 pub use net::{
-    build_delete_payload, encode_segment, enforce_world_permission, jump_in_url, non_upstream_note,
-    sanitize_catalyst_url, scenes_on_other_parcels, send_world_delete, simple_auth_chain,
-    upload_entity, WorldScene,
+    build_delete_payload, encode_segment, enforce_world_permission, env_default_target,
+    jump_in_url, non_upstream_note, sanitize_catalyst_url, scenes_on_other_parcels,
+    send_world_delete, simple_auth_chain, upload_entity, WorldScene,
 };
 pub use run::{deploy, load_signer};
 pub use unpublish::{unpublish, UnpublishOptions};
@@ -16,7 +16,7 @@ use crate::ux::{TrySteps, UserError};
 use anyhow::{Context, Result};
 use catalyrst_hashing::hash_bytes_v1;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -145,7 +145,27 @@ fn build_matcher(root: &Path) -> Result<Gitignore> {
     b.build().context("building ignore matcher")
 }
 
-fn walk(dir: &Path, root: &Path, gi: &Gitignore, out: &mut Vec<String>) {
+/// `readdir` already answered this on every platform this ships to, so the
+/// stat behind `Path::is_dir` is only paid for the entries where `d_type` is
+/// genuinely unknown — and for symlinks, whose own type says nothing about
+/// what they point at (a symlinked directory has always been descended into).
+fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
+    match entry.file_type() {
+        Ok(ft) if !ft.is_symlink() => ft.is_dir(),
+        _ => path.is_dir(),
+    }
+}
+
+/// One walk, two lists: what a deploy would upload and what `.dclignore` kept
+/// out of it. They are produced together because they are the same decision
+/// read in both directions — a second, hand-inverted walk drifts the moment
+/// this one gains a rule, and silently reports a partition that is not one.
+///
+/// An ignored DIRECTORY is not descended into, so nothing under it lands in
+/// either list. Dot-entries are skipped outright: they are never publishable,
+/// so calling them "excluded by .dclignore" would report a decision nobody
+/// made.
+fn walk(dir: &Path, root: &Path, gi: &Gitignore, out: &mut Vec<String>, ignored: &mut Vec<String>) {
     let rd = match std::fs::read_dir(dir) {
         Ok(x) => x,
         Err(_) => return,
@@ -162,12 +182,16 @@ fn walk(dir: &Path, root: &Path, gi: &Gitignore, out: &mut Vec<String>) {
             Ok(r) => r.to_string_lossy().replace('\\', "/"),
             Err(_) => continue,
         };
-        if path.is_dir() {
-            if !gi.matched(&rel, true).is_ignore() {
-                dirs.push((name, path));
+        let is_dir = entry_is_dir(&entry, &path);
+        if gi.matched(&rel, is_dir).is_ignore() {
+            if !is_dir {
+                ignored.push(rel);
             }
-        } else if !gi.matched(&rel, false).is_ignore() {
-            files.push((name, rel));
+            continue;
+        }
+        match is_dir {
+            true => dirs.push((name, path)),
+            false => files.push((name, rel)),
         }
     }
     files.sort_by(|a, b| b.0.cmp(&a.0));
@@ -176,15 +200,127 @@ fn walk(dir: &Path, root: &Path, gi: &Gitignore, out: &mut Vec<String>) {
         out.push(rel);
     }
     for (_, path) in dirs {
-        walk(&path, root, gi, out);
+        walk(&path, root, gi, out, ignored);
     }
 }
 
 pub fn collect_publishable_files(root: &Path) -> Result<Vec<String>> {
+    Ok(collect_files(root)?.0)
+}
+
+/// The publishable files and the ignored ones, from a single walk.
+fn collect_files(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let gi = build_matcher(root)?;
+    let (mut out, mut ignored) = (Vec::new(), Vec::new());
+    walk(root, root, &gi, &mut out, &mut ignored);
+    Ok((out, ignored))
+}
+
+/// What a deploy would upload, answered without reading a byte of it.
+///
+/// [`prepare`] reads and hashes every file, which is the right thing when the
+/// bytes are about to be signed and sent, and the wrong thing for a page that
+/// renders on every refresh: a scene with a few hundred megabytes of GLBs
+/// would re-hash all of it. The walk and the `.dclignore` rules here are the
+/// same ones `prepare` uses, so the file list matches; only the sizes are
+/// taken from the directory entry instead.
+pub struct DeployPreview {
+    /// Publishable files, largest first. The size is `None` when the directory
+    /// entry could not be stat'd — see [`DeployPreview::unreadable`].
+    pub files: Vec<(String, Option<u64>)>,
+    /// The sum of the sizes that could be read. Files in `unreadable`
+    /// contribute nothing, because nothing about them is known.
+    pub total_bytes: u64,
+    /// Files `.dclignore` keeps out of the upload, from directories that are
+    /// themselves published. An ignored DIRECTORY is not descended into, so
+    /// this counts the texture somebody excluded by accident and not the
+    /// seventeen thousand files under node_modules — a number that is true,
+    /// useless, and alarming.
+    pub ignored: Vec<String>,
+    /// Files over the per-file limit, which `prepare` would refuse. Named here
+    /// so the answer arrives before the wallet prompt rather than after it.
+    pub oversize: Vec<String>,
+    /// Publishable files whose size could not be read — most often a dangling
+    /// symlink, which the walk sees as a non-directory and therefore publishes.
+    /// `prepare` reads every file, so these abort the deploy *after* the wallet
+    /// prompt: reporting them as 0 bytes would hide the exact failure this page
+    /// exists to move earlier.
+    pub unreadable: Vec<String>,
+    /// Whether the bundle `prepare` refuses to deploy without is in the walk.
+    pub main: MainBundle,
+    /// Pairs that differ only in case. A content server treats names
+    /// case-insensitively, so `prepare` refuses them.
+    pub collisions: Vec<(String, String)>,
+}
+
+/// The state of the one file a scene cannot be published without — the
+/// `prepare` refusal a real deploy hits most often, because "I have not run
+/// build yet" is the most common reason a deploy fails.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MainBundle {
+    /// Declared by scene.json and present in the payload.
+    Present(String),
+    /// Declared, but the walk did not find it: not built, or `.dclignore`
+    /// excludes it.
+    Missing(String),
+    /// scene.json's `"main"` is itself unusable; the string says why.
+    Unusable(String),
+}
+
+/// Names a content server would read as one file, paired with the name they
+/// collide with — the same refusal `prepare` raises, which is only actionable
+/// once you know which two files it means. Kept off the filesystem on purpose:
+/// the pair cannot even exist on a case-insensitive volume, where this would
+/// otherwise be untestable.
+fn case_collisions(rels: &[String]) -> Vec<(String, String)> {
+    let mut seen: HashMap<String, String> = HashMap::new();
     let mut out = Vec::new();
-    walk(root, root, &gi, &mut out);
-    Ok(out)
+    for rel in rels {
+        if let Some(first) = seen.insert(rel.to_lowercase(), rel.clone()) {
+            out.push((rel.clone(), first));
+        }
+    }
+    out
+}
+
+pub fn preview(project: &Project) -> Result<DeployPreview> {
+    let root = &project.root;
+    let (publishable, mut ignored) = collect_files(root)?;
+    ignored.sort();
+    let main = match project.main_output() {
+        Err(e) => MainBundle::Unusable(format!("{e}")),
+        Ok(main) => match publishable.iter().any(|r| r == &main) {
+            true => MainBundle::Present(main),
+            false => MainBundle::Missing(main),
+        },
+    };
+    let collisions = case_collisions(&publishable);
+    let mut files: Vec<(String, Option<u64>)> = publishable
+        .iter()
+        .map(|rel| (rel.clone(), std::fs::metadata(root.join(rel)).ok()))
+        .map(|(rel, meta)| (rel, meta.map(|m| m.len())))
+        .collect();
+    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let total_bytes = files.iter().filter_map(|(_, len)| *len).sum();
+    let oversize = files
+        .iter()
+        .filter(|(_, len)| len.is_some_and(|l| l > MAX_FILE_SIZE_BYTES as u64))
+        .map(|(rel, _)| rel.clone())
+        .collect();
+    let unreadable = files
+        .iter()
+        .filter(|(_, len)| len.is_none())
+        .map(|(rel, _)| rel.clone())
+        .collect();
+    Ok(DeployPreview {
+        ignored,
+        files,
+        total_bytes,
+        oversize,
+        unreadable,
+        main,
+        collisions,
+    })
 }
 
 pub struct Prepared {
@@ -332,7 +468,7 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
             return Err(UserError::new(
                 format!(
                     "{rel} is {}, over the 50 MB per-file limit",
-                    human_size(bytes.len())
+                    human_size(bytes.len() as u64)
                 ),
                 TrySteps::one("compress or split the asset (GLB textures are usually the culprit)")
                     .and("exclude it via .dclignore if it is not needed in-world"),
@@ -396,7 +532,7 @@ pub fn build_entity(p: &Prepared, timestamp: i64) -> Result<(String, Vec<u8>)> {
     Ok((entity_id, entity_bytes))
 }
 
-pub fn human_size(bytes: usize) -> String {
+pub fn human_size(bytes: u64) -> String {
     const MB: f64 = 1_000_000.0;
     if bytes as f64 >= MB {
         format!("{:.1} MB", bytes as f64 / MB)
@@ -465,6 +601,109 @@ mod tests {
             got2,
             vec!["top.png", "c/m.png", "b/z.png", "b/a.png", "b/inner/q.png"]
         );
+    }
+
+    /// Every non-dot file the walk reaches is in exactly one of the two lists.
+    /// The lists used to come from two walks — one written forwards and one by
+    /// hand backwards — with nothing holding them to the same tree, so a rule
+    /// added to one and not the other would have made the page quietly lie.
+    /// The check below is deliberately independent of `walk`: it enumerates
+    /// the tree with no rules at all and asks the matcher directly.
+    #[test]
+    fn one_walk_partitions_the_tree_into_published_and_ignored() {
+        let t = TempTree::new("partition");
+        for f in [
+            "scene.json",
+            "bin/index.js",
+            "bin/index.js.map",
+            "README.md",
+            "notes.md",
+            "src/game.ts",
+            "src/tex.png",
+            "assets/model.glb",
+            "assets/model.fbx",
+            "node_modules/pkg/a.js",
+            "node_modules/pkg/b.js",
+            "thumbnails/t.png",
+        ] {
+            t.write(f, "x");
+        }
+        t.write(".hidden/x.png", "x");
+
+        fn every_file(dir: &Path, root: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                match path.is_dir() {
+                    true => every_file(&path, root, out),
+                    false => out.push(rel),
+                }
+            }
+        }
+
+        let (published, ignored) = collect_files(&t.0).unwrap();
+        let gi = build_matcher(&t.0).unwrap();
+        let mut all = Vec::new();
+        every_file(&t.0, &t.0, &mut all);
+        let mut reachable: Vec<String> = all
+            .into_iter()
+            .filter(|rel| {
+                let parts: Vec<&str> = rel.split('/').collect();
+                !(1..parts.len()).any(|n| gi.matched(parts[..n].join("/"), true).is_ignore())
+            })
+            .collect();
+        let mut got: Vec<String> = published.iter().chain(ignored.iter()).cloned().collect();
+        got.sort();
+        reachable.sort();
+        assert_eq!(got, reachable, "the two lists are the whole tree");
+        assert!(
+            published.iter().all(|p| !ignored.contains(p)),
+            "and they do not overlap"
+        );
+        assert!(published.contains(&"assets/model.glb".to_string()));
+        assert!(ignored.contains(&"assets/model.fbx".to_string()));
+        assert!(
+            !got.iter().any(|r| r.starts_with("node_modules/")),
+            "an ignored directory is not descended into, in either direction"
+        );
+    }
+
+    /// `entry.file_type()` answers "directory?" from readdir, but it answers
+    /// it about the LINK, and a symlinked directory has always been walked
+    /// into. Deleting that fallback loses whole subtrees silently.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_still_walked_into() {
+        let t = TempTree::new("symdir");
+        t.write("scene.json", "{}");
+        t.write("real/tex.png", "x");
+        std::os::unix::fs::symlink(t.0.join("real"), t.0.join("linked")).unwrap();
+        let got = collect_publishable_files(&t.0).unwrap();
+        assert!(got.contains(&"linked/tex.png".to_string()), "{got:?}");
+        assert!(got.contains(&"real/tex.png".to_string()), "{got:?}");
+    }
+
+    /// A content server matches names case-insensitively, so these two are one
+    /// file to it and `prepare` refuses them. They cannot both exist on a
+    /// case-insensitive volume, which is why the check is over names.
+    #[test]
+    fn names_that_differ_only_in_case_are_paired_up() {
+        let rels = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            case_collisions(&rels(&["a/X.png", "b.js", "a/x.png", "a/x.PNG"])),
+            vec![
+                ("a/x.png".to_string(), "a/X.png".to_string()),
+                ("a/x.PNG".to_string(), "a/x.png".to_string()),
+            ]
+        );
+        assert!(case_collisions(&rels(&["a/x.png", "b/x.png"])).is_empty());
     }
 
     #[test]

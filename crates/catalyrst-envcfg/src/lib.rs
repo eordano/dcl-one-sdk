@@ -18,7 +18,7 @@ fn trimmed(key: &str) -> Option<String> {
 pub fn required_endpoint(key: &str) -> Result<String> {
     trimmed(key).ok_or_else(|| {
         anyhow!(
-            "missing required endpoint env var: {key} — set it explicitly. There is \
+            "missing required endpoint env var: {key} \u{2014} set it explicitly. There is \
              deliberately no default: every historical default for this variable was a \
              production Decentraland endpoint, and falling back to one would send live \
              traffic off this deployment."
@@ -32,8 +32,8 @@ pub fn local_endpoint(key: &str, port: u16) -> String {
     trimmed(key).unwrap_or_else(|| format!("http://127.0.0.1:{port}"))
 }
 
-/// Endpoints whose feature is simply switched off when no upstream is
-/// configured. Unset and empty both mean "disabled", never "use production".
+/// Endpoints whose feature is switched off when no upstream is configured.
+/// Unset and empty both mean "disabled", never "use production".
 pub fn optional_endpoint(key: &str) -> Option<String> {
     trimmed(key)
 }
@@ -134,7 +134,7 @@ pub fn handle_standard_args_with_version(
             eprintln!("{}: unexpected argument {:?}", service_name, other);
             eprintln!(
                 "{} takes no arguments besides --help/--version; all configuration is via \
-                 environment variables — run `{} --help` for the full list",
+                 environment variables \u{2014} run `{} --help` for the full list",
                 service_name, service_name
             );
             std::process::exit(2);
@@ -143,7 +143,7 @@ pub fn handle_standard_args_with_version(
 }
 
 fn print_help(service_name: &str, env_docs: &[(&str, &str)]) {
-    println!("{} — env-configured service", service_name);
+    println!("{} \u{2014} env-configured service", service_name);
     println!();
     println!("usage: {} [--help | --version]", service_name);
     println!();

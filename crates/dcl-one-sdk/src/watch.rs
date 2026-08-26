@@ -358,7 +358,7 @@ impl WatchSession {
                         Ok(_) => {}
                         Err(e) => ux::report_watch(&e),
                     }
-                    ux::note(format!(
+                    ux::note_clocked(format!(
                         "\u{21bb} rebuilt {} ({})",
                         ux::rel_to(&self.project.root, &self.es_opts.outfile),
                         ux::fmt_elapsed_tinted(started.elapsed(), ux::RESTORE_DIM)
@@ -387,7 +387,7 @@ fn watch_regen_error(e: anyhow::Error, what: &str) -> anyhow::Error {
 fn note_models(root: &Path, models: &[(PathBuf, bool)]) {
     for (model, removed) in models {
         let verb = if *removed { "removed" } else { "update" };
-        ux::note(format!("\u{21bb} model {verb} {}", ux::rel_to(root, model)));
+        ux::note_clocked(format!("\u{21bb} model {verb} {}", ux::rel_to(root, model)));
     }
 }
 
@@ -446,7 +446,7 @@ async fn refresh_sdk_chunk_cli(project: &Project, sp: &mut SplitState, composite
                 "sdk registry changed, rebuilt {}",
                 sp.sdk_opts.outfile.display()
             );
-            ux::note(format!(
+            ux::note_clocked(format!(
                 "\u{21bb} rebuilt {} (sdk registry changed)",
                 ux::rel_to(&project.root, &sp.sdk_opts.outfile)
             ));

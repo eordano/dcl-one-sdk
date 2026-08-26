@@ -109,6 +109,62 @@ pub struct Sidecar {
     pub url: String,
     pub bin: String,
     exited: tokio::sync::watch::Receiver<bool>,
+    gpu: std::sync::Arc<std::sync::Mutex<GpuQual>>,
+}
+
+/// What abgen's startup qualification chatter amounts to: which GPU backend
+/// qualified, if any. The banner prints this one word instead of the four
+/// stderr lines the qualification takes to say it (`gpu/mod.rs log_status` in
+/// abgen: the `qualified=true` line names the backend auto settled on, since
+/// auto returns on its first success).
+#[derive(Default)]
+struct GpuQual {
+    cuda: bool,
+    wgpu: bool,
+}
+
+impl GpuQual {
+    fn label(&self) -> &'static str {
+        if self.cuda {
+            "CUDA"
+        } else if self.wgpu {
+            "GPU"
+        } else {
+            "CPU"
+        }
+    }
+}
+
+/// The startup lines the one-word label replaces, parsed and withheld (they
+/// still print under --verbose). Only qualification-time chatter is absorbed:
+/// a mid-run "GPU init panicked" or a forced-GPU error still flows through
+/// [`looks_like_problem`].
+fn absorb_gpu_chatter(line: &str, qual: &std::sync::Mutex<GpuQual>) -> bool {
+    let line = line.trim_start();
+    if let Some(rest) = line.strip_prefix("abgen-gpu: qualification ") {
+        let mut backend = "";
+        let mut qualified = false;
+        for token in rest.split_whitespace() {
+            if let Some(v) = token.strip_prefix("backend=") {
+                backend = v;
+            }
+            if let Some(v) = token.strip_prefix("qualified=") {
+                qualified = v == "true";
+            }
+        }
+        if qualified {
+            let mut qual = qual.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match backend {
+                "cuda" => qual.cuda = true,
+                "wgpu" => qual.wgpu = true,
+                _ => {}
+            }
+        }
+        return true;
+    }
+    line.starts_with("abgen-gpu: wgpu adapter:")
+        || line.starts_with("abgen-gpu: macOS default is CPU")
+        || line.starts_with("warning: no GPU available")
 }
 
 /// pgid of the running sidecar (0 = none). kill_on_drop only fires on a clean
@@ -176,11 +232,22 @@ fn relay_output(
     stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     to_stderr: bool,
     project_root: PathBuf,
+    gpu: std::sync::Arc<std::sync::Mutex<GpuQual>>,
 ) {
     use tokio::io::AsyncBufReadExt;
     tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stream).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            if absorb_gpu_chatter(&line, &gpu) {
+                if crate::ux::verbose() {
+                    if to_stderr {
+                        eprintln!("{line}");
+                    } else {
+                        println!("{line}");
+                    }
+                }
+                continue;
+            }
             match rewrite_build_line(&line, &project_root) {
                 Some((msg, true)) => crate::ux::note_stderr(msg),
                 Some((msg, false)) => crate::ux::note(msg),
@@ -245,13 +312,14 @@ pub fn spawn_sidecar(preview_port: u16, project_root: &Path) -> Option<Sidecar> 
         .kill_on_drop(true)
         .spawn();
 
+    let gpu = std::sync::Arc::new(std::sync::Mutex::new(GpuQual::default()));
     match spawned {
         Ok(mut child) => {
             if let Some(out) = child.stdout.take() {
-                relay_output(out, false, project_root.to_path_buf());
+                relay_output(out, false, project_root.to_path_buf(), gpu.clone());
             }
             if let Some(err) = child.stderr.take() {
-                relay_output(err, true, project_root.to_path_buf());
+                relay_output(err, true, project_root.to_path_buf(), gpu.clone());
             }
             #[cfg(unix)]
             let pgid = child.id().map(|id| id as i32).unwrap_or(0);
@@ -269,7 +337,12 @@ pub fn spawn_sidecar(preview_port: u16, project_root: &Path) -> Option<Sidecar> 
                 );
                 let _ = tx.send(true);
             });
-            Some(Sidecar { url, bin, exited })
+            Some(Sidecar {
+                url,
+                bin,
+                exited,
+                gpu,
+            })
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             crate::ux::note_stderr(format!(
@@ -288,6 +361,16 @@ pub fn spawn_sidecar(preview_port: u16, project_root: &Path) -> Option<Sidecar> 
 }
 
 impl Sidecar {
+    /// The backend abgen settled on, as one word for the banner. Read after
+    /// [`Self::wait_ready`]: qualification runs during abgen's startup, so by
+    /// the time /readyz answers the chatter has been relayed and parsed.
+    pub fn backend_label(&self) -> &'static str {
+        self.gpu
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .label()
+    }
+
     pub async fn wait_ready(&mut self) -> bool {
         let ready_url = format!("{}/readyz", self.url);
         let client = match reqwest::Client::builder()
@@ -390,6 +473,49 @@ mod tests {
         assert_eq!(rewrite_build_line("plain log line", &root), None);
         assert_eq!(rewrite_build_line("ABGEN_BUILD not-json", &root), None);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The four startup lines the terminal used to carry fold into one word:
+    /// a `qualified=true` line names the backend abgen picked (auto stops at
+    /// its first success), and everything else means CPU. Runtime problems —
+    /// a mid-run GPU panic, a forced-GPU error — are not qualification
+    /// chatter and must keep flowing to the terminal.
+    #[test]
+    fn gpu_chatter_folds_into_one_backend_word() {
+        let qual = std::sync::Mutex::new(GpuQual::default());
+        for absorbed in [
+            "abgen-gpu: qualification backend=cuda qualified=false reason=init failed: gpu init: loading the CUDA driver library failed (no NVIDIA driver?)",
+            "abgen-gpu: qualification backend=wgpu qualified=false reason=init failed: no wgpu adapter",
+            "abgen-gpu: qualification backend=auto qualified=false reason=auto: cuda backend disabled: init failed",
+            "warning: no GPU available (auto: cuda backend disabled); continuing on CPU",
+            "abgen-gpu: wgpu adapter: NVIDIA T4 (Vulkan)",
+            "abgen-gpu: macOS default is CPU (integrated Metal is slower than the CPU for BC7); set ABGEN_GPU=1 or ABGEN_GPU_BACKEND=wgpu to force the GPU",
+        ] {
+            assert!(absorb_gpu_chatter(absorbed, &qual), "{absorbed}");
+        }
+        assert_eq!(qual.lock().unwrap().label(), "CPU");
+
+        assert!(absorb_gpu_chatter(
+            "abgen-gpu: qualification backend=wgpu qualified=true reason=-",
+            &qual
+        ));
+        assert_eq!(qual.lock().unwrap().label(), "GPU");
+        assert!(absorb_gpu_chatter(
+            "abgen-gpu: qualification backend=cuda qualified=true reason=-",
+            &qual
+        ));
+        assert_eq!(qual.lock().unwrap().label(), "CUDA", "cuda outranks wgpu");
+
+        for passes_through in [
+            "abgen-gpu: GPU init panicked; continuing on CPU",
+            "error: ABGEN_GPU set but no GPU available: no adapter",
+            "2026-08-26T00:00:00 INFO abgen: serving",
+        ] {
+            assert!(
+                !absorb_gpu_chatter(passes_through, &qual),
+                "{passes_through}"
+            );
+        }
     }
 
     #[test]

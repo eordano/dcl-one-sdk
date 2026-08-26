@@ -19,6 +19,37 @@ const RETRY: Duration = Duration::from_secs(2);
 
 const LIMIT: u32 = 100;
 
+/// Below any real sequence number, so the next poll asks for the whole buffer.
+const REPLAY_FROM_START: i64 = -1;
+
+/// What one poll's outcome means for the cursor.
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    /// First contact. Note where the buffer is and report nothing: a session
+    /// starting mid-run must not replay the client's whole history.
+    Anchor(i64),
+    /// The buffer went backwards, so this is a new client. Replay it whole,
+    /// and forget what was printed for the old one.
+    Restart,
+    /// Report what arrived and move on.
+    Advance(i64),
+    /// The poll failed. Change nothing: a client too busy to answer is exactly
+    /// the one about to restart, and only a kept cursor can then see `latest`
+    /// go backwards. Forgetting it would silently anchor past the errors.
+    Hold,
+}
+
+fn step(cursor: Option<i64>, latest: Result<i64, ()>) -> Step {
+    let Ok(latest) = latest else {
+        return Step::Hold;
+    };
+    match cursor {
+        Some(seq) if latest < seq => Step::Restart,
+        Some(_) => Step::Advance(latest),
+        None => Step::Anchor(latest),
+    }
+}
+
 pub fn spawn(mcp_port: u16, projects: Vec<Project>, context: SourceContext) {
     tokio::spawn(async move {
         let mut reader = Reader::new(mcp_port, projects, context);
@@ -31,8 +62,7 @@ struct Reader {
     client: reqwest::Client,
     projects: Vec<Project>,
     context: SourceContext,
-    /// `None` until the first poll, which only learns where the buffer is: a
-    /// session starting mid-run must not replay the client's whole history.
+    /// `None` only until the first successful poll; see [`Step`].
     cursor: Option<i64>,
     /// Message text -> times printed, so a throw on every frame says so once.
     seen: HashMap<String, u32>,
@@ -52,19 +82,21 @@ impl Reader {
 
     async fn run(&mut self) {
         loop {
-            match self.poll().await {
-                Ok(()) => tokio::time::sleep(POLL).await,
-                Err(()) => {
-                    self.cursor = None;
-                    tokio::time::sleep(RETRY).await;
-                }
-            }
+            let (latest, entries) = match self.poll().await {
+                Ok((latest, entries)) => (Ok(latest), entries),
+                Err(()) => (Err(()), Vec::new()),
+            };
+            let delay = match latest.is_ok() {
+                true => POLL,
+                false => RETRY,
+            };
+            self.apply(step(self.cursor, latest), entries);
+            tokio::time::sleep(delay).await;
         }
     }
 
-    async fn poll(&mut self) -> Result<(), ()> {
-        let since = self.cursor;
-        let args = match since {
+    async fn poll(&self) -> Result<(i64, Vec<Entry>), ()> {
+        let args = match self.cursor {
             None => serde_json::json!({ "limit": 1 }),
             Some(seq) => {
                 serde_json::json!({ "severity": "error", "sinceSeq": seq, "limit": LIMIT })
@@ -92,37 +124,37 @@ impl Reader {
             .and_then(|t| t.as_str())
             .ok_or(())?;
 
-        let (latest, entries) = parse(text);
-        if since.is_some_and(|seq| latest < seq) {
-            tracing::info!("client restarted; re-reading its scene log from the start");
-            self.seen.clear();
-            self.cursor = Some(-1);
-            return Ok(());
-        }
-        match since {
-            None => {
+        Ok(parse(text))
+    }
+
+    fn apply(&mut self, step: Step, entries: Vec<Entry>) {
+        match step {
+            Step::Hold => {}
+            Step::Restart => {
+                tracing::info!("client restarted; re-reading its scene log from the start");
+                self.seen.clear();
+                self.cursor = Some(REPLAY_FROM_START);
+            }
+            Step::Anchor(latest) => {
                 self.cursor = Some(latest);
                 if latest > 0 {
                     tracing::info!("reading scene errors from the client (seq {latest})");
                 }
             }
-            Some(_) => {
+            Step::Advance(latest) => {
                 for entry in entries {
                     self.report(&entry);
                 }
                 self.cursor = Some(latest);
             }
         }
-        Ok(())
     }
 
     fn report(&mut self, entry: &Entry) {
         let Some(message) = entry.scene_js_message() else {
             return;
         };
-        let count = self.seen.entry(message.to_string()).or_insert(0);
-        *count += 1;
-        if *count > 1 {
+        if !self.first_sighting(message) {
             return;
         }
         let frames: Vec<Frame> = entry
@@ -130,7 +162,18 @@ impl Reader {
             .filter_map(|raw| self.resolve(raw))
             .take(6)
             .collect();
-        crate::ux::scene_error(message, &entry.at, &frames);
+        let kind = match (entry.origin(), entry.is_warning()) {
+            (Origin::Thrown, _) => crate::ux::SceneNote::Thrown,
+            (Origin::Logged, false) => crate::ux::SceneNote::LoggedError,
+            (Origin::Logged, true) => crate::ux::SceneNote::LoggedWarning,
+        };
+        crate::ux::scene_note(kind, message, &entry.at, &frames);
+    }
+
+    fn first_sighting(&mut self, message: &str) -> bool {
+        let count = self.seen.entry(message.to_string()).or_insert(0);
+        *count += 1;
+        *count == 1
     }
 
     /// Map `dcl-one:///bin/scene.js:3685:12` back to the developer's own file.
@@ -165,6 +208,23 @@ struct Entry {
     body: String,
 }
 
+/// What the client actually recorded. The scene log carries both, under the
+/// same `SceneError:` prefix, and they are not the same event: a throw nobody
+/// caught is a broken scene, while a `console.error` is the scene talking.
+///
+/// The client's own WebSocket shim is the case that forced this apart — it
+/// `console.error`s and THEN throws (`WebSocketApi.js:152-154`), so a scene
+/// that correctly wraps `close()` in try/catch still gets the text logged.
+/// Printing that as an uncaught error blames the line that handled it, which
+/// is worse than saying nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The message arrived with the error's own stack, so an `Error` unwound.
+    Thrown,
+    /// Text with only the host's call-site trace: `console.error`/`warn`.
+    Logged,
+}
+
 impl Entry {
     /// The message, if this entry came from the scene's JavaScript. The
     /// `SceneError:` prefix the runtime adds is the only `ReportCategory
@@ -181,6 +241,27 @@ impl Entry {
         };
         let headline = message.split("\n    at ").next().unwrap_or(message);
         Some(headline.trim())
+    }
+
+    /// `SceneWarning:` is the scene's own `console.warn`; there is no thrown
+    /// form of it, and it must never wear the shape of a crash.
+    fn is_warning(&self) -> bool {
+        self.body.starts_with("SceneWarning:")
+    }
+
+    /// An `Error` that unwound carries its own `at` frames ahead of the host's
+    /// `stackTrace:`; a logged string has nothing before it. This is the same
+    /// split [`Entry::frames`] already relies on to decide which trace to read,
+    /// named so the printer can use it too.
+    fn origin(&self) -> Origin {
+        let head = match self.body.split_once(" stackTrace:") {
+            Some((head, _)) => head,
+            None => &self.body,
+        };
+        match head.contains("\n    at ") {
+            true => Origin::Thrown,
+            false => Origin::Logged,
+        }
     }
 
     /// Frames from the error's own stack if it carried one, else the host's.
@@ -361,6 +442,49 @@ mod tests {
         assert_eq!(entries[0].frames().count(), 2);
     }
 
+    /// The line that forced this apart, verbatim from a real preview: the
+    /// client's WebSocket shim console.errors and then throws, so a scene that
+    /// wraps close() in try/catch still gets the text logged. It must not
+    /// print as a crash in the line that handled it.
+    #[test]
+    fn a_console_error_is_not_a_thrown_error() {
+        let logged = "latestSeq=2 returned=1\n\
+#1 [02:58:44] [Error] SceneError: WebSocket state is 3, cannot close stackTrace:     at close (dcl-one:///bin/sdk-runtime.js:900:9)\n\
+    at eval (dcl-one:///bin/scene.js:1200:7)\n";
+        let (_, entries) = parse(logged);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].origin(), Origin::Logged);
+        assert!(!entries[0].is_warning());
+        assert_eq!(
+            entries[0].scene_js_message(),
+            Some("WebSocket state is 3, cannot close")
+        );
+        assert_eq!(entries[0].frames().count(), 2);
+    }
+
+    /// An Error that unwound carries its own stack ahead of the host's
+    /// stackTrace:, which is the whole discriminator.
+    #[test]
+    fn an_unwound_error_keeps_its_own_stack_and_reads_as_thrown() {
+        let thrown = "latestSeq=1 returned=1\n\
+#1 [03:00:00] [Error] SceneError: TypeError: x is not a function\n    at main (dcl-one:///bin/scene.js:10:3) stackTrace:     at report (dcl-one:///bin/sdk-runtime.js:1:1)\n";
+        let (_, entries) = parse(thrown);
+        assert_eq!(entries[0].origin(), Origin::Thrown);
+        assert_eq!(
+            entries[0].scene_js_message(),
+            Some("TypeError: x is not a function")
+        );
+    }
+
+    #[test]
+    fn a_scene_warning_is_never_a_crash() {
+        let warned = "latestSeq=1 returned=1\n\
+#1 [03:00:00] [Warning] SceneWarning: deprecated thing stackTrace:     at eval (dcl-one:///bin/scene.js:5:1)\n";
+        let (_, entries) = parse(warned);
+        assert!(entries[0].is_warning());
+        assert_eq!(entries[0].origin(), Origin::Logged);
+    }
+
     #[test]
     fn only_scene_javascript_is_reported() {
         let (_, entries) = parse(SAMPLE);
@@ -384,6 +508,49 @@ mod tests {
         assert_eq!(
             parse_frame("at HostDelegate.<anonymous> (<anonymous>)"),
             None
+        );
+    }
+
+    const BOOM: &str = "TypeError: cannot read x of undefined";
+
+    fn reader() -> Reader {
+        Reader::new(0, Vec::new(), SourceContext::default())
+    }
+
+    #[test]
+    fn a_fresh_session_skips_the_history_it_arrived_to() {
+        assert_eq!(step(None, Ok(40)), Step::Anchor(40));
+        let mut reader = reader();
+        reader.apply(step(reader.cursor, Ok(40)), Vec::new());
+        assert_eq!(reader.cursor, Some(40));
+    }
+
+    #[test]
+    fn a_failed_poll_keeps_the_cursor() {
+        assert_eq!(step(Some(41), Err(())), Step::Hold);
+        let mut reader = reader();
+        reader.cursor = Some(41);
+        reader.apply(step(reader.cursor, Err(())), Vec::new());
+        assert_eq!(reader.cursor, Some(41));
+    }
+
+    #[test]
+    fn a_client_that_died_mid_poll_still_replays_when_it_comes_back() {
+        let mut reader = reader();
+        reader.apply(step(reader.cursor, Ok(40)), Vec::new());
+        assert!(reader.first_sighting(BOOM));
+        reader.apply(step(reader.cursor, Ok(41)), Vec::new());
+        assert!(!reader.first_sighting(BOOM));
+
+        for _ in 0..5 {
+            reader.apply(step(reader.cursor, Err(())), Vec::new());
+        }
+
+        reader.apply(step(reader.cursor, Ok(3)), Vec::new());
+        assert_eq!(reader.cursor, Some(REPLAY_FROM_START));
+        assert!(
+            reader.first_sighting(BOOM),
+            "the same error on the relaunched client must print again"
         );
     }
 

@@ -10,8 +10,10 @@ loop, same `UPDATE_*` regeneration habit.
   only. No `node_modules`, no `bin/`.
 * Goldens: `crates/dcl-one-sdk/testdata/golden/<fixture>.<mode>.golden`, LF-only.
 * Runtime harness: `crates/dcl-one-sdk/scripts/golden-runtime.mjs`.
-* Regenerate: `scripts/update-goldens.sh` (workspace root), or
-  `UPDATE_GOLDEN=1 cargo test -p dcl-one-sdk --test golden`.
+* Regenerate: `UPDATE_GOLDEN=1 cargo test -p dcl-one-sdk --test golden`. (In the
+  upstream source tree `scripts/update-goldens.sh` at the workspace root wraps
+  exactly that and prints the diffstat; that wrapper lives outside this crate
+  and is not part of the published tree.)
 
 Cost: ~1.2 s for all eight, offline. `init --node-modules-only` extracts the
 vendored blob once per test binary (~75 ms); each fixture then gets a private
@@ -153,5 +155,8 @@ the golden proves the generator ran rather than echoing a checked-in file — an
    `tsconfig.json`, `src/index.ts` and whatever assets it needs. Keep it small:
    a golden suite that adds megabytes to the repo is a failed port.
 2. Add a `Fixture::new("<name>")` test to `tests/golden.rs`.
-3. `scripts/update-goldens.sh` and **read the diff**.
-4. Raise the `dcl-one-sdk golden` floor in `tests-manifest.tsv`.
+3. `UPDATE_GOLDEN=1 cargo test -p dcl-one-sdk --test golden` and **read the
+   diff**.
+4. Raise the `dcl-one-sdk golden` floor in `tests-manifest.tsv` (the upstream
+   workspace root; like `update-goldens.sh` it is not part of the published
+   tree, so this step is for contributors working in the source checkout).

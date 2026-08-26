@@ -1,3 +1,4 @@
+pub mod deep_link;
 pub mod deploy_form;
 pub mod deployment;
 pub mod duration_fmt;
@@ -15,6 +16,8 @@ pub use entity::{
     EntityId, EntityType, EntityVersion, EthAddress, Pagination, Pointer, StatusProbeResult,
     Timestamp, PROFILE_DURATION_MS,
 };
+
+pub use deep_link::{parse_position, realm_deep_link, world_realm_url};
 
 pub use deployment::{
     AuditInfo, AuthChain, AuthLink, AuthLinkType, Deployment, DeploymentBase, DeploymentContent,

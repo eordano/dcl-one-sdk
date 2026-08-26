@@ -18,7 +18,12 @@
 //!   some of those: numbers coerce (NaN → 0 for ints, NaN for floats), booleans
 //!   and optionals read as falsy, everything else throws
 //! - int32/entity/enum-int go through ECMAScript ToInt32 (wrap, not saturate);
-//!   int64 goes through `BigInt()`, which rejects a fractional value
+//!   int64 goes through `BigInt()`, which reads a string exactly and throws
+//!   where `Number` would have produced NaN
+//! - no leaf checks the type it is handed, so an ill-typed value is a silent
+//!   coercion rather than an error: a number on a string leaf writes the empty
+//!   string (`@protobufjs/utf8` walks `.length`), and a string on an array leaf
+//!   serializes as its characters (a string is iterable)
 use crate::jsjson::JsValue;
 use serde_json::Value;
 
@@ -277,15 +282,26 @@ pub fn encode(
                 encode(sub, obj.and_then(|o| o.get(key)), out)?;
             }
         }
-        Schema::Array(items) => {
-            let arr = value.and_then(Value::as_array).ok_or_else(|| {
-                SchemaError::Invalid(format!("expected an array, got {}", describe(value)))
-            })?;
-            out.extend_from_slice(&(arr.len() as u32).to_le_bytes());
-            for item in arr {
-                encode(items, Some(item), out)?;
+        Schema::Array(items) => match value {
+            Some(Value::Array(arr)) => {
+                out.extend_from_slice(&(arr.len() as u32).to_le_bytes());
+                for item in arr {
+                    encode(items, Some(item), out)?;
+                }
             }
-        }
+            Some(Value::String(s)) => {
+                out.extend_from_slice(&(s.encode_utf16().count() as u32).to_le_bytes());
+                for ch in s.chars() {
+                    encode(items, Some(&Value::String(ch.to_string())), out)?;
+                }
+            }
+            other => {
+                return Err(SchemaError::Invalid(format!(
+                    "expected an array, got {}",
+                    describe(other)
+                )))
+            }
+        },
         Schema::Optional(inner) => {
             if truthy(value) {
                 out.push(1);
@@ -308,13 +324,7 @@ pub fn encode(
             out.push((idx + 1) as u8);
             encode(&specs[idx].1, obj.get("value"), out)?;
         }
-        Schema::Str | Schema::EnumStr(_) => {
-            let s = value.and_then(Value::as_str).ok_or_else(|| {
-                SchemaError::Invalid(format!("expected a string, got {}", describe(value)))
-            })?;
-            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            out.extend_from_slice(s.as_bytes());
-        }
+        Schema::Str | Schema::EnumStr(_) => write_utf8_string(value, out)?,
         Schema::Bool => out.push(truthy(value) as u8),
         Schema::Int8 => out.push(to_int32(to_number(value)) as u8),
         Schema::Int16 => {
@@ -331,6 +341,37 @@ pub fn encode(
         Schema::Color3 => write_floats(value, COLOR3, out)?,
         Schema::Color4 => write_floats(value, COLOR4, out)?,
     }
+    Ok(())
+}
+
+/// `writeUtf8String` never checks the type: `@protobufjs/utf8` walks
+/// `value.length` and `value.charCodeAt(i)`. A value with no `length` — a
+/// number, a boolean, a plain object — therefore writes as the empty string,
+/// while a positive `length` with no `charCodeAt` (any non-empty array) is a
+/// TypeError, as is reading `.length` off `null` or `undefined`.
+fn write_utf8_string(value: Option<&Value>, out: &mut Vec<u8>) -> Result<(), SchemaError> {
+    let text = match value {
+        Some(Value::String(s)) => s.as_str(),
+        None | Some(Value::Null) => {
+            return Err(SchemaError::Invalid(format!(
+                "a string leaf cannot read .length off {}",
+                describe(value)
+            )))
+        }
+        Some(Value::Array(items)) if !items.is_empty() => {
+            return Err(SchemaError::Invalid(
+                "a non-empty array on a string leaf has no charCodeAt".into(),
+            ))
+        }
+        Some(Value::Object(obj)) if to_number(obj.get("length")) > 0.0 => {
+            return Err(SchemaError::Invalid(
+                "an object with a positive length on a string leaf has no charCodeAt".into(),
+            ))
+        }
+        Some(_) => "",
+    };
+    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
     Ok(())
 }
 
@@ -447,17 +488,32 @@ fn to_int32(n: f64) -> i32 {
     (n.trunc().rem_euclid(4294967296.0) as u32) as i32
 }
 
-/// `writeInt64` takes a BigInt, and `BigInt()` throws on a fractional number
-/// rather than truncating; `setBigInt64` then wraps modulo 2^64.
+/// `writeInt64` takes `BigInt(value)`, and `BigInt` is not `Number`: it throws
+/// on a fractional number rather than truncating, throws on anything it cannot
+/// read exactly (`"1.5"`, `"abc"`, `null`, an object), and reads a string with
+/// full precision — `BigInt("9007199254740993")` is exact where `Number` of the
+/// same digits has already rounded. `setBigInt64` then wraps modulo 2^64.
 ///
-/// Routed through f64 first: node reaches this value through `JSON.parse`, so a
-/// literal past 2^53 has already been rounded before @dcl/ecs sees it.
+/// A JSON *number* is still routed through f64: node reaches it through
+/// `JSON.parse`, so a literal past 2^53 was rounded before @dcl/ecs saw it.
 fn to_big_int64(value: Option<&Value>) -> Result<i64, SchemaError> {
     let f = match value {
         Some(Value::Number(n)) => n.as_f64().unwrap_or(f64::NAN),
+        Some(Value::Bool(b)) => return Ok(*b as i64),
+        Some(Value::String(s)) => return string_to_big_int(s),
+        Some(Value::Array(items)) => {
+            return match items.as_slice() {
+                [] => Ok(0),
+                [only] => string_to_big_int(&join_element(only)),
+                _ => Err(SchemaError::Invalid(format!(
+                    "int64 cannot parse the joined array {}",
+                    describe(value)
+                ))),
+            }
+        }
         other => {
             return Err(SchemaError::Invalid(format!(
-                "int64 expects a number, got {}",
+                "int64 cannot convert {}",
                 describe(other)
             )))
         }
@@ -468,6 +524,42 @@ fn to_big_int64(value: Option<&Value>) -> Result<i64, SchemaError> {
         )));
     }
     Ok(wrap_to_i64(f))
+}
+
+/// `StringToBigInt`: the radix prefixes of ToNumber, but no fraction, no
+/// exponent, no `Infinity`, and a syntax error instead of NaN. Accumulated with
+/// wrapping arithmetic, which is `BigInt.asIntN(64, ...)` for free — and keeps
+/// digits past 2^53 exact, which is the whole reason this is not `to_number`.
+fn string_to_big_int(s: &str) -> Result<i64, SchemaError> {
+    let refuse = || SchemaError::Invalid(format!("int64 cannot parse the string {s:?}"));
+    let t = s.trim();
+    if t.is_empty() {
+        return Ok(0);
+    }
+    let (radix, digits, negative) = match t.get(..2).map(str::to_ascii_lowercase).as_deref() {
+        Some("0x") => (16, &t[2..], false),
+        Some("0o") => (8, &t[2..], false),
+        Some("0b") => (2, &t[2..], false),
+        _ => match t.strip_prefix('-') {
+            Some(rest) => (10, rest, true),
+            None => (10, t.strip_prefix('+').unwrap_or(t), false),
+        },
+    };
+    if digits.is_empty() {
+        return Err(refuse());
+    }
+    let mut magnitude: u64 = 0;
+    for c in digits.chars() {
+        let digit = c.to_digit(radix).ok_or_else(refuse)?;
+        magnitude = magnitude
+            .wrapping_mul(u64::from(radix))
+            .wrapping_add(u64::from(digit));
+    }
+    Ok(if negative {
+        (magnitude as i64).wrapping_neg()
+    } else {
+        magnitude as i64
+    })
 }
 
 /// `BigInt.asIntN(64, …)`: the low 64 bits of an integral f64. Rust's `as i64`
@@ -706,6 +798,112 @@ mod tests {
         assert_eq!(to_number(Some(&json!(["0x10"]))), 16.0);
         assert_eq!(to_number(Some(&json!([null]))), 0.0);
         assert!(to_number(Some(&json!([1, 2]))).is_nan());
+    }
+
+    /// `writeUtf8String` is `@protobufjs/utf8` with no type check in front of
+    /// it, so an ill-typed value is not an error there — it is an empty string,
+    /// which is a silently wrong byte rather than a loud one. Each expectation
+    /// was read off @dcl/ecs, not off the spec.
+    #[test]
+    fn a_non_string_on_a_string_leaf_writes_the_empty_string() {
+        let s = schema(json!({ "type": "string", "serializationType": "utf8-string" }));
+        for value in [
+            json!(5),
+            json!(-1.5),
+            json!(true),
+            json!(false),
+            json!({}),
+            json!([]),
+        ] {
+            assert_eq!(enc(&s, &value), vec![0, 0, 0, 0], "{value} writes as \"\"");
+        }
+        for value in [
+            json!(null),
+            json!([true]),
+            json!(["ab"]),
+            json!({ "length": 2 }),
+        ] {
+            assert!(
+                encode_component_value(&s, &value).is_err(),
+                "{value} must throw the way JS does"
+            );
+        }
+        assert_eq!(enc(&s, &json!({ "length": 0 })), vec![0, 0, 0, 0]);
+    }
+
+    /// A string on an int64 leaf goes through `BigInt`, not `Number`: it keeps
+    /// every digit (where `Number` has already rounded), reads the radix
+    /// prefixes, and throws where `Number` would have produced NaN.
+    #[test]
+    fn int64_coerces_through_bigint_rather_than_number() {
+        assert_eq!(to_big_int64(Some(&json!("0x10"))).unwrap(), 16);
+        assert_eq!(to_big_int64(Some(&json!("0X10"))).unwrap(), 16);
+        assert_eq!(to_big_int64(Some(&json!("0o17"))).unwrap(), 15);
+        assert_eq!(to_big_int64(Some(&json!("0b101"))).unwrap(), 5);
+        assert_eq!(to_big_int64(Some(&json!("  12  "))).unwrap(), 12);
+        assert_eq!(to_big_int64(Some(&json!(""))).unwrap(), 0);
+        assert_eq!(to_big_int64(Some(&json!("-12"))).unwrap(), -12);
+        assert_eq!(
+            to_big_int64(Some(&json!("9007199254740993"))).unwrap(),
+            9007199254740993
+        );
+        assert_eq!(to_big_int64(Some(&json!(true))).unwrap(), 1);
+        assert_eq!(to_big_int64(Some(&json!([]))).unwrap(), 0);
+        assert_eq!(to_big_int64(Some(&json!([5]))).unwrap(), 5);
+        assert_eq!(to_big_int64(Some(&json!(["0x10"]))).unwrap(), 16);
+        assert_eq!(to_big_int64(Some(&json!([null]))).unwrap(), 0);
+        assert_eq!(to_big_int64(Some(&json!([[7]]))).unwrap(), 7);
+        for value in [
+            json!("1.5"),
+            json!("inf"),
+            json!("Infinity"),
+            json!("1_0"),
+            json!("-0x10"),
+            json!("0x"),
+            json!("1e3"),
+            json!([true]),
+            json!([1, 2]),
+            json!({}),
+            json!(null),
+        ] {
+            assert!(
+                to_big_int64(Some(&value)).is_err(),
+                "BigInt({value}) must throw"
+            );
+        }
+    }
+
+    /// An array leaf writes `value.length` and then iterates `value`. A string
+    /// satisfies both, so it serializes as an array of its characters — and the
+    /// count is UTF-16 code units while the iteration walks code points, which
+    /// is why an astral character writes one more than it produces.
+    #[test]
+    fn a_string_on_an_array_leaf_serializes_as_its_characters() {
+        let ints = schema(json!({
+            "type": "array",
+            "serializationType": "array",
+            "items": { "type": "integer", "serializationType": "int32" }
+        }));
+        assert_eq!(
+            enc(&ints, &json!("12")),
+            vec![2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]
+        );
+        assert_eq!(enc(&ints, &json!("")), vec![0, 0, 0, 0]);
+        let strings = schema(json!({
+            "type": "array",
+            "serializationType": "array",
+            "items": { "type": "string", "serializationType": "utf8-string" }
+        }));
+        let mut expected = vec![4, 0, 0, 0, 1, 0, 0, 0];
+        expected.extend_from_slice(b"a");
+        expected.extend_from_slice(&[4, 0, 0, 0]);
+        expected.extend_from_slice("\u{1F600}".as_bytes());
+        expected.extend_from_slice(&[1, 0, 0, 0]);
+        expected.extend_from_slice(b"b");
+        assert_eq!(enc(&strings, &json!("a\u{1F600}b")), expected);
+        for value in [json!(5), json!(true), json!(null), json!({})] {
+            assert!(encode_component_value(&ints, &value).is_err(), "{value}");
+        }
     }
 
     #[test]

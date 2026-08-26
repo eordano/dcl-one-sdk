@@ -323,7 +323,7 @@ pub fn resolve_target(target_content: Option<&str>) -> Result<String> {
     if let Some(t) = target_content {
         return Ok(t.trim().trim_end_matches('/').to_string());
     }
-    if let Ok(t) = std::env::var("DCL_ONE_SDK_DEFAULT_TARGET") {
+    if let Some(t) = crate::deploy::env_default_target() {
         let base = crate::deploy::sanitize_catalyst_url(&t);
         ux::note(format!(
             "using DCL_ONE_SDK_DEFAULT_TARGET as the worlds server: {base}"
@@ -560,8 +560,8 @@ mod tests {
         assert!(link1["signature"].as_str().unwrap().starts_with("0x"));
     }
 
-    #[test]
-    fn browser_headers_verify_exactly_like_key_signed_ones() {
+    #[tokio::test]
+    async fn browser_headers_verify_exactly_like_key_signed_ones() {
         use axum::http::{HeaderMap, HeaderName, HeaderValue};
         use catalyrst_crypto::signed_fetch::verify_signed_fetch;
 
@@ -583,6 +583,7 @@ mod tests {
             );
         }
         let recovered = verify_signed_fetch(&map, method, path, FIVE_MINUTES)
+            .await
             .expect("browser-signed headers must pass the shared validator");
         assert_eq!(recovered, signer.address().to_lowercase());
     }
@@ -679,8 +680,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn signed_headers_are_accepted_by_the_shared_validator() {
+    #[tokio::test]
+    async fn signed_headers_are_accepted_by_the_shared_validator() {
         use axum::http::{HeaderMap, HeaderName, HeaderValue};
         use catalyrst_crypto::signed_fetch::{verify_signed_fetch, verify_signed_fetch_meta};
 
@@ -704,10 +705,13 @@ mod tests {
                 );
             }
             let recovered = verify_signed_fetch(&headers, method, path, FIVE_MINUTES)
+                .await
                 .unwrap_or_else(|e| panic!("{method} {path} rejected: {e}"));
             assert_eq!(recovered, expected);
             let (meta_signer, metadata) =
-                verify_signed_fetch_meta(&headers, method, path, FIVE_MINUTES).unwrap();
+                verify_signed_fetch_meta(&headers, method, path, FIVE_MINUTES)
+                    .await
+                    .unwrap();
             assert_eq!(meta_signer, expected);
             assert_eq!(metadata, json!({}));
         }

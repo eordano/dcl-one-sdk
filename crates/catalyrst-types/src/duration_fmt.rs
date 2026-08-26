@@ -1,8 +1,8 @@
 //! Canonical user-facing duration display.
 //!
 //! Format rules (user-facing text only):
-//! - up to 9,999µs: whole microseconds with comma thousands
-//!   separators, e.g. "320µs", "9,999µs" (µ is U+00B5)
+//! - up to 9,999us: whole microseconds with comma thousands
+//!   separators, e.g. "320us", "9,999us" (mu is U+00B5)
 //! - 10ms up to 9,999ms: integer milliseconds with comma thousands
 //!   separators, e.g. "42ms", "2,321ms", "9,999ms"
 //! - 10s up to 10 minutes: seconds with exactly 2 decimals, e.g. "83.45s"
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn fmt_elapsed_tiers() {
-        // microseconds up to 9,999µs, with thousands separators
+        // microseconds up to 9,999us, with thousands separators
         assert_eq!(fmt_elapsed(Duration::from_micros(320)), "320\u{00b5}s");
         assert_eq!(fmt_elapsed(Duration::from_micros(1_234)), "1,234\u{00b5}s");
         assert_eq!(fmt_elapsed(Duration::from_micros(9_999)), "9,999\u{00b5}s");

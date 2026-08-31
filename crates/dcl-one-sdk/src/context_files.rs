@@ -51,15 +51,14 @@ pub async fn get_context_files(dir: &Path, api_base: &str, offline: bool) -> Res
     println!("\u{2713} {kind} project");
 
     let written = crate::skills::install(&root)?;
-    for skill in crate::skills::EMBEDDED {
-        println!(
-            "\u{2713} Installed skill {}/{} ({} files, {:.0} KB) — bundled, no network",
-            crate::skills::SKILLS_DIR,
-            skill.name,
-            skill.files.len(),
-            skill.bytes() as f64 / 1024.0,
-        );
-    }
+    let bytes: usize = crate::skills::EMBEDDED.iter().map(|s| s.bytes()).sum();
+    println!(
+        "\u{2713} Installed {} skills into {}/ ({} files, {:.1} MB) — bundled, no network",
+        crate::skills::EMBEDDED.len(),
+        crate::skills::SKILLS_DIR,
+        written.len(),
+        bytes as f64 / (1024.0 * 1024.0),
+    );
     debug_assert_eq!(
         written.len(),
         crate::skills::EMBEDDED

@@ -105,10 +105,6 @@ impl Fixture {
 /// remembers to update.
 const OPERA: &[(&str, &str)] = &[("opera-main.composite", "assets/scene/main.composite")];
 
-// ---------------------------------------------------------------------------
-// the suite
-// ---------------------------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cube_production() {
     golden(Fixture::new("cube")).await;
@@ -162,6 +158,8 @@ async fn golden(fixture: Fixture) {
         ignore_composite: false,
         custom_entry_point: fixture.custom_entry_point,
         skip_type_check: false,
+        out_root: None,
+        quiet: false,
     })
     .await
     .unwrap_or_else(|e| panic!("{} failed to build: {e:#}", fixture.stem()));
@@ -182,10 +180,6 @@ fn node_bin() -> Option<PathBuf> {
         ),
     }
 }
-
-// ---------------------------------------------------------------------------
-// staging
-// ---------------------------------------------------------------------------
 
 fn manifest_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -264,10 +258,6 @@ fn copy_tree(from: &Path, to: &Path) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// the static tier
-// ---------------------------------------------------------------------------
 
 fn render_static(fixture: &Fixture, built: &build::Built) -> String {
     let root = &built.project.root;
@@ -451,10 +441,6 @@ fn render_deploy(out: &mut String, built: &build::Built) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// the runtime tier
-// ---------------------------------------------------------------------------
-
 fn run_runtime(node: &Path, root: &Path) -> String {
     let script = manifest_dir().join(RUNTIME_SCRIPT);
     let out = std::process::Command::new(node)
@@ -473,10 +459,6 @@ fn run_runtime(node: &Path, root: &Path) -> String {
     );
     scrub_root(&String::from_utf8_lossy(&out.stdout), root)
 }
-
-// ---------------------------------------------------------------------------
-// comparison
-// ---------------------------------------------------------------------------
 
 fn compare(fixture: &Fixture, actual: &str) {
     let path = testdata()
@@ -542,10 +524,6 @@ fn first_difference(expected: &str, actual: &str) -> String {
 fn normalize_newlines(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
 
 /// Everything up to the inline sourcemap. Dev bundles carry the absolute scene
 /// root inside the map's base64 `sourcesContent`, so hashing or sizing the raw

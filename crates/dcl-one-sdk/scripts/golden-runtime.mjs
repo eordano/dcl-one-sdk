@@ -31,9 +31,6 @@ const root = path.resolve(process.argv[2] ?? '.')
 const sceneJson = JSON.parse(fs.readFileSync(path.join(root, 'scene.json'), 'utf8'))
 const mainFile = sceneJson.main
 
-// ---------------------------------------------------------------------------
-// CRDT decoding, through the SCENE'S OWN vendored @dcl/ecs
-// ---------------------------------------------------------------------------
 // Decoding with the scene's copy rather than one of our own is what makes the
 // `data=null` lines meaningful: a component id the installed @dcl/ecs does not
 // know (asset-packs writes several) renders as null exactly the way upstream's
@@ -74,9 +71,6 @@ function decodeBuffer(prefix, bytes) {
   return lines
 }
 
-// ---------------------------------------------------------------------------
-// bookkeeping
-// ---------------------------------------------------------------------------
 const hostCalls = { readFile: 0, crdtGetState: 0, crdtSendToRenderer: 0, sendBatch: 0 }
 const traffic = { messages: 0, bytes: 0 }
 const readFiles = []
@@ -116,9 +110,6 @@ for (const level of ['log', 'info', 'warn', 'error', 'debug', 'trace']) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// the ~system mock table
-// ---------------------------------------------------------------------------
 // Every entry is the narrowest shape the SDK actually reads. An unknown module
 // id THROWS: that is what turns the REQUIRE lines below from a log into an
 // assertion about the host-API surface a scene depends on, so a new host
@@ -278,9 +269,6 @@ function hostRequire(spec) {
   return factory()
 }
 
-// ---------------------------------------------------------------------------
-// the sandbox
-// ---------------------------------------------------------------------------
 const fakeGlobal = { require: hostRequire, console: sandboxConsole }
 
 // `TextDecoder = undefined` is not laziness: it forces the loader's

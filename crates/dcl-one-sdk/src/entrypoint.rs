@@ -39,7 +39,12 @@ pub fn generate(
     } else {
         write_all_composites(project, &dir, ignore_composite)?;
         write_script_utils(project, &dir, ignore_composite)?;
-        entrypoint_code(&safe_entry, project.is_editor_scene(), split)
+        write_sdk_boot(&dir)?;
+        let mp = authoritative_multiplayer(project);
+        if mp {
+            write_mp_client(&dir)?;
+        }
+        entrypoint_code(&safe_entry, project.is_editor_scene(), split, mp)
     };
     std::fs::write(&entry_path, content).map_err(|e| write_error(&entry_path, e))?;
 
@@ -55,7 +60,26 @@ pub fn generate(
     })
 }
 
-fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool) -> String {
+/// scene.json's documented activation flag for the authoritative-server
+/// surface (docs/multiplayer-server-design.md): with it, the loader arms the
+/// comms wrap and the entrypoint pulls in the mp-client half.
+pub fn authoritative_multiplayer(project: &Project) -> bool {
+    project
+        .scene_json
+        .get("authoritativeMultiplayer")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
+const MP_CLIENT_TEMPLATE: &str = include_str!("templates/mp-client.js");
+
+fn write_mp_client(dir: &Path) -> Result<()> {
+    let path = dir.join("mp-client.js");
+    std::fs::write(&path, MP_CLIENT_TEMPLATE).map_err(|e| write_error(&path, e))?;
+    Ok(())
+}
+
+fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool, mp: bool) -> String {
     let composite_fill = if split {
         "import { compositeFromLoader as __sceneComposites } from './all-composites.js'\nObject.assign(compositeFromLoader, __sceneComposites)\n"
     } else {
@@ -67,15 +91,34 @@ fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool) -> String 
     } else {
         "false".to_string()
     };
+    // before the scene, after sdk-boot: the scene's module scope feature-
+    // detects registerMessages, so the graft must already be in place
+    let mp_import = if mp { "import './mp-client.js'\n" } else { "" };
     format!(
         r#"// BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
 "use strict";
-import * as entrypoint from {safe_entry}
 import {{ engine, NetworkEntity }} from '@dcl/sdk/ecs'
 import * as sdk from '@dcl/sdk'
 import {{ compositeProvider }} from '@dcl/sdk/composite-provider'
 import {{ compositeFromLoader }} from '~sdk/all-composites'
 import {{ _initializeScripts }} from '~sdk/script-utils'
+// Registers the composite provider, and must be imported BEFORE the scene.
+// A scene that calls initAssetPacks() at module scope -- as the Creator Hub
+// templates do -- reads that provider while its own module body runs, and until
+// this existed the only thing registering it was `@dcl/sdk`'s body, which the
+// bundler emits at the END of the chunk. So the editor logged "[asset-packs] No
+// SDK composite provider registered; SPAWN_ENTITY cannot resolve composites"
+// and placing a smart item resolved nothing. Upstream sdk-commands has the same
+// ordering (logic/bundle.ts) and gets away with it only because upstream scenes
+// never call initAssetPacks themselves.
+//
+// A separate module because neither cheaper fix works: statements here run after
+// every import including the scene's, and the bundler does not honour moving
+// `@dcl/sdk` earlier -- a side-effect import is shaken to a bare require and the
+// re-export below then reads a `_dcl_sdk` binding that was never declared, while
+// `export * from` is emitted at the end wherever it is written.
+import './sdk-boot.js'
+{mp_import}import * as entrypoint from {safe_entry}
 {composite_fill}
 {editor_block}
 
@@ -295,6 +338,17 @@ fn script_component_has_instances(comp: &serde_json::Value) -> bool {
                 None => entry.get("binary").is_some(),
             })
         })
+}
+
+// Exactly what `@dcl/sdk`'s own module body does (its index.ts), pulled into a
+// module the generated entrypoint can import before the scene.
+fn write_sdk_boot(dir: &Path) -> Result<()> {
+    let content = "import { engine, setCompositeProvider } from '@dcl/sdk/ecs'\n\
+                   import { compositeProvider } from '@dcl/sdk/composite-provider'\n\
+                   setCompositeProvider(engine, compositeProvider)\n";
+    let path = dir.join("sdk-boot.js");
+    std::fs::write(&path, content).map_err(|e| write_error(&path, e))?;
+    Ok(())
 }
 
 fn write_script_utils(project: &Project, dir: &Path, ignore_composite: bool) -> Result<()> {

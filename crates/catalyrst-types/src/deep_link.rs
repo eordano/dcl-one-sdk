@@ -14,7 +14,6 @@
 /// `^decentraland:/+` before parsing, so `decentraland://realm=` and
 /// `decentraland:///?realm=` are equivalent on the receiving end; keeping one
 /// form here keeps the encoding rules in one place.
-
 fn form_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {

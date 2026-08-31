@@ -1,12 +1,7 @@
 use crate::deploy::{self, Prepared};
 use crate::ux::{self, TrySteps, UserError};
-use anyhow::{Context, Result};
-use axum::{
-    extract::State,
-    response::Html,
-    routing::{get, post},
-    Json, Router,
-};
+use anyhow::Result;
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -15,6 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 pub struct LinkerDeploy {
+    /// The scene root, so the browser flow can serve the scene it is about to
+    /// publish: the signing page is the preview server's landing page.
+    pub dir: PathBuf,
     pub prepared: Prepared,
     pub target_content: String,
     pub world: Option<String>,
@@ -31,6 +29,17 @@ pub struct LinkerOptions {
     pub port: Option<u16>,
     pub open_browser: bool,
     pub timeout: Duration,
+    /// When set, the caller hosts the signing routes on a server it already
+    /// runs (the preview server mounts them under /deploy/sign/): no listener
+    /// is bound here and no browser is opened — the page owns the hand-off.
+    pub host: Option<HostSigner>,
+}
+
+/// How a hosting caller receives the signing state, and the URL people see.
+#[derive(Clone)]
+pub struct HostSigner {
+    pub register: Arc<dyn Fn(Arc<LinkerState>) + Send + Sync>,
+    pub url: String,
 }
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
@@ -55,6 +64,30 @@ pub struct LinkerState {
     dep: LinkerDeploy,
     pending: Mutex<HashMap<String, PendingEntity>>,
     done: Mutex<Option<DoneSender>>,
+    /// The address that signed, kept past the upload: the preview pages
+    /// personalize on "the wallet you sign with", and a signature is the one
+    /// moment that wallet names itself.
+    signer: Mutex<Option<String>>,
+}
+
+impl LinkerState {
+    pub(crate) fn target_content(&self) -> &str {
+        &self.dep.target_content
+    }
+
+    pub(crate) fn signer_address(&self) -> Option<String> {
+        self.signer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What [`sign`] does the moment a signature arrives, callable by tests
+    /// that need a "the wallet already answered" state without a wallet.
+    #[cfg(test)]
+    pub(crate) fn note_signer_for_tests(&self, address: &str) {
+        *self.signer.lock().unwrap_or_else(PoisonError::into_inner) = Some(address.to_string());
+    }
 }
 
 pub fn new_state(
@@ -69,34 +102,35 @@ pub fn new_state(
             dep,
             pending: Mutex::new(HashMap::new()),
             done: Mutex::new(Some(tx)),
+            signer: Mutex::new(None),
         }),
         rx,
     )
 }
 
-pub fn router(state: Arc<LinkerState>) -> Router {
-    Router::new()
-        .route("/", get(page))
-        .route("/api/info", get(info))
-        .route("/api/sign", post(sign))
-        .with_state(state)
-}
-
-async fn page() -> Html<&'static str> {
-    Html(PAGE)
-}
-
-async fn info(State(st): State<Arc<LinkerState>>) -> Json<Value> {
+/// The signing panel, rendered by the server that hosts the publish — the
+/// landing page and /deploy of the preview interface both draw it from here.
+/// Every fact is in the markup and the entity is minted NOW: the id printed is
+/// the id the wallet signs, registered pending so `sign` recognises it. The
+/// browser is left exactly one job, the wallet hand-off, which is the one
+/// thing that cannot happen without JavaScript. `api` is the absolute
+/// prefix-carrying path the script POSTs the signature to.
+pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
+    use crate::start::chrome::{esc, kv};
     let d = &st.dep;
     let ts = d.timestamp_override.unwrap_or_else(deploy::now_ms);
     let (entity_id, entity_bytes) = match deploy::build_entity(&d.prepared, ts) {
         Ok(x) => x,
-        Err(e) => return Json(json!({ "error": format!("could not build the entity: {e:#}") })),
+        Err(e) => {
+            return format!(
+                r#"<div class="panel panel--warn" id="sign-panel"><h2>Cannot sign</h2><p class="note">could not build the entity: {}</p></div>"#,
+                esc(&format!("{e:#}"))
+            )
+        }
     };
-    let delete_payload = if d.needs_delete {
-        d.world.as_deref().map(deploy::build_delete_payload)
-    } else {
-        None
+    let delete_payload = match d.needs_delete {
+        true => d.world.as_deref().map(deploy::build_delete_payload),
+        false => None,
     };
     {
         let mut pending = st.pending.lock().unwrap_or_else(PoisonError::into_inner);
@@ -111,10 +145,10 @@ async fn info(State(st): State<Arc<LinkerState>>) -> Json<Value> {
             },
         );
     }
-    // The deep link is what actually reaches the realm this deploy landed in.
+    // The deep link is what actually reaches the realm this deploy lands in.
     // decentraland.org forwards `realm` only for realms it whitelists, so for
     // anything self-hosted its play URL silently drops the realm and boots
-    // Genesis instead; it stays here as a labelled fallback, not the answer.
+    // Genesis instead.
     let realm_url = match &d.world {
         Some(w) => catalyrst_types::world_realm_url(&d.target_content, w),
         None => d
@@ -127,32 +161,75 @@ async fn info(State(st): State<Arc<LinkerState>>) -> Json<Value> {
         &realm_url,
         catalyrst_types::parse_position(Some(&d.base_parcel)),
     );
-    let play_url = match &d.world {
-        Some(w) => format!("https://decentraland.org/play/?realm={w}"),
-        None => format!(
-            "https://play.decentraland.org/?NETWORK=mainnet&position={}",
-            d.base_parcel
-        ),
+    let where_to = match &d.world {
+        Some(w) if d.multi_scene => format!("world {w} (multi-scene, additive)"),
+        Some(w) => format!("world {w}"),
+        None => "Genesis City LAND".to_string(),
     };
-    Json(json!({
-        "sceneTitle": d.scene_title,
-        "baseParcel": d.base_parcel,
-        "parcels": d.prepared.pointers,
-        "world": d.world,
-        "targetContent": d.target_content,
-        "entityId": entity_id,
-        "timestamp": ts,
-        "deletePayload": delete_payload,
-        "multiScene": d.multi_scene,
-        "deepLink": deep_link,
-        "realmUrl": realm_url,
-        "playUrl": play_url,
-        "files": d.prepared.files.iter().map(|(f, h, b)| json!({"file": f, "hash": h, "size": b.len()})).collect::<Vec<_>>(),
-    }))
+    let total: usize = d.prepared.files.iter().map(|(_, _, b)| b.len()).sum();
+    let delete_warn = match &delete_payload {
+        Some(_) => {
+            r#"<p class="note sign-warn">This deploy also REMOVES the scenes currently
+    published on other parcels of the world; the wallet asks for a second signature authorizing
+    the removal.</p>"#
+        }
+        None => "",
+    };
+    format!(
+        r#"<div class="panel" id="sign-panel" data-api="{api}" data-entity-id="{id}"{delete_attr} data-deep-link="{deep}">
+  <h2>Sign the deployment</h2>
+  <span class="note">Connect the wallet that may publish this scene; nothing uploads until it answers.</span>
+  <div class="kvs">
+    {scene}{where_kv}{parcels}{entity}{payload}
+  </div>
+  {delete_warn}
+  <button class="jn__cta" id="sign-go" type="button">Connect wallet and sign</button>
+  <p class="note sign-status" id="sign-status" hidden></p>
+  <noscript><p class="note">The wallet hand-off needs JavaScript; everything above is exact without it.</p></noscript>
+</div>"#,
+        api = esc(api),
+        id = esc(&entity_id),
+        delete_attr = match &delete_payload {
+            Some(p) => format!(r#" data-delete-payload="{}""#, esc(p)),
+            None => String::new(),
+        },
+        deep = esc(&deep_link),
+        scene = kv("Scene", esc(&d.scene_title)),
+        where_kv = kv("Deploying to", esc(&where_to)),
+        // A handful of parcels earn their list; a big footprint is a count —
+        // the same altitude the /deploy hint speaks at, and the layout map is
+        // where the full shape lives.
+        parcels = kv(
+            "Parcels",
+            esc(&if d.prepared.pointers.len() > 6 {
+                format!(
+                    "{} parcels · base {}",
+                    d.prepared.pointers.len(),
+                    d.base_parcel
+                )
+            } else {
+                format!(
+                    "{}  (base {})",
+                    d.prepared.pointers.join("  "),
+                    d.base_parcel
+                )
+            }),
+        ),
+        entity = kv("Entity", format!("<code>{}</code>", esc(&entity_id))),
+        payload = kv(
+            "Payload",
+            esc(&format!(
+                "{} files · {} · to {}",
+                d.prepared.files.len(),
+                deploy::human_size(total as u64),
+                d.target_content
+            )),
+        ),
+    )
 }
 
 #[derive(Deserialize)]
-struct SignReq {
+pub(crate) struct SignReq {
     address: String,
     signature: String,
     #[serde(rename = "entityId")]
@@ -161,7 +238,10 @@ struct SignReq {
     delete_signature: Option<String>,
 }
 
-async fn sign(State(st): State<Arc<LinkerState>>, Json(req): Json<SignReq>) -> Json<Value> {
+pub(crate) async fn sign(
+    State(st): State<Arc<LinkerState>>,
+    Json(req): Json<SignReq>,
+) -> Json<Value> {
     let pending = st
         .pending
         .lock()
@@ -174,6 +254,9 @@ async fn sign(State(st): State<Arc<LinkerState>>, Json(req): Json<SignReq>) -> J
             "error": "unknown or stale entity id — reload the page and sign again"
         }));
     };
+    // Recorded before the outcome is known: even a refused upload was signed
+    // by this wallet, and that is the fact the pages personalize on.
+    *st.signer.lock().unwrap_or_else(PoisonError::into_inner) = Some(req.address.clone());
     if st.dep.check_permissions {
         if let Some(w) = st.dep.world.as_deref() {
             if let Err(e) = deploy::enforce_world_permission(
@@ -309,53 +392,12 @@ pub fn linker_bind_host() -> String {
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
-pub async fn run(dep: LinkerDeploy, opts: LinkerOptions) -> Result<String> {
-    let (state, rx) = new_state(dep);
-    let app = router(state);
-    let bind_host = linker_bind_host();
-    let loopback = bind_host == "127.0.0.1";
-    let listener = tokio::net::TcpListener::bind((bind_host.as_str(), opts.port.unwrap_or(0)))
-        .await
-        .map_err(|e| {
-            anyhow::Error::from(
-                UserError::new(
-                    match opts.port {
-                        Some(p) => format!("port {p} cannot be opened for the signing page"),
-                        None => "no port could be opened for the signing page".to_string(),
-                    },
-                    TrySteps::one("pass --port <free-port> or free the port and retry"),
-                )
-                .caused_by(e),
-            )
-        })?;
-    let port = listener
-        .local_addr()
-        .context("reading the signing page port")?
-        .port();
-    let url = format!("http://localhost:{port}/");
-    println!();
-    println!("Sign the deployment with your wallet in a browser:");
-    println!("  {url}");
-    if loopback {
-        ux::note("to sign from another device, re-run with DCL_ONE_SDK_LINKER_HOST=0.0.0.0");
-    } else {
-        ux::note("from another device, replace localhost with this machine's address");
-    }
-    if opts.open_browser {
-        spawn_browser(&url);
-    } else {
-        ux::note("browser auto-open disabled \u{2014} open the URL manually");
-    }
-    let serve = axum::serve(listener, app);
+pub(crate) async fn await_outcome(
+    rx: tokio::sync::oneshot::Receiver<Result<String>>,
+    timeout: Duration,
+    url: &str,
+) -> Result<String> {
     tokio::select! {
-        r = serve => {
-            r.context("serving the signing page")?;
-            Err(UserError::new(
-                "the signing page stopped before a signature arrived",
-                TrySteps::one("re-run dcl-one-sdk deploy"),
-            )
-            .into())
-        }
         res = rx => match res {
             Ok(outcome) => outcome,
             Err(_) => Err(UserError::new(
@@ -364,108 +406,22 @@ pub async fn run(dep: LinkerDeploy, opts: LinkerOptions) -> Result<String> {
             )
             .into()),
         },
-        _ = tokio::time::sleep(opts.timeout) => Err(timeout_error(opts.timeout, &url)),
+        _ = tokio::time::sleep(timeout) => Err(timeout_error(timeout, url)),
     }
 }
 
-const PAGE: &str = r##"<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>dcl-one-sdk deploy — sign</title>
-<style>
-  :root{color-scheme:dark}
-  body{margin:0;background:#0b0e16;color:#e6ebf2;font:15px/1.5 system-ui,sans-serif;
-       display:flex;min-height:100vh;align-items:center;justify-content:center}
-  .card{width:min(720px,92vw);background:#12151e;border:1px solid #24314d;border-radius:16px;
-        padding:28px 30px;box-shadow:0 20px 60px #0008;margin:24px 0}
-  h1{margin:0 0 4px;font-size:20px}
-  h1 .t{color:#22e6d0}
-  .sub{color:#8ea1c0;margin:0 0 20px;font-size:13px}
-  .kv{display:grid;grid-template-columns:130px 1fr;gap:6px 12px;font-size:13px;margin:14px 0}
-  .kv b{color:#8ea1c0;font-weight:500}
-  code{font-family:ui-monospace,monospace;word-break:break-all;color:#cfe}
-  ul{margin:6px 0 0;padding-left:18px;color:#b9c6dd;font-size:12px;max-height:200px;overflow:auto}
-  .warn{margin-top:14px;padding:10px 12px;border-radius:10px;font-size:13px;display:none;
-        background:#2a2114;border:1px solid #6b5526;color:#ffd28a}
-  button{margin-top:18px;width:100%;padding:13px;border:0;border-radius:10px;cursor:pointer;
-         font-size:15px;font-weight:600;background:#22e6d0;color:#04121a}
-  button:disabled{opacity:.5;cursor:default}
-  #status{margin-top:16px;padding:12px 14px;border-radius:10px;font-size:13px;white-space:pre-wrap;display:none}
-  .ok{background:#0e2a1e;border:1px solid #1f6b46;color:#8ff0bf}
-  .err{background:#2a1414;border:1px solid #6b2626;color:#ff9a9a}
-  .info{background:#101a2c;border:1px solid #24314d;color:#a9c0e6}
-  a{color:#22e6d0}
-</style></head>
-<body><div class="card">
-  <h1>Deploy <span class="t">·</span> signature required</h1>
-  <p class="sub">Connect the wallet that may publish this scene and sign the deployment. The command line waits until you finish here.</p>
-  <div class="kv">
-    <b>Scene</b><code id="title">…</code>
-    <b>Deploying to</b><code id="where">…</code>
-    <b>Parcels</b><code id="parcels">…</code>
-    <b>Content server</b><code id="cs">…</code>
-    <b>Entity id</b><code id="eid">…</code>
-    <b>Files</b><div><ul id="files"></ul><div id="total" style="font-size:12px;color:#5d6c8c;margin-top:4px"></div></div>
-  </div>
-  <div class="warn" id="delwarn">This deploy also REMOVES the scenes currently published on other parcels of the world. Your wallet will ask for a second signature authorizing the removal.</div>
-  <button id="go" disabled>Connect wallet &amp; sign &amp; deploy</button>
-  <div id="status"></div>
-</div>
-<script>
-let INFO=null;
-const $=id=>document.getElementById(id);
-function show(cls,msg){const s=$("status");s.className=cls;s.style.display="block";s.textContent=msg;}
-function fmt(n){return n>=1048576?(n/1048576).toFixed(2)+" MB":n>=1024?(n/1024).toFixed(1)+" KB":n+" B";}
-function render(){
-  $("title").textContent=INFO.sceneTitle;
-  $("where").textContent=INFO.world?("world "+INFO.world+(INFO.multiScene?" (multi-scene, additive)":"")):"Genesis City LAND";
-  $("parcels").textContent=INFO.parcels.join("  ")+"  (base "+INFO.baseParcel+")";
-  $("cs").textContent=INFO.targetContent;
-  $("eid").textContent=INFO.entityId;
-  $("files").innerHTML=INFO.files.map(f=>`<li>${f.file} <span style="color:#5d6c8c">(${fmt(f.size)})</span></li>`).join("");
-  const total=INFO.files.reduce((a,f)=>a+f.size,0);
-  $("total").textContent=INFO.files.length+" files, "+fmt(total)+" total";
-  $("delwarn").style.display=INFO.deletePayload?"block":"none";
-}
-async function load(){
-  try{
-    INFO=await (await fetch("api/info")).json();
-    if(INFO.error){show("err",INFO.error);return;}
-    render();
-    $("go").disabled=false;
-  }catch(e){show("err","Could not load deployment info: "+e);}
-}
-$("go").onclick=async()=>{
-  const btn=$("go");
-  try{
-    if(!window.ethereum){show("err","No wallet found. Open this page in a browser with MetaMask (or another EIP-1193 wallet).");return;}
-    btn.disabled=true;
-    show("info","Requesting wallet…");
-    const accounts=await window.ethereum.request({method:"eth_requestAccounts"});
-    const address=accounts[0];
-    show("info","Preparing a fresh deployment…");
-    INFO=await (await fetch("api/info")).json();
-    if(INFO.error){show("err",INFO.error);btn.disabled=false;return;}
-    render();
-    show("info","Signing entity id with "+address+" …");
-    const signature=await window.ethereum.request({method:"personal_sign",params:[INFO.entityId,address]});
-    let deleteSignature=null;
-    if(INFO.deletePayload){
-      show("info","Signing the scene-removal authorization…");
-      deleteSignature=await window.ethereum.request({method:"personal_sign",params:[INFO.deletePayload,address]});
+pub async fn run(dep: LinkerDeploy, opts: LinkerOptions) -> Result<String> {
+    let dir = dep.dir.clone();
+    let (state, rx) = new_state(dep);
+    if let Some(host) = opts.host {
+        // No terminal narration: the hosting page owns the hand-off, and its
+        // URL printed into the preview terminal was the noise a page-driven
+        // publish used to make.
+        (host.register)(state);
+        return await_outcome(rx, opts.timeout, &host.url).await;
     }
-    show("info","Uploading deployment to "+INFO.targetContent+" …");
-    const r=await (await fetch("api/sign",{method:"POST",headers:{"content-type":"application/json"},
-      body:JSON.stringify({address,signature,entityId:INFO.entityId,deleteSignature})})).json();
-    if(r.ok){show("ok","✓ "+r.message+"\n\nOpen: "+INFO.deepLink+"\n\nIf your browser will not open that link, paste it into the address bar. The decentraland.org page ("+INFO.playUrl+") only forwards realms it whitelists.\n\nYou can close this tab; the command line has finished.");}
-    else if(r.fatal){show("err","✗ "+r.error+"\n\nThe command line exited with this error — fix it and re-run the deploy.");}
-    else{show("err","✗ "+r.error);btn.disabled=false;}
-  }catch(e){show("err","✗ "+(e&&e.message?e.message:e));btn.disabled=false;}
-};
-load();
-</script></body></html>
-"##;
+    crate::start::serve_signing(&dir, opts.port, opts.open_browser, opts.timeout, state, rx).await
+}
 
 #[cfg(test)]
 mod tests {
@@ -515,6 +471,7 @@ mod tests {
         let project = Project::load(&t.0).unwrap();
         let prepared = deploy::prepare(&project).unwrap();
         let dep = LinkerDeploy {
+            dir: t.0.clone(),
             prepared,
             target_content: "http://127.0.0.1:9".to_string(),
             world: world.map(str::to_string),
@@ -529,23 +486,12 @@ mod tests {
         (t, dep)
     }
 
-    async fn serve(
-        dep: LinkerDeploy,
-    ) -> (
-        String,
-        tokio::sync::oneshot::Receiver<Result<String>>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let (state, rx) = new_state(dep);
-        let app = router(state);
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        (base, rx, handle)
+    /// The id the rendered panel carries — which is also the pending key,
+    /// because minting happens at render time.
+    fn minted_entity_id(section: &str) -> String {
+        let marker = r#"data-entity-id=""#;
+        let at = section.find(marker).expect("panel carries the entity id") + marker.len();
+        section[at..].split('"').next().unwrap().to_string()
     }
 
     #[test]
@@ -558,78 +504,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_and_info_and_stale_sign_smoke() {
+    async fn section_mints_pending_and_stale_sign_answers_nonfatal() {
         let (_t, dep) = fixture("smoke", None);
-        let (base, _rx, handle) = serve(dep).await;
-        let client = reqwest::Client::new();
+        let (state, _rx) = new_state(dep);
 
-        let page = client.get(format!("{base}/")).send().await.unwrap();
-        assert_eq!(page.status().as_u16(), 200);
-        let body = page.text().await.unwrap();
-        assert!(body.contains("api/info"));
-        assert!(body.contains("personal_sign"));
+        let section = sign_section(&state, "/deploy/sign");
+        assert!(section.contains(r#"data-api="/deploy/sign""#));
+        assert!(section.contains("Linker Smoke"));
+        assert!(
+            section.contains("2 files"),
+            "payload row is server-rendered"
+        );
+        assert!(!section.contains("data-delete-payload"));
+        let id = minted_entity_id(&section);
+        assert!(id.starts_with("bafkrei"));
+        assert!(
+            state.pending.lock().unwrap().contains_key(&id),
+            "the rendered id is registered pending"
+        );
 
-        let info: serde_json::Value = client
-            .get(format!("{base}/api/info"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert!(info["entityId"].as_str().unwrap().starts_with("bafkrei"));
-        assert_eq!(info["sceneTitle"], "Linker Smoke");
-        assert_eq!(info["files"].as_array().unwrap().len(), 2);
-        assert!(info["deletePayload"].is_null());
-
-        let stale: serde_json::Value = client
-            .post(format!("{base}/api/sign"))
-            .json(&serde_json::json!({"address":"0x0","signature":"0x0","entityId":"bogus"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(stale["ok"], false);
-        assert_eq!(stale["fatal"], false);
-        handle.abort();
+        let stale = sign(
+            State(state.clone()),
+            Json(SignReq {
+                address: "0x0".into(),
+                signature: "0x0".into(),
+                entity_id: "bogus".into(),
+                delete_signature: None,
+            }),
+        )
+        .await;
+        assert_eq!(stale.0["ok"], false);
+        assert_eq!(stale.0["fatal"], false);
     }
 
     #[tokio::test]
     async fn unreachable_target_fails_fatal_and_resolves_cli() {
         let (_t, dep) = fixture("fatal", None);
-        let (base, rx, handle) = serve(dep).await;
-        let client = reqwest::Client::new();
-        let info: serde_json::Value = client
-            .get(format!("{base}/api/info"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let entity_id = info["entityId"].as_str().unwrap().to_string();
+        let (state, rx) = new_state(dep);
+        let entity_id = minted_entity_id(&sign_section(&state, "/deploy/sign"));
         let signer = crate::random_test_wallet();
         let sig = signer.sign_message(entity_id.as_bytes()).unwrap();
-        let resp: serde_json::Value = client
-            .post(format!("{base}/api/sign"))
-            .json(&serde_json::json!({
-                "address": signer.address(),
-                "signature": sig,
-                "entityId": entity_id,
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(resp["ok"], false);
-        assert_eq!(resp["fatal"], true);
+        let resp = sign(
+            State(state.clone()),
+            Json(SignReq {
+                address: signer.address(),
+                signature: sig,
+                entity_id,
+                delete_signature: None,
+            }),
+        )
+        .await;
+        assert_eq!(resp.0["ok"], false);
+        assert_eq!(resp.0["fatal"], true);
         let outcome = rx.await.unwrap();
         assert!(outcome.is_err());
-        handle.abort();
     }
 
     #[tokio::test]
@@ -647,40 +575,25 @@ mod tests {
 
         let (_t, mut dep) = fixture("worlds", Some(&world));
         dep.target_content = target;
-        let (base, rx, handle) = serve(dep).await;
-        let client = reqwest::Client::new();
-        let page = client.get(format!("{base}/")).send().await.unwrap();
-        assert_eq!(page.status().as_u16(), 200);
-        let info: serde_json::Value = client
-            .get(format!("{base}/api/info"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let entity_id = info["entityId"].as_str().unwrap().to_string();
+        let (state, rx) = new_state(dep);
+        let entity_id = minted_entity_id(&sign_section(&state, "/deploy/sign"));
         let sig = signer.sign_message(entity_id.as_bytes()).unwrap();
-        let resp: serde_json::Value = client
-            .post(format!("{base}/api/sign"))
-            .json(&serde_json::json!({
-                "address": signer.address(),
-                "signature": sig,
-                "entityId": entity_id,
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(resp["ok"], true, "sign flow failed: {resp}");
+        let resp = sign(
+            State(state.clone()),
+            Json(SignReq {
+                address: signer.address(),
+                signature: sig,
+                entity_id,
+                delete_signature: None,
+            }),
+        )
+        .await;
+        assert_eq!(resp.0["ok"], true, "sign flow failed: {}", resp.0);
         let outcome = rx.await.unwrap();
         let message = outcome.unwrap();
         assert!(
             message.contains("Deployed"),
             "unexpected message: {message}"
         );
-        handle.abort();
     }
 }

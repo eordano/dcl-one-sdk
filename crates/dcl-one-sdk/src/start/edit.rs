@@ -1,17 +1,9 @@
-//! `POST /scene-json` and `POST /scene-thumbnail` — the landing page's editors.
-//!
-//! Both routes rewrite the developer's scene.json (and, for the second, a
-//! thumbnail file inside the project), so they sit beside `/deploy` outside
-//! the permissive CORS layer and behind the same gates its POST proved out:
-//! a loopback peer that is not a tunnel replay, then a same-origin
-//! `Origin`/`Sec-Fetch-Site`. There is no page token here, deliberately: the
-//! landing page stays inside the permissive CORS layer (its `/` doubles as
-//! the live-reload websocket), so any origin can `fetch` its HTML and read a
-//! token out of it — the Origin gate is the one that actually holds.
-//!
-//! The body is an allowlist, exactly like the landing page's query string: a
-//! field this module does not name is refused, not ignored, so the page can
-//! only ever write the shapes it drew editors for.
+//! `POST /scene-json` and `POST /scene-thumbnail` — the landing page's
+//! editors, registered outside the CORS layer behind the deploy gates. No
+//! page token on purpose: `/` is CORS-readable (it doubles as the reload
+//! websocket), so a token in its HTML protects nothing — the Origin gate is
+//! the one that holds. The body is an allowlist: an unnamed field is
+//! refused, not ignored.
 
 use super::{forwarded_prefix, AppState};
 use crate::scene::b64_content_hash;
@@ -42,31 +34,16 @@ fn refuse(why: &str) -> Response {
     (StatusCode::FORBIDDEN, format!("{why}\n")).into_response()
 }
 
-/// The deploy POST's origin gates, verbatim (see `deploy_page::start` for the
-/// review that shaped them). Returns the refusal to send, or `None` to
-/// proceed.
+/// The shared write gates, with no remote escape: scene.json is the
+/// developer's file, so edits stay on the hosting machine even when
+/// --allow-remote-deploy opened publishing up.
 fn refused(peer: SocketAddr, headers: &HeaderMap) -> Option<Response> {
-    let forwarded = headers.contains_key(crate::tunnel::FORWARDED_HEADER);
-    if forwarded || !peer.ip().is_loopback() {
+    if super::remote_peer(false, peer, headers) {
         return Some(refuse(
             "scene editing runs only on the machine hosting this preview",
         ));
     }
-    if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if site != "same-origin" && site != "none" {
-            return Some(refuse("this edit did not come from the preview's own page"));
-        }
-    }
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let host = headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        if host.is_empty() || !origin.ends_with(host) {
-            return Some(refuse("this edit did not come from the preview's own page"));
-        }
-    }
-    None
+    super::cross_origin_refusal(headers).map(refuse)
 }
 
 /// Every field the page has an editor for, and nothing else. All optional:
@@ -126,16 +103,26 @@ pub(super) async fn scene_json(
     let Some(project) = st.first_project() else {
         return (StatusCode::NOT_FOUND, "no scene loaded\n").into_response();
     };
-    match edit_scene_json(&st, &project.root, |scene| apply(scene, &edit)) {
-        Ok(scene) => Json(scene).into_response(),
-        Err((status, why)) => (status, format!("{why}\n")).into_response(),
+    let outcome = tokio::task::spawn_blocking(move || {
+        edit_scene_json(&st, &project.root, |scene| apply(scene, &edit))
+    })
+    .await;
+    match outcome {
+        Ok(Ok(scene)) => Json(scene).into_response(),
+        Ok(Err((status, why))) => (status, format!("{why}\n")).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the edit did not finish\n",
+        )
+            .into_response(),
     }
 }
 
-/// The read-modify-write both routes share. Disk is the source of truth read
-/// here — not the in-memory copy — so a hand edit made since the last watch
-/// batch is carried forward rather than overwritten.
-fn edit_scene_json(
+/// The read-modify-write every scene.json writer shares (the landing
+/// editors here, and /target's destination pointer). Disk is the source of
+/// truth read here — not the in-memory copy — so a hand edit made since the
+/// last watch batch is carried forward rather than overwritten.
+pub(super) fn edit_scene_json(
     st: &AppState,
     root: &Path,
     change: impl FnOnce(&mut Value) -> Result<(), String>,
@@ -182,16 +169,21 @@ fn edit_scene_json(
     Ok(scene)
 }
 
+/// One line of plain text: trimmed, capped, no control characters. The shape
+/// every text field here validates.
+fn plain_text<'a>(s: &'a str, max: usize, what: &str) -> Result<&'a str, String> {
+    let s = s.trim();
+    if s.chars().count() > max || s.chars().any(char::is_control) {
+        return Err(format!("{what} caps at {max} plain characters"));
+    }
+    Ok(s)
+}
+
 fn apply(scene: &mut Value, edit: &SceneEdit) -> Result<(), String> {
     if let Some(title) = &edit.title {
-        let title = title.trim();
+        let title = plain_text(title, MAX_TITLE, "the title")?;
         if title.is_empty() {
             return Err("the title cannot be empty".into());
-        }
-        if title.chars().count() > MAX_TITLE || title.chars().any(char::is_control) {
-            return Err(format!(
-                "the title fits on one line of up to {MAX_TITLE} characters"
-            ));
         }
         set_display(scene, "title", Some(json!(title)));
     }
@@ -217,12 +209,9 @@ fn apply(scene: &mut Value, edit: &SceneEdit) -> Result<(), String> {
     if let Some(tags) = &edit.tags {
         let mut clean: Vec<String> = Vec::new();
         for tag in tags {
-            let tag = tag.trim();
+            let tag = plain_text(tag, MAX_TAG, "a tag")?;
             if tag.is_empty() || clean.iter().any(|t| t == tag) {
                 continue;
-            }
-            if tag.chars().count() > MAX_TAG || tag.chars().any(char::is_control) {
-                return Err(format!("a tag caps at {MAX_TAG} plain characters"));
             }
             clean.push(tag.to_string());
         }
@@ -324,7 +313,7 @@ fn apply_permissions(scene: &mut Value, permissions: &[String]) -> Result<(), St
         .unwrap_or_default();
     let mut clean: Vec<&String> = Vec::new();
     for key in permissions {
-        let offered = super::landing::PERMISSIONS.iter().any(|(k, _)| k == key)
+        let offered = super::landing::PERMISSIONS.iter().any(|(k, ..)| k == key)
             || existing.iter().any(|e| e == key);
         if !offered {
             return Err(format!(
@@ -350,14 +339,9 @@ fn spawn_values(spawns: &[SpawnEdit]) -> Result<Option<Value>, String> {
     }
     let mut out = Vec::new();
     for spawn in spawns {
-        let name = spawn.name.trim();
-        if name.is_empty()
-            || name.chars().count() > MAX_SPAWN_NAME
-            || name.chars().any(char::is_control)
-        {
-            return Err(format!(
-                "a spawn point needs a plain name of up to {MAX_SPAWN_NAME} characters"
-            ));
+        let name = plain_text(&spawn.name, MAX_SPAWN_NAME, "a spawn point name")?;
+        if name.is_empty() {
+            return Err("a spawn point needs a name".into());
         }
         if out
             .iter()

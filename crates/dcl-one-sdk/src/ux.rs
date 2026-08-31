@@ -81,11 +81,11 @@ fn stderr_color() -> bool {
     color_allowed(std::io::stderr().is_terminal())
 }
 
-fn stdout_color() -> bool {
+pub(crate) fn stdout_color() -> bool {
     color_allowed(std::io::stdout().is_terminal())
 }
 
-fn tint(color: bool, sgr: &str, body: &str) -> String {
+pub(crate) fn tint(color: bool, sgr: &str, body: &str) -> String {
     match color {
         true => format!("\x1b[{sgr}m{body}\x1b[0m"),
         false => body.to_string(),
@@ -170,14 +170,33 @@ pub fn report_watch(err: &anyhow::Error) {
 pub struct Steps {
     total: usize,
     next: usize,
+    silent: bool,
 }
 
 impl Steps {
     pub fn new(total: usize) -> Self {
-        Steps { total, next: 1 }
+        Steps {
+            total,
+            next: 1,
+            silent: false,
+        }
+    }
+
+    /// The same accounting, none of the lines: for a run whose story is told
+    /// somewhere else (a page-driven publish narrates on the page, not into
+    /// the preview terminal).
+    pub fn silent() -> Self {
+        Steps {
+            total: 0,
+            next: 1,
+            silent: true,
+        }
     }
 
     pub fn done(&mut self, message: impl AsRef<str>) {
+        if self.silent {
+            return;
+        }
         let counter = format!("[{}/{}]", self.next, self.total);
         println!(
             "{} {}",
@@ -295,17 +314,40 @@ pub fn note_clocked(message: impl AsRef<str>) {
 /// continuation, or the blank one — is exactly this wide, or the column bends.
 const GUTTER: usize = 10;
 
-/// A re-float needs BOTH: this many lines since the last one, AND this long
-/// since the last one. Either alone misfires — a hundred lines can scroll past
-/// in ten seconds during a burst of saves, and five quiet minutes can pass with
-/// three lines on screen, where the address is still perfectly visible.
-const FLOAT_EVERY: usize = 100;
+/// A re-float needs BOTH: a screenful of lines since the last one, AND this
+/// long since the last one. Either alone misfires — a screenful can scroll
+/// past in ten seconds during a burst of saves, and five quiet minutes can
+/// pass with three lines on screen, where the address is still perfectly
+/// visible. The line count when the terminal will not say its height —
+/// stdout is a pipe, or the ioctl fails.
+const FLOAT_EVERY_FALLBACK: usize = 100;
 const FLOAT_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// The line half of the threshold: one terminal height, because that is
+/// exactly when the address crosses the top of the screen. Asked fresh each
+/// time so a resized window changes the answer.
+fn float_every() -> usize {
+    let rows = terminal_size::terminal_size()
+        .map(|(_, h)| h.0 as usize)
+        .unwrap_or(0);
+    every_from_rows(rows)
+}
+
+/// A height of zero is "unknown", not "tiny": that is what the ioctl reports
+/// on a pipe. The floor keeps a genuinely tiny window from floating on every
+/// few lines — the quiet period still gates it, but ten lines is already a
+/// screenful nobody is reading addresses off of.
+fn every_from_rows(rows: usize) -> usize {
+    match rows {
+        0 => FLOAT_EVERY_FALLBACK,
+        r => r.max(10),
+    }
+}
 
 /// Both conditions, in one place a test can reach without a clock or a
 /// terminal.
-fn should_float(lines: usize, since: Duration) -> bool {
-    lines >= FLOAT_EVERY && since >= FLOAT_AFTER
+fn should_float(lines: usize, every: usize, since: Duration) -> bool {
+    lines >= every && since >= FLOAT_AFTER
 }
 
 static SESSION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -315,7 +357,7 @@ static SESSION_NOTE: Mutex<String> = Mutex::new(String::new());
 static LAST_FLOAT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 /// Turn on the watch session's left gutter, and register the line to re-float
-/// every [`FLOAT_EVERY`] lines.
+/// once a screenful of lines has scrolled it away ([`float_every`]).
 ///
 /// A preview runs for hours and its address scrolls away in the first minute;
 /// by the time someone wants to open it on a phone the banner is a thousand
@@ -361,7 +403,7 @@ fn emit(line: String) {
     let n = SINCE_FLOAT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let mut last = LAST_FLOAT.lock().unwrap_or_else(PoisonError::into_inner);
     let since = last.map(|t| t.elapsed()).unwrap_or(FLOAT_AFTER);
-    if !should_float(n, since) {
+    if !should_float(n, float_every(), since) {
         // The line counter is NOT reset here. Once it is past the threshold it
         // stays past, so the float happens the moment the quiet period is also
         // satisfied rather than waiting for another hundred lines after it.
@@ -670,23 +712,33 @@ mod tests {
     use super::*;
 
     /// Both conditions, and neither alone. The AND is the whole design: a
-    /// hundred lines can scroll in ten seconds during a burst of saves, and
+    /// screenful can scroll in ten seconds during a burst of saves, and
     /// five quiet minutes can pass with three lines on screen.
     #[test]
     fn a_refloat_needs_both_the_lines_and_the_quiet() {
         let quiet = FLOAT_AFTER;
         let recent = FLOAT_AFTER - Duration::from_secs(1);
-        assert!(should_float(FLOAT_EVERY, quiet), "both satisfied");
-        assert!(should_float(FLOAT_EVERY * 5, quiet), "well past both");
+        assert!(should_float(50, 50, quiet), "both satisfied");
+        assert!(should_float(250, 50, quiet), "well past both");
         assert!(
-            !should_float(FLOAT_EVERY, recent),
+            !should_float(50, 50, recent),
             "a burst of lines inside the quiet period must not float"
         );
         assert!(
-            !should_float(FLOAT_EVERY - 1, quiet),
+            !should_float(49, 50, quiet),
             "a long quiet stretch with little output must not float"
         );
-        assert!(!should_float(0, Duration::ZERO));
+        assert!(!should_float(0, 50, Duration::ZERO));
+    }
+
+    /// The line threshold is the screen: a taller window scrolls the address
+    /// away later. Zero is a pipe saying nothing, not a zero-row terminal,
+    /// and a toy-sized window still gets a floor the quiet period paces.
+    #[test]
+    fn the_line_threshold_is_one_screen_height() {
+        assert_eq!(every_from_rows(50), 50, "a screenful of a 50-row window");
+        assert_eq!(every_from_rows(0), FLOAT_EVERY_FALLBACK, "unknown height");
+        assert_eq!(every_from_rows(3), 10, "a tiny window keeps the floor");
     }
 
     /// The gutter is a column, so every variant of it must be the same width

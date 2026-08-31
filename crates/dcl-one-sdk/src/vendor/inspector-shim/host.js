@@ -125,8 +125,6 @@ function serializeInspectorPreferences(value) {
   return Buffer.from(JSON.stringify({ version: 1, data: value }, null, 2), 'utf-8')
 }
 
-// ------------------------------------------------------------ composite i/o
-
 // A port of `getFilesInDirectory` from `host/fs-utils.ts` minus the `ignore`
 // package. Upstream feeds it gitignore patterns; the only call site left here
 // passes bare directory names, and a bare name in gitignore matches at any
@@ -185,8 +183,6 @@ async function createFsCompositeProvider(fs) {
   }
 }
 
-// --------------------------------------------------------------- crdt stream
-
 // A port of `host/stream.ts` + `logic/consume-stream.ts`.
 //
 // The ORDER here is the contract: the engine's whole state is enqueued BEFORE
@@ -228,8 +224,6 @@ function createStream(iter, engine) {
   void engine.update(1)
   return queue
 }
-
-// --------------------------------------------------------------------- host
 
 /**
  * `dist-cjs`, not `@dcl/ecs`: engine.js requires the CommonJS build, and the
@@ -325,7 +319,6 @@ async function createDataLayerHost(fs) {
 
   /** @type {DataServiceMethods} */
   const rpcMethods = {
-    // ------------------------------------------------------------ live
     crdtStream(iter) {
       return createStream(iter, engine)
     },
@@ -345,7 +338,6 @@ async function createDataLayerHost(fs) {
       return {}
     },
 
-    // ------------------------------------------------------------ stubs
     // undo/redo: no history is kept, so nothing can be undone.
     async undo() {
       return { type: '' }

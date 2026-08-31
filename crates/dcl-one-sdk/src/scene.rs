@@ -413,6 +413,47 @@ fn content_tag(path: &Path) -> Option<String> {
     Some(tag)
 }
 
+/// Bounded parallel map, input order preserved. The per-file read+hash work in
+/// deploy and the preview content mappings is independent blocking I/O, and
+/// upstream walks project files with a concurrency of 32 (js-sdk-toolchain
+/// b7a44a20); one worker per item up to that same cap.
+pub(crate) fn parallel_map<T, U>(items: &[T], f: impl Fn(&T) -> U + Sync) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+{
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get() * 2)
+        .unwrap_or(8)
+        .clamp(1, 32)
+        .min(items.len().max(1));
+    if workers <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        let (next, f) = (&next, &f);
+        for _ in 0..workers {
+            let tx = tx.clone();
+            s.spawn(move || loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                let _ = tx.send((i, f(item)));
+            });
+        }
+    });
+    drop(tx);
+    let mut slots: Vec<Option<U>> = std::iter::repeat_with(|| None).take(items.len()).collect();
+    for (i, v) in rx {
+        slots[i] = Some(v);
+    }
+    slots
+        .into_iter()
+        .map(|v| v.expect("every index mapped"))
+        .collect()
+}
+
 /// The part of a hash that identifies WHICH file, not which version of it —
 /// and the only part anything resolving a hash compares on, which is what
 /// makes the read side path-addressed rather than content-addressed. See
@@ -666,5 +707,16 @@ mod tests {
             parse_semver("7.22.6-25007982108.commit-83012ab").unwrap(),
             (7, 22, 6)
         );
+    }
+
+    /// More items than the worker cap, so the work-stealing index actually
+    /// wraps threads; order must still be the input's.
+    #[test]
+    fn parallel_map_preserves_order_and_covers_every_item() {
+        let items: Vec<usize> = (0..257).collect();
+        let expected: Vec<usize> = items.iter().map(|n| n * 2).collect();
+        assert_eq!(parallel_map(&items, |n| n * 2), expected);
+        assert!(parallel_map(&Vec::<usize>::new(), |n| *n).is_empty());
+        assert_eq!(parallel_map(&[7usize], |n| n + 1), vec![8]);
     }
 }

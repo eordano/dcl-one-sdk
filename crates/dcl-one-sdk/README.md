@@ -257,9 +257,14 @@ dcl-one-sdk deploy [--dir D] [-t|--target CATALYST] [--target-content URL]
 ```
 
 Builds, packages and signs the scene, then uploads it. Signing happens in a
-browser: deploy starts a small page on a throwaway port, waits for your wallet,
-and shuts it down once the signature comes back. `DCL_PRIVATE_KEY` signs
-headlessly instead, for CI.
+browser, on the preview server itself: deploy brings up the same server
+`start` runs — the scene about to go up is walkable from the same origin while
+you decide — and the landing page leads with the signing panel. The panel is
+server-rendered down to the entity id, which is minted at render time and is
+exactly the id the wallet signs; the browser's only job is the wallet
+hand-off, and the server goes down once the signature comes back.
+`DCL_PRIVATE_KEY` signs headlessly instead, for CI, and
+`DCL_ONE_SDK_LINKER_HOST=0.0.0.0` opens the signing gate to another device.
 
 While a preview is running, `/deploy` — the button in the page header — answers
 what this command would do before you run it: which target it would pick (your

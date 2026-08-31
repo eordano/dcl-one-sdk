@@ -1,19 +1,35 @@
 (dcl-one-sdk golden v1 composite production)
 TOOLCHAIN sdk=7.26.0 ecs=7.26.0 bundler=rolldown-1.2.4 blob=sha256:bfba3692f31514bd
-SCENE_COMPILED_JS_SIZE_PROD=481.5k bytes
-  ARTIFACT bin/index.js               5885 sha256=62c40fde5c2afc25
-  ARTIFACT bin/scene.js               1051 sha256=98124e6cf6a79d76
+SCENE_COMPILED_JS_SIZE_PROD=484.2k bytes
+  ARTIFACT bin/index.js               8414 sha256=2584dd6e51fbba27
+  ARTIFACT bin/scene.js               1149 sha256=0441eee7a04e15db
   ARTIFACT bin/sdk-runtime.js       474613 sha256=33bab9f0f499ea4a
 LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=513
 ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
   "use strict";
-  import * as entrypoint from "<SCENE>/src/index.ts"
   import { engine, NetworkEntity } from '@dcl/sdk/ecs'
   import * as sdk from '@dcl/sdk'
   import { compositeProvider } from '@dcl/sdk/composite-provider'
   import { compositeFromLoader } from '~sdk/all-composites'
   import { _initializeScripts } from '~sdk/script-utils'
+  // Registers the composite provider, and must be imported BEFORE the scene.
+  // A scene that calls initAssetPacks() at module scope -- as the Creator Hub
+  // templates do -- reads that provider while its own module body runs, and until
+  // this existed the only thing registering it was `@dcl/sdk`'s body, which the
+  // bundler emits at the END of the chunk. So the editor logged "[asset-packs] No
+  // SDK composite provider registered; SPAWN_ENTITY cannot resolve composites"
+  // and placing a smart item resolved nothing. Upstream sdk-commands has the same
+  // ordering (logic/bundle.ts) and gets away with it only because upstream scenes
+  // never call initAssetPacks themselves.
+  //
+  // A separate module because neither cheaper fix works: statements here run after
+  // every import including the scene's, and the bundler does not honour moving
+  // `@dcl/sdk` earlier -- a side-effect import is shaken to a bare require and the
+  // re-export below then reads a `_dcl_sdk` binding that was never declared, while
+  // `export * from` is emitted at the end wherever it is written.
+  import './sdk-boot.js'
+  import * as entrypoint from "<SCENE>/src/index.ts"
   import { compositeFromLoader as __sceneComposites } from './all-composites.js'
   Object.assign(compositeFromLoader, __sceneComposites)
 
@@ -48,17 +64,18 @@ ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   export * from "<SCENE>/src/index.ts"
   export * from '~sdk/script-utils'
   REQUIRE(scene): @dcl/sdk
+  REQUIRE(scene): @dcl/sdk/composite-provider
   REQUIRE(scene): @dcl/sdk/ecs
   REQUIRE(scene): @dcl/sdk/math
   REQUIRE(scene): ~sdk/all-composites
   REQUIRE(scene): ~sdk/script-utils
 MAIN_CRDT main.crdt 317 bytes sha256=a12a5297f2515775 (native, 1 composite)
-DEPLOY entity=bafkreibuwoz2aureyo7oov6bd3vhsp3ozmz2pxyhdjrszqjt7cncdiskxa files=6 total=483.7k bytes
+DEPLOY entity=bafkreiggcyw7hzb23jwfc5hweomishagwdb2iqvqmt4vheahf5aevrmrj4 files=6 total=486.3k bytes
   bafkreibig7gpevw73nv2ygong3jlgzthtzutgbfy6u3qwpzxgzbujzc5cu scene.json 166 bytes
   bafkreifbfjjjp4srk523rnwg3ktgpy65qmvh2swj7ebkyzi5ncvkqtg4pq main.crdt 317 bytes
   bafybeiagimmlavww7momge3jfpkxtniibletbghzk6eybyv4jov777wvl4 bin/sdk-runtime.js 474613 bytes
-  bafkreieycjhgz5vhtv3btvbq72tlqkyaehbijr4dwmbluqlzx2xq6e7ysi bin/scene.js 1051 bytes
-  bafkreidcyqh54xbk7qsqvpmbfptzrug3vqtxn3p44cn5cc7nz33iar24pm bin/index.js 5885 bytes
+  bafkreiaeihxopicocxnxz3fllaejkbklculqbkef6txrbthpivfhxjbw6q bin/scene.js 1149 bytes
+  bafkreibfqtow4up3xit7gcwzctiugldq2b3rxtden5my3zozzkaj2vtp3m bin/index.js 8414 bytes
   bafkreiajivmg7dakw5cltgz5g6lmx7ntzxvvz2r5cf6xtznoappci2w6nu assets/scene/main.composite 1664 bytes
 EVAL bin/index.js
   READFILE: bin/sdk-runtime.js

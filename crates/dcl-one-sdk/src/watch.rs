@@ -187,6 +187,7 @@ impl WatchSession {
             None,
             &scene_rel,
             generated.max_composite_entity,
+            crate::entrypoint::authoritative_multiplayer(&project),
         )?;
         tracing::info!("loader stub saved {}", outfile.display());
         if initial_build {
@@ -197,8 +198,13 @@ impl WatchSession {
         }
         let tsconfig = project.tsconfig()?;
         let prebuilt = crate::prebuilt::locate(&project);
-        let sdk_opts =
-            crate::build::sdk_chunk_options(&project, &generated, &sdk_rel, &tsconfig, opts)?;
+        let sdk_opts = crate::build::sdk_chunk_options(
+            &project,
+            &generated,
+            project.root.join(&sdk_rel),
+            &tsconfig,
+            opts,
+        )?;
         let scene_opts = EsbuildOptions {
             production: opts.production,
             entrypoint: generated.entrypoint,
@@ -238,6 +244,7 @@ impl WatchSession {
             smart_installed = crate::build::install_smart_chunk(
                 &project,
                 prebuilt.as_ref(),
+                &project.root,
                 &scene_rel,
                 &smart_rel,
             )?;
@@ -248,6 +255,7 @@ impl WatchSession {
                     Some(smart_rel.as_str()),
                     &scene_rel,
                     generated.max_composite_entity,
+                    crate::entrypoint::authoritative_multiplayer(&project),
                 )?;
             }
         }
@@ -292,6 +300,7 @@ impl WatchSession {
             self.smart_installed.then_some(self.smart_rel.as_str()),
             &self.scene_rel,
             self.max_composite_entity,
+            crate::entrypoint::authoritative_multiplayer(&self.project),
         ) {
             ux::report_watch(&e);
         }
@@ -348,6 +357,7 @@ impl WatchSession {
                     match crate::build::install_smart_chunk(
                         &self.project,
                         self.prebuilt.as_ref(),
+                        &self.project.root,
                         &self.scene_rel,
                         &self.smart_rel,
                     ) {

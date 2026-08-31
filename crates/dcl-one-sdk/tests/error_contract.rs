@@ -939,21 +939,24 @@ fn g30_rolldown_backend_needs_the_feature() {
     assert_verbose_chain(&args, &[]);
 }
 
+/// A world scene with no target resolves to the public worlds server instead
+/// of refusing. The additive default keeps the run hermetic (no overwrite
+/// probe of the real server) and the 1s linker timeout is what ends it.
 #[test]
-fn g31_world_deploy_needs_an_explicit_server() {
+fn g31_world_deploy_defaults_to_the_public_worlds_server() {
     let f = Fixture::new("g31");
     f.write("scene.json", SCENE_WORLD);
     f.write("bin/index.js", "module.exports = {}\n");
+    let envs = [("DCL_ONE_SDK_LINKER_TIMEOUT_SECS", "1")];
     let dir = f.dir_arg();
-    let args = ["deploy", "--dir", &dir, "--skip-build"];
-    let out = run(&args, &[]);
-    assert_contract(&out, f.path(), "needs an explicit server");
+    let args = ["deploy", "--dir", &dir, "--skip-build", "--no-browser"];
+    let out = run(&args, &envs);
+    assert_contract(&out, f.path(), "no signature arrived");
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr_of(&out).contains("worlds-content-server"),
-        "stderr: {}",
-        stderr_of(&out)
+        stdout.contains("worlds-content-server.decentraland.org"),
+        "worlds default missing from stdout: {stdout}"
     );
-    assert_verbose_chain(&args, &[]);
 }
 
 #[test]

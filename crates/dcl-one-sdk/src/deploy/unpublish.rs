@@ -2,7 +2,7 @@ use super::net::{resolve_target_from, url_path, TargetConsent};
 use super::run::load_signer;
 use crate::ux::{self, TrySteps, UserError};
 use crate::world::signed_headers;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use catalyrst_crypto::Wallet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -51,27 +51,15 @@ pub async fn unpublish(opts: &UnpublishOptions) -> Result<()> {
     .await?;
     let path = format!("{}/scenes/{parcel}", url_path(&base));
     let url = format!("{base}/scenes/{parcel}");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("building the http client")?;
+    let client = super::client(Duration::from_secs(30), Duration::from_secs(30))?;
     let mut req = client.delete(&url);
     for (k, v) in signed_headers(&signer, "delete", &path)? {
         req = req.header(k, v);
     }
-    let resp =
-        match req.send().await {
-            Ok(resp) => resp,
-            Err(e) => return Err(UserError::new(
-                "could not reach the content server",
-                TrySteps::one("check the server is running and the URL is right").and(
-                    "targets: --target <catalyst-domain>, --target-content <content-server-url>",
-                ),
-            )
-            .why(format!("request failed: {url}"))
-            .caused_by(e)
-            .into()),
-        };
+    let resp = match req.send().await {
+        Ok(resp) => resp,
+        Err(e) => return Err(super::unreachable_server(&url, e)),
+    };
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {

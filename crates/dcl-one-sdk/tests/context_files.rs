@@ -227,10 +227,9 @@ fn unreachable_listing_still_installs_the_skill_and_exits_zero() {
     );
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
     let stdout = stdout_of(&out);
-    assert!(
-        stdout.contains("Installed skill .claude/skills/"),
-        "{stdout}"
-    );
+    // Count-independent: the number comes from the build.rs-generated skills
+    // table, so pinning it is what made this assertion go stale in cfa0f5a15.
+    assert!(stdout.contains("skills into .claude/skills/"), "{stdout}");
     assert!(
         stdout.contains("Could not reach the ai-sdk-context corpus"),
         "{stdout}"

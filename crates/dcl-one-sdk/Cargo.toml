@@ -1,6 +1,6 @@
 [package]
 name = "dcl-one-sdk"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 description = "Binary-compatible Rust replacement for @dcl/sdk-commands: bundle (rolldown, in-process), preview-serve, and deploy Decentraland SDK7 scenes"
 # Same dual terms as abgen, so embedding the converter in-process later is a
@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 sha2 = { workspace = true }
+# The watch banner's re-float paces itself to the terminal height; this is
+# the cross-platform probe (ioctl on unix, the console API on windows).
+terminal_size = "0.4"
 oxc_sourcemap = "8"
 catalyrst-hashing = { workspace = true }
 catalyrst-crypto = { workspace = true }
@@ -43,9 +46,9 @@ prost = "0.14"
 qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 rand = "0.10"
 tokio-tungstenite = { workspace = true }
-rolldown = { version = "=1.2.5", optional = true }
-rolldown_common = { version = "=1.2.5", optional = true }
-rolldown_utils = { version = "=1.2.5", optional = true }
+rolldown = { version = "=1.2.6", optional = true }
+rolldown_common = { version = "=1.2.6", optional = true }
+rolldown_utils = { version = "=1.2.6", optional = true }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(unix)'.dependencies]

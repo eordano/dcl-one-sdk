@@ -220,6 +220,12 @@ fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) ->
             continue;
         };
         let tag = root_tag(&p.root, machine);
+        // Deliberately sequential where upstream parallelized (b7a44a20): this
+        // route is unauthenticated and uncached, a wearable's file set is
+        // small, and content_tag memoises the digests anyway. Also stronger
+        // than upstream on ids: we mint content-versioned hashes here where
+        // upstream keeps plain ones — the read side resolves on
+        // hash_path_part alone, so both shapes decode.
         let contents: Vec<Value> = collect_publishable_files(&p.root)
             .unwrap_or_default()
             .iter()
@@ -490,15 +496,12 @@ pub(super) fn build_scene_entity(project: &Project, machine: &str) -> Value {
         }
     };
     let tag = root_tag(root, machine);
-    let content: Vec<Value> = rels
-        .iter()
-        .map(|rel| {
-            json!({
-                "file": rel,
-                "hash": b64_content_hash_in_root(&tag, rel, &root.join(rel)),
-            })
+    let content: Vec<Value> = crate::scene::parallel_map(&rels, |rel| {
+        json!({
+            "file": rel,
+            "hash": b64_content_hash_in_root(&tag, rel, &root.join(rel)),
         })
-        .collect();
+    });
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -662,25 +665,11 @@ mod tests {
     }
 
     fn contents_state(projects: Vec<Project>) -> AppState {
-        let (reload_tx, _) = tokio::sync::broadcast::channel(4);
-        AppState {
-            projects: std::sync::RwLock::new(projects),
-            machine: "m".to_string(),
-            reload_tx,
-            offline_comms: true,
-            port: 8000,
-            data_layer: None,
-            entity_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-            optimized_assets_url: std::sync::OnceLock::new(),
-            local_ab: false,
-            deep_link_extra: String::new(),
-            mcp: true,
-            mcp_port: crate::joinblock::DEFAULT_EXPLORER_MCP_PORT,
-            allow_remote_deploy: false,
-            deploy_dry_run: true,
-            explorer_params: Vec::new(),
-            recent_requests: std::sync::Mutex::new(std::collections::VecDeque::new()),
-        }
+        let mut st = crate::start::testkit::state(projects);
+        st.machine = "m".to_string();
+        st.port = 8000;
+        st.local_ab = false;
+        st
     }
 
     async fn get_contents_response(st: &Arc<AppState>, hash: &str) -> Response {

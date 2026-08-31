@@ -38,8 +38,6 @@ fn main_seed() -> u64 {
         .unwrap_or(0x5eed_1234_abcd_0001)
 }
 
-// ---- the generated schema shape ------------------------------------------
-
 #[derive(Clone, Debug)]
 enum Gen {
     Map(Vec<(String, Gen)>),
@@ -130,8 +128,6 @@ fn object(props: &[(String, Gen)]) -> String {
     format!("{{{}}}", body.join(","))
 }
 
-// ---- generation ----------------------------------------------------------
-
 struct Rng(u64);
 
 impl Rng {
@@ -220,8 +216,6 @@ fn gen_props(rng: &mut Rng, depth: usize) -> Vec<(String, Gen)> {
         .map(|n| (n.to_string(), gen_schema(rng, depth - 1)))
         .collect()
 }
-
-// ---- values -------------------------------------------------------------
 
 /// Which shapes a case's values are drawn from.
 ///
@@ -596,8 +590,6 @@ fn floats(rng: &mut Rng, keys: &[&str]) -> serde_json::Value {
     }
     serde_json::Value::Object(obj)
 }
-
-// ---- the node side -------------------------------------------------------
 
 const RUNNER: &str = r#"
 const fs = require('fs')

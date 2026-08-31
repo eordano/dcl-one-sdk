@@ -19,22 +19,28 @@ fn free_port() -> Option<u16> {
     Some(l.local_addr().ok()?.port())
 }
 
-/// abgen's canonical port, or a random one the deeplink carries. The probe binds
-/// the wildcard address because that is what abgen binds: a loopback probe
-/// false-passes when another abgen holds 0.0.0.0:5147 with SO_REUSEADDR.
+/// The sidecar's registered port (ports.toml :5175), purely a debuggability
+/// nicety: the preview server proxies to whichever port was actually bound, so
+/// a second preview on the same box just lands on a random free port. It must
+/// never be 5147 — the dedicated stack abgen owns that (deploy/PORTS.md), and a
+/// sidecar preferring it races the stack unit for the bind on every restart.
+const SIDECAR_PREFERRED_PORT: u16 = 5175;
+
+/// The probe binds the wildcard address because that is what abgen binds: a
+/// loopback probe false-passes when another abgen holds the wildcard with
+/// SO_REUSEADDR.
 fn sidecar_port() -> Option<u16> {
-    const PREFERRED: u16 = 5147;
-    if std::net::TcpListener::bind(("0.0.0.0", PREFERRED)).is_ok() {
-        return Some(PREFERRED);
+    if std::net::TcpListener::bind(("0.0.0.0", SIDECAR_PREFERRED_PORT)).is_ok() {
+        return Some(SIDECAR_PREFERRED_PORT);
     }
     free_port()
 }
 
 /// Where abgen looks for an already-converted bundle before converting one
-/// itself (ABGEN_UPSTREAM_AB_CDN overrides). Must never be 127.0.0.1:5147:
-/// that is abgen's own port, so every miss re-entered the same server until
-/// "Too many open files (os error 24)". A real CDN also makes wearables usable
-/// without converting Decentraland's own on every boot.
+/// itself (ABGEN_UPSTREAM_AB_CDN overrides). Must never be the sidecar's own
+/// address: every miss re-entered the same server until "Too many open files
+/// (os error 24)". A real CDN also makes wearables usable without converting
+/// Decentraland's own on every boot.
 fn upstream_ab_cdn_default() -> String {
     "https://ab-cdn.interconnected.online".to_string()
 }
@@ -153,7 +159,9 @@ fn absorb_gpu_chatter(line: &str, qual: &std::sync::Mutex<GpuQual>) -> bool {
             }
         }
         if qualified {
-            let mut qual = qual.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut qual = qual
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match backend {
                 "cuda" => qual.cuda = true,
                 "wgpu" => qual.wgpu = true,
@@ -419,6 +427,15 @@ mod tests {
             std::process::id(),
             rand::random::<u64>()
         ))
+    }
+
+    #[test]
+    fn the_sidecar_never_prefers_the_dedicated_abgen_port() {
+        assert_ne!(
+            SIDECAR_PREFERRED_PORT, 5147,
+            "5147 is the dedicated stack abgen's port (deploy/PORTS.md); a \
+             sidecar preferring it races the stack unit for the bind"
+        );
     }
 
     #[test]

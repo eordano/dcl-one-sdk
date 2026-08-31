@@ -1,8 +1,8 @@
 use crate::ux::{self, TrySteps, UserError};
 use crate::workspace::Workspace;
 use crate::{entrypoint, esbuild, prebuilt, scene::Project, split};
-use anyhow::Result;
-use std::path::PathBuf;
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 
@@ -12,7 +12,23 @@ pub struct BuildOptions {
     pub ignore_composite: bool,
     pub custom_entry_point: bool,
     pub skip_type_check: bool,
+    /// Where the bundle artifacts land. `None` builds in place — the dev
+    /// tree the watcher owns. A deploy builds into [`RELEASE_OUT`] instead:
+    /// the debug/release split rustc keeps, so the two profiles stop
+    /// clobbering one file and a publish stops rewriting the very tree it
+    /// just fingerprinted.
+    pub out_root: Option<PathBuf>,
+    /// No progress narration: for a build whose story a page already tells
+    /// (a page-driven publish). Errors and warnings still print.
+    pub quiet: bool,
 }
+
+/// The release profile's artifact root, relative to the scene: where a
+/// deploy's production bundle lands, and the first place `deploy::prepare`
+/// reads a payload file from. Stale only when `--skip-build` skips the
+/// rebuild that normally refreshes it — the same hazard a stale in-tree
+/// bundle always had.
+pub const RELEASE_OUT: &str = ".dcl-one/release";
 
 /// `"" / "s"`, so a count and its noun agree.
 pub fn plural(n: u64) -> &'static str {
@@ -48,6 +64,12 @@ pub fn member_options(opts: &BuildOptions, project: &Project) -> BuildOptions {
         ignore_composite: opts.ignore_composite,
         custom_entry_point: opts.custom_entry_point,
         skip_type_check: opts.skip_type_check,
+        // Each member's release artifacts land under its own root.
+        out_root: opts
+            .out_root
+            .as_ref()
+            .map(|_| project.root.join(RELEASE_OUT)),
+        quiet: opts.quiet,
     }
 }
 
@@ -65,7 +87,15 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
     let project = Project::load(&opts.dir)?;
     let main = project.main_output()?;
     let tsconfig = project.tsconfig()?;
-    let outfile = project.root.join(&main);
+    let art_root = opts
+        .out_root
+        .clone()
+        .unwrap_or_else(|| project.root.clone());
+    let outfile = art_root.join(&main);
+    if let Some(parent) = outfile.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
     let (sdk_rel, scene_rel) = split::chunk_rel_paths(&main);
     let smart_rel = split::smart_chunk_rel_path(&main);
     let entity_names = if opts.ignore_composite {
@@ -74,7 +104,10 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
         crate::entity_names::collect(&project.root)
     };
     let base_steps = if opts.skip_type_check { 4 } else { 5 };
-    let mut steps = ux::Steps::new(base_steps + usize::from(!entity_names.is_empty()));
+    let mut steps = match opts.quiet {
+        true => ux::Steps::silent(),
+        false => ux::Steps::new(base_steps + usize::from(!entity_names.is_empty())),
+    };
 
     let generated = entrypoint::generate(
         &project,
@@ -105,12 +138,18 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
     let prebuilt = prebuilt::locate(&project);
     match &prebuilt {
         Some(chunks) => {
-            prebuilt::install(&chunks.core, &project.root.join(&sdk_rel))?;
+            prebuilt::install(&chunks.core, &art_root.join(&sdk_rel))?;
             tracing::info!("prebuilt sdk chunk installed {sdk_rel}");
             steps.done(format!("SDK chunk installed {sdk_rel} (prebuilt)"));
         }
         None => {
-            let sdk_opts = sdk_chunk_options(&project, &generated, &sdk_rel, &tsconfig, opts)?;
+            let sdk_opts = sdk_chunk_options(
+                &project,
+                &generated,
+                art_root.join(&sdk_rel),
+                &tsconfig,
+                opts,
+            )?;
             esbuild::bundle(&project, &sdk_opts).await?;
             tracing::info!("sdk chunk saved {}", sdk_opts.outfile.display());
             steps.done(saved(
@@ -125,7 +164,7 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
     let scene_opts = esbuild::EsbuildOptions {
         production: opts.production,
         entrypoint: generated.entrypoint.clone(),
-        outfile: project.root.join(&scene_rel),
+        outfile: art_root.join(&scene_rel),
         tsconfig,
         aliases: vec![],
         externals: split::scene_externals(&project),
@@ -140,13 +179,20 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
         started,
     ));
 
-    let smart_installed = install_smart_chunk(&project, prebuilt.as_ref(), &scene_rel, &smart_rel)?;
+    let smart_installed = install_smart_chunk(
+        &project,
+        prebuilt.as_ref(),
+        &art_root,
+        &scene_rel,
+        &smart_rel,
+    )?;
     split::write_loader_stub(
         &outfile,
         &sdk_rel,
         smart_installed.then_some(smart_rel.as_str()),
         &scene_rel,
         generated.max_composite_entity,
+        crate::entrypoint::authoritative_multiplayer(&project),
     )?;
     tracing::info!("loader stub saved {}", outfile.display());
     steps.done(if smart_installed {
@@ -183,14 +229,20 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
     }
 
     match checking {
-        None => ux::note("type check skipped (--skip-type-check)"),
+        None => {
+            if !opts.quiet {
+                ux::note("type check skipped (--skip-type-check)");
+            }
+        }
         Some(handle) => {
-            let progress = ux::Slow::start("type checking");
+            let progress = (!opts.quiet).then(|| ux::Slow::start("type checking"));
             let (checked, took) = handle.await.map_err(|e| match e.try_into_panic() {
                 Ok(panic) => std::panic::resume_unwind(panic),
                 Err(e) => anyhow::anyhow!("type check task: {e}"),
             })?;
-            progress.finish();
+            if let Some(progress) = progress {
+                progress.finish();
+            }
             checked?;
             tracing::info!("type checking completed without errors");
             steps.done(format!(
@@ -208,7 +260,7 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
 pub fn sdk_chunk_options(
     project: &Project,
     generated: &entrypoint::Generated,
-    sdk_rel: &str,
+    outfile: PathBuf,
     tsconfig: &std::path::Path,
     opts: &BuildOptions,
 ) -> Result<esbuild::EsbuildOptions> {
@@ -224,7 +276,7 @@ pub fn sdk_chunk_options(
     Ok(esbuild::EsbuildOptions {
         production: opts.production,
         entrypoint: generated.dir.join("sdk-runtime-entry.js"),
-        outfile: project.root.join(sdk_rel),
+        outfile,
         tsconfig: tsconfig.to_path_buf(),
         aliases,
         externals: vec![],
@@ -238,15 +290,16 @@ pub fn sdk_chunk_options(
 pub fn install_smart_chunk(
     project: &Project,
     prebuilt: Option<&prebuilt::Prebuilt>,
+    art_root: &Path,
     scene_rel: &str,
     smart_rel: &str,
 ) -> Result<bool> {
     let Some(chunks) = prebuilt else {
         return Ok(false);
     };
-    let scene_chunk = project.root.join(scene_rel);
+    let scene_chunk = art_root.join(scene_rel);
     if !prebuilt::scene_needs_smart_chunk(project, &scene_chunk) {
-        prebuilt::remove_stale_smart_chunk(&project.root, smart_rel);
+        prebuilt::remove_stale_smart_chunk(art_root, smart_rel);
         return Ok(false);
     }
     let Some(smart) = &chunks.smart else {
@@ -266,7 +319,7 @@ pub fn install_smart_chunk(
         ))
         .into());
     };
-    prebuilt::install(smart, &project.root.join(smart_rel))?;
+    prebuilt::install(smart, &art_root.join(smart_rel))?;
     tracing::info!("prebuilt smart-item chunk installed {smart_rel}");
     Ok(true)
 }

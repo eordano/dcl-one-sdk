@@ -230,6 +230,26 @@ enum Command {
             help = "Read the --tunnel auth token from a file (wins over DCL_ONE_SDK_TUNNEL_TOKEN; --tunnel-token wins over both)"
         )]
         tunnel_token_file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Do not attach the authoritative-server isolate a scene.json authoritativeMultiplayer flag would auto-start"
+        )]
+        no_host: bool,
+    },
+    #[command(
+        about = "Run the scene's authoritative-server isolate against a running preview's room"
+    )]
+    Host {
+        #[arg(long, default_value = ".", help = "Project folder to host")]
+        dir: PathBuf,
+        #[arg(
+            long,
+            default_value = "http://127.0.0.1:8000",
+            help = "The preview server whose mini-comms room this host joins"
+        )]
+        preview: String,
+        #[arg(long, default_value = "room-1", help = "Room id on the preview")]
+        room: String,
     },
     #[command(about = "Sign and publish the scene to a catalyst or worlds content server")]
     Deploy {
@@ -265,8 +285,11 @@ enum Command {
         timestamp: Option<i64>,
         #[arg(long, help = "Also write the entity JSON to this path")]
         entity_out: Option<PathBuf>,
-        #[arg(long, help = "Deploy every scene in the workspace, not just one")]
-        multi_scene: bool,
+        #[arg(
+            long,
+            help = "Replace ALL scenes in the world with this one (default: additive — deploy alongside, keep the others). Destructive, and needs a pre-flight check that a Cloudflare-fronted worlds server challenges"
+        )]
+        replace_world_scenes: bool,
         #[arg(
             short = 'y',
             long,
@@ -491,6 +514,11 @@ async fn main() {
         ux::report(&e, verbose);
         std::process::exit(1);
     }
+    // Success leaves the same abrupt way the error path always has. Falling
+    // off the end instead would drop the tokio runtime, and that drop waits
+    // for whatever blocking walk or stubborn child is still out there — which
+    // reads as a ctrl-c that does not stop. A CLI has nothing to flush.
+    std::process::exit(0);
 }
 
 async fn run(command: Command) -> Result<()> {
@@ -546,6 +574,8 @@ async fn run(command: Command) -> Result<()> {
                 ignore_composite,
                 custom_entry_point,
                 skip_type_check,
+                out_root: None,
+                quiet: false,
             };
             if workspace::member_folders(&opts.dir)?.is_some() {
                 let ws = workspace::Workspace::load(&opts.dir)?;
@@ -596,6 +626,7 @@ async fn run(command: Command) -> Result<()> {
             tunnel,
             tunnel_token,
             tunnel_token_file,
+            no_host,
         } => {
             if tunnel.as_deref().map(str::trim) == Some("help") {
                 println!("{}", dcl_one_sdk::tunnel::tunnel_help());
@@ -644,8 +675,12 @@ async fn run(command: Command) -> Result<()> {
                 data_layer,
                 tunnel,
                 tunnel_token,
+                no_host,
             })
             .await
+        }
+        Command::Host { dir, preview, room } => {
+            dcl_one_sdk::host::host(&dcl_one_sdk::host::HostOptions { dir, preview, room }).await
         }
         Command::Deploy {
             dir,
@@ -656,7 +691,7 @@ async fn run(command: Command) -> Result<()> {
             dry_run,
             timestamp,
             entity_out,
-            multi_scene,
+            replace_world_scenes,
             yes,
             no_browser,
             ci,
@@ -671,11 +706,15 @@ async fn run(command: Command) -> Result<()> {
                 dry_run,
                 timestamp,
                 entity_out,
-                multi_scene,
+                // Additive is the default; the flag opts into replacing all.
+                multi_scene: !replace_world_scenes,
                 yes,
                 no_browser,
                 ci,
                 port,
+                quiet: false,
+                host_signer: None,
+                identity: None,
             })
             .await
         }

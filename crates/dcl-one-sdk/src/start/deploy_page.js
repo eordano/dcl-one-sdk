@@ -1,68 +1,52 @@
-/* /deploy's enhancement, in the landing script's mould: the server stays the
-   single renderer. The script posts the same form the no-JS page posts, then
-   re-fetches the page and swaps it in place, so a run reads as live status
-   instead of navigations; while a run is in flight it polls. Without it the
-   form POSTs plainly and a <noscript> meta refresh follows the run. */
 (() => {
   'use strict';
   if (!document.getElementById('run-status')) return;
 
-  let toastTimer;
-  const toast = (message) => {
-    let el = document.querySelector('.toast');
-    if (!el) {
-      el = document.createElement('div');
-      el.className = 'toast toast--err';
-      document.body.appendChild(el);
-    }
-    el.textContent = message;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.remove(), 6000);
-  };
-
-  const stateOf = () => {
-    const region = document.getElementById('run-status');
-    return region ? region.dataset.state : 'idle';
-  };
-
-  /* The signing page is opened from here rather than by the deploy process:
-     the page owns the flow, and it opens the tab exactly once per run, on the
-     first poll that knows the URL. A popup blocker leaves the panel's link. */
-  let openedSigning = false;
-  const maybeOpenSigning = () => {
-    const region = document.getElementById('run-status');
-    if (!region || region.dataset.state !== 'running') return;
-    const url = region.dataset.signing;
-    if (url && !openedSigning) {
-      openedSigning = true;
-      window.open(url, '_blank', 'noopener');
-    }
+  const shape = (doc) => {
+    const region = doc.getElementById('run-status');
+    return region ? region.dataset.state + '|' + (region.dataset.signing || '') : '';
   };
 
   let pollTimer;
   const settle = () => {
-    maybeOpenSigning();
-    if (stateOf() === 'running') {
-      clearTimeout(pollTimer);
-      pollTimer = setTimeout(refresh, 1800);
-    }
+    const region = document.getElementById('run-status');
+    if (!region || region.dataset.state !== 'running') return;
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(refresh, 1800);
   };
 
-  /* Swapping the whole main would eat the server field mid-keystroke, so a
-     poll that lands while the visitor types swaps only the status region. */
+  /* The wallet panel lives inside the polled region, so swapping it would
+     wipe a prompt mid-answer. While a signer is live and the run shape is
+     unchanged, the fresh render is identical anyway and is dropped. */
   const morph = (html) => {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const active = document.activeElement;
-    const typing = active && active.tagName === 'INPUT' && active.type === 'text';
+    const doc = parsePage(html);
+    const live = shape(document);
+    const next = shape(doc);
+    const signing = live.startsWith('running|') && live !== 'running|';
+    if (window.__signBusy || (signing && live === next)) {
+      settle();
+      return;
+    }
+    /* Still waiting: update ONLY the feedback region, in place. Replacing the
+       whole page every poll reflowed the card and the payload list around it,
+       so the progress landed in a spot that jumped each tick. Swapping just
+       #run-status keeps everything else fixed and loads the real feedback
+       where it already sits. A genuine state change (idle<->running<->done)
+       still renders the whole card, so the publish button and the final
+       result arrive together. */
+    const liveRegion = document.getElementById('run-status');
+    const nextRegion = doc.getElementById('run-status');
+    const bothRunning = live.startsWith('running|') && next.startsWith('running|');
+    if (bothRunning && liveRegion && nextRegion) {
+      liveRegion.replaceWith(nextRegion);
+      signInit();
+      settle();
+      return;
+    }
     const nextMain = doc.querySelector('main.dash');
     const liveMain = document.querySelector('main.dash');
-    if (typing || !nextMain || !liveMain) {
-      const next = doc.getElementById('run-status');
-      const live = document.getElementById('run-status');
-      if (next && live) live.replaceWith(next);
-    } else {
-      liveMain.replaceWith(nextMain);
-    }
+    if (nextMain && liveMain) liveMain.replaceWith(nextMain);
+    signInit();
     settle();
   };
 
@@ -78,6 +62,7 @@
     }
     morph(await response.text());
   };
+  window.__signSettled = refresh;
 
   document.addEventListener('submit', async (event) => {
     const form = event.target.closest && event.target.closest('#publish');
@@ -85,22 +70,19 @@
     event.preventDefault();
     const button = form.querySelector('.jn__cta');
     if (button) button.disabled = true;
-    openedSigning = false;
     const response = await fetch(form.action, {
       method: 'POST',
       body: new URLSearchParams(new FormData(form)),
     }).catch(() => null);
     if (button) button.disabled = false;
     if (!response) {
-      toast('The preview server did not answer');
+      pageToast(PAGE_OFFLINE, true);
       return;
     }
     if (!response.ok) {
-      toast((await response.text()).trim());
+      pageToast((await response.text()).trim(), true);
       return;
     }
-    /* The POST redirects back to the page, and fetch followed it: what came
-       back IS the fresh page, so it morphs directly and the poll takes over. */
     morph(await response.text());
   });
 

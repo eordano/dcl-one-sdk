@@ -74,14 +74,14 @@ pub async fn pack(opts: &PackOptions) -> Result<()> {
             ignore_composite: false,
             custom_entry_point: false,
             skip_type_check: false,
+            out_root: None,
+            quiet: false,
         })
         .await?;
     }
 
     let rel_paths = deploy::collect_publishable_files(&root)?;
     let mut seen_lower = HashSet::new();
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut total: u64 = 0;
     for rel in &rel_paths {
         if !seen_lower.insert(rel.to_lowercase()) {
             return Err(UserError::new(
@@ -90,12 +90,18 @@ pub async fn pack(opts: &PackOptions) -> Result<()> {
             )
             .into());
         }
+    }
+    let read = crate::scene::parallel_map(&rel_paths, |rel| -> Result<_> {
         let p = root.join(rel);
         let bytes =
             std::fs::read(&p).with_context(|| format!("reading content file {}", p.display()))?;
-        total += bytes.len() as u64;
-        files.push((rel.clone(), bytes));
+        Ok((rel.clone(), bytes))
+    });
+    let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(read.len());
+    for entry in read {
+        files.push(entry?);
     }
+    let total: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
     if files.is_empty() {
         return Err(UserError::new(
             "no publishable files found to pack",

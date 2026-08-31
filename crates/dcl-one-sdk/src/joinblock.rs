@@ -13,6 +13,14 @@ pub fn web_explorer_base() -> String {
         .to_string()
 }
 
+pub fn world_name(scene_json: &Value) -> Option<String> {
+    scene_json
+        .get("worldConfiguration")
+        .and_then(|w| w.get("name"))
+        .and_then(|n| n.as_str())
+        .map(str::to_string)
+}
+
 pub fn base_coords(scene_json: &Value) -> (i64, i64) {
     let scene = scene_json.get("scene");
     let base = scene

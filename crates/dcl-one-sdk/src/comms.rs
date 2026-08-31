@@ -55,6 +55,7 @@ enum PeerFrame {
 pub fn routes(state: Arc<CommsState>) -> Router {
     Router::new()
         .route("/mini-comms/{room_id}", get(ws_upgrade))
+        .route("/mini-comms/{room_id}/host", get(host_upgrade))
         .with_state(state)
 }
 
@@ -268,6 +269,169 @@ async fn deliver(sink: &mut SplitSink<WebSocket, Message>, frame: Option<PeerFra
         }
         None => bail!("peer channel closed"),
     }
+}
+
+/* ---------- host side-door (multiplayer-server-design.md, M1) ----------
+The scene host is just another room peer, but it is OUR process: it joins
+through this JSON door instead of the protobuf handshake, and the relay
+transcodes both ways. Sender addresses on inbound updates are stamped by
+the relay from the room registry -- the host trusts ctx.from because this
+process verified the signed challenge, not because a client said so.
+
+Loopback-only: the host runs beside the preview. A stranger on the LAN
+gets a 403 here where a wallet-signed handshake meets them on the peer
+door. Frames, host -> relay:
+  {"type":"update","body":"<base64>","unreliable":bool,"to":["0x..",..]?}
+relay -> host:
+  {"type":"welcome","alias":n,"peers":{"<alias>":"0x..",..}}
+  {"type":"join","alias":n,"address":"0x.."}
+  {"type":"leave","alias":n,"address":"0x.."}
+  {"type":"update","from":n,"fromAddress":"0x..","body":"<base64>"}   */
+
+/// The address the host peer joins under: the zero address is valid to every
+/// eth-address check yet mintable by no wallet, so a real client can never
+/// collide with (or spoof) the host slot through the signed door.
+const HOST_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
+async fn host_upgrade(
+    ws: WebSocketUpgrade,
+    Path(room_id): Path<String>,
+    State(st): State<Arc<CommsState>>,
+    request: axum::extract::Request,
+) -> Response {
+    let loopback = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|ci| ci.0.ip().is_loopback());
+    if !loopback {
+        return axum::response::IntoResponse::into_response((
+            axum::http::StatusCode::FORBIDDEN,
+            "the scene host joins from the machine hosting this preview\n",
+        ));
+    }
+    ws.on_upgrade(move |socket| handle_host_socket(socket, st, room_id))
+}
+
+#[derive(serde::Deserialize)]
+struct HostFrame {
+    body: String,
+    #[serde(default)]
+    unreliable: bool,
+    #[serde(default)]
+    to: Option<Vec<String>>,
+}
+
+fn host_json(st: &CommsState, room_id: &str, packet: &[u8]) -> Option<String> {
+    use base64::Engine as _;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let decoded = WsPacket::decode(packet).ok()?;
+    let reg = st
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let addr_of = |alias: u32| -> String {
+        reg.rooms
+            .get(room_id)
+            .and_then(|room| room.get(&alias))
+            .map(|p| p.address.clone())
+            .unwrap_or_default()
+    };
+    let v = match decoded.message? {
+        ws_packet::Message::WelcomeMessage(w) => serde_json::json!({
+            "type": "welcome", "alias": w.alias, "peers": w.peer_identities
+        }),
+        ws_packet::Message::PeerJoinMessage(j) => serde_json::json!({
+            "type": "join", "alias": j.alias, "address": j.address
+        }),
+        ws_packet::Message::PeerLeaveMessage(l) => serde_json::json!({
+            "type": "leave", "alias": l.alias, "address": addr_of(l.alias)
+        }),
+        ws_packet::Message::PeerUpdateMessage(u) => serde_json::json!({
+            "type": "update", "from": u.from_alias,
+            "fromAddress": addr_of(u.from_alias), "body": b64(&u.body)
+        }),
+        ws_packet::Message::PeerKicked(k) => serde_json::json!({
+            "type": "kicked", "reason": k.reason
+        }),
+        _ => return None,
+    };
+    Some(v.to_string())
+}
+
+fn send_update_to(st: &CommsState, room_id: &str, from_alias: u32, to: &[String], bytes: &[u8]) {
+    let reg = st
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(room) = reg.rooms.get(room_id) else {
+        return;
+    };
+    let wanted: std::collections::HashSet<String> = to.iter().map(|a| a.to_lowercase()).collect();
+    for (peer_alias, peer) in room {
+        if *peer_alias == from_alias || !wanted.contains(&peer.address) {
+            continue;
+        }
+        let _ = peer.tx.send(PeerFrame::Packet(bytes.to_vec()));
+    }
+}
+
+async fn handle_host_socket(socket: WebSocket, st: Arc<CommsState>, room_id: String) {
+    use base64::Engine as _;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (alias, welcome) = join_room(&st, &room_id, HOST_ADDRESS, tx);
+    tracing::info!(room = %room_id, alias, "mini-comms host joined");
+    let (mut sink, mut stream) = socket.split();
+    if let Some(json) = host_json(&st, &room_id, &welcome) {
+        if sink.send(Message::Text(json.into())).await.is_err() {
+            leave_room(&st, &room_id, alias, HOST_ADDRESS);
+            return;
+        }
+    }
+    loop {
+        tokio::select! {
+            frame = rx.recv() => match frame {
+                Some(PeerFrame::Packet(bytes)) => {
+                    if let Some(json) = host_json(&st, &room_id, &bytes) {
+                        if sink.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Some(PeerFrame::Kick(_)) | None => break,
+            },
+            incoming = stream.next() => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    let Ok(frame) = serde_json::from_str::<HostFrame>(&text) else {
+                        tracing::warn!(room = %room_id, "host sent an undecodable frame, terminating");
+                        break;
+                    };
+                    let Ok(body) =
+                        base64::engine::general_purpose::STANDARD.decode(&frame.body)
+                    else {
+                        tracing::warn!(room = %room_id, "host update body is not base64, terminating");
+                        break;
+                    };
+                    let update = WsPeerUpdate {
+                        from_alias: alias,
+                        body,
+                        unreliable: frame.unreliable,
+                    };
+                    match &frame.to {
+                        Some(to) => {
+                            let bytes = craft(ws_packet::Message::PeerUpdateMessage(update));
+                            send_update_to(&st, &room_id, alias, to, &bytes);
+                        }
+                        None => broadcast_update(&st, &room_id, alias, update),
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {}
+                Some(Err(_)) => break,
+            }
+        }
+    }
+    leave_room(&st, &room_id, alias, HOST_ADDRESS);
+    tracing::info!(room = %room_id, alias, "mini-comms host disconnected");
 }
 
 async fn handle_socket(mut socket: WebSocket, st: Arc<CommsState>, room_id: String) {

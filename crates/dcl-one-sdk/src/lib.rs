@@ -12,6 +12,7 @@ pub mod deploy;
 pub mod entity_names;
 pub mod entrypoint;
 pub mod esbuild;
+pub mod host;
 pub mod init;
 pub mod joinblock;
 pub mod jsjson;

@@ -38,6 +38,66 @@ function __dclOneDecode(__dclOneBytes) {
   return __dclOneParts.join('')
 }
 
+// Authoritative-multiplayer arming (scene.json authoritativeMultiplayer):
+// wraps CommunicationsController so room-message envelopes (the 4-byte DCLR
+// magic) are folded out of the sync transport's inbound stream into
+// __dclOneMpInbox, and queued outbound envelopes in __dclOneMpOutbox ride
+// the transport's next sendBinary. The mp-client entry module owns both
+// queues; without the flag this is a literal false and nothing changes.
+var __dclOneMp = __DCL_ONE_MP__
+function __dclOneMpWrap(__dclOneHostRequire) {
+  if (!__dclOneMp) return __dclOneHostRequire
+  var __dclOneComms = null
+  return function (__dclOneSpec) {
+    if (__dclOneSpec !== '~system/CommunicationsController') {
+      return __dclOneHostRequire(__dclOneSpec)
+    }
+    if (__dclOneComms) return __dclOneComms
+    var __dclOneReal = __dclOneHostRequire(__dclOneSpec)
+    var __dclOneInbox = (globalThis.__dclOneMpInbox = globalThis.__dclOneMpInbox || [])
+    var __dclOneOutbox = (globalThis.__dclOneMpOutbox = globalThis.__dclOneMpOutbox || [])
+    __dclOneComms = {
+      send: function (__dclOneBody) {
+        return __dclOneReal.send(__dclOneBody)
+      },
+      sendBinary: function (__dclOneBody) {
+        var __dclOnePeer = (__dclOneBody && __dclOneBody.peerData) || []
+        if (__dclOneOutbox.length) {
+          __dclOnePeer = __dclOnePeer.slice()
+          for (var __dclOneI = 0; __dclOneI < __dclOneOutbox.length; __dclOneI++) {
+            __dclOnePeer.push(__dclOneOutbox[__dclOneI])
+          }
+          __dclOneOutbox.length = 0
+        }
+        var __dclOneReq = {
+          data: (__dclOneBody && __dclOneBody.data) || [],
+          peerData: __dclOnePeer
+        }
+        return __dclOneReal.sendBinary(__dclOneReq).then(function (__dclOneRes) {
+          var __dclOneData = (__dclOneRes && __dclOneRes.data) || []
+          var __dclOneKept = []
+          for (var __dclOneJ = 0; __dclOneJ < __dclOneData.length; __dclOneJ++) {
+            var __dclOneMsg = __dclOneData[__dclOneJ]
+            if (
+              __dclOneMsg.length > 4 &&
+              __dclOneMsg[0] === 68 &&
+              __dclOneMsg[1] === 67 &&
+              __dclOneMsg[2] === 76 &&
+              __dclOneMsg[3] === 82
+            ) {
+              __dclOneInbox.push(__dclOneMsg)
+            } else {
+              __dclOneKept.push(__dclOneMsg)
+            }
+          }
+          return { data: __dclOneKept }
+        })
+      }
+    }
+    return __dclOneComms
+  }
+}
+
 // ~system/* passes through to the host require; everything else must be a
 // registry key or fail loudly (design section 4: wildcard externals are broader
 // than the registry on purpose).
@@ -103,6 +163,7 @@ function __dclOneEvalChunk(__dclOneCode, __dclOnePath, __dclOneRequire) {
 // Both runtimes fully await onStart before the first onUpdate, so the null guard
 // in onUpdate is sufficient (design section 1).
 module.exports.onStart = async function () {
+  var __dclOneHostRequire = __dclOneMpWrap(require)
   var __dclOneRuntime = require('~system/Runtime')
   var __dclOneSdkSrc = __dclOneDecode(
     (await __dclOneRuntime.readFile({ fileName: __dclOneSdkChunkPath })).content
@@ -118,7 +179,7 @@ module.exports.onStart = async function () {
   var __dclOneRegistry = __dclOneEvalChunk(
     __dclOneSdkSrc,
     __dclOneSdkChunkPath,
-    __dclOneMakeRequire({}, require)
+    __dclOneMakeRequire({}, __dclOneHostRequire)
   )
   if (__dclOneSmartSrc !== null) {
     __dclOneRegistry = __dclOneOverlay(
@@ -126,14 +187,14 @@ module.exports.onStart = async function () {
       __dclOneEvalChunk(
         __dclOneSmartSrc,
         __dclOneSmartChunkPath,
-        __dclOneMakeRequire(__dclOneRegistry, require)
+        __dclOneMakeRequire(__dclOneRegistry, __dclOneHostRequire)
       )
     )
   }
   var __dclOneScene = __dclOneEvalChunk(
     __dclOneSceneSrc,
     __dclOneSceneChunkPath,
-    __dclOneMakeRequire(__dclOneRegistry, require)
+    __dclOneMakeRequire(__dclOneRegistry, __dclOneHostRequire)
   )
   __dclOneSceneModule = __dclOneScene
   if (typeof __dclOneScene.onStart === 'function') return __dclOneScene.onStart()

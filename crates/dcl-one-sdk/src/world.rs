@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[derive(Default)]
 pub struct SettingsUpdate {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -19,23 +20,12 @@ pub struct SettingsUpdate {
 }
 
 impl SettingsUpdate {
-    pub fn is_empty(&self) -> bool {
-        self.title.is_none()
-            && self.description.is_none()
-            && self.content_rating.is_none()
-            && self.spawn_coordinates.is_none()
-            && self.skybox_time.is_none()
-            && self.single_player.is_none()
-            && self.show_in_places.is_none()
-            && self.categories.is_empty()
-            && self.thumbnail.is_none()
-    }
-
-    /// `field=value` pairs for the fields this update actually touches — shown
-    /// on the signing page so the wallet holder sees what they are approving.
-    pub fn changed_fields(&self) -> Vec<String> {
+    /// Every text field as `(name, value)` — the one field walk `is_empty`,
+    /// `changed_fields` and `to_form` all derive from (the thumbnail stays
+    /// special: a file upload, not a text pair).
+    fn pairs(&self) -> Vec<(&'static str, String)> {
         let mut out = Vec::new();
-        let mut push = |k: &str, v: String| out.push(format!("{k}={v}"));
+        let mut push = |k: &'static str, v: String| out.push((k, v));
         if let Some(v) = &self.title {
             push("title", v.clone());
         }
@@ -57,11 +47,26 @@ impl SettingsUpdate {
         if let Some(v) = self.show_in_places {
             push("show_in_places", v.to_string());
         }
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs().is_empty() && self.categories.is_empty() && self.thumbnail.is_none()
+    }
+
+    /// `field=value` pairs for the fields this update actually touches — shown
+    /// on the signing page so the wallet holder sees what they are approving.
+    pub fn changed_fields(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .pairs()
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
         if !self.categories.is_empty() {
-            push("categories", self.categories.join(","));
+            out.push(format!("categories={}", self.categories.join(",")));
         }
         if let Some(v) = &self.thumbnail {
-            push("thumbnail", v.display().to_string());
+            out.push(format!("thumbnail={}", v.display()));
         }
         out
     }
@@ -70,26 +75,8 @@ impl SettingsUpdate {
     /// with a different wallet, and `reqwest::multipart::Form` is single-use.
     fn to_form(&self) -> Result<reqwest::multipart::Form> {
         let mut form = reqwest::multipart::Form::new();
-        if let Some(v) = &self.title {
-            form = form.text("title", v.clone());
-        }
-        if let Some(v) = &self.description {
-            form = form.text("description", v.clone());
-        }
-        if let Some(v) = &self.content_rating {
-            form = form.text("content_rating", v.clone());
-        }
-        if let Some(v) = &self.spawn_coordinates {
-            form = form.text("spawn_coordinates", v.clone());
-        }
-        if let Some(v) = &self.skybox_time {
-            form = form.text("skybox_time", v.clone());
-        }
-        if let Some(v) = self.single_player {
-            form = form.text("single_player", v.to_string());
-        }
-        if let Some(v) = self.show_in_places {
-            form = form.text("show_in_places", v.to_string());
+        for (k, v) in self.pairs() {
+            form = form.text(k, v);
         }
         for c in &self.categories {
             form = form.text("categories", c.clone());
@@ -300,6 +287,7 @@ pub async fn run_action(
                 port: browser.port,
                 open_browser: !browser.no_browser && !browser.ci,
                 timeout: crate::linker::linker_timeout(),
+                host: None,
             },
         )
         .await?;
@@ -330,20 +318,15 @@ pub fn resolve_target(target_content: Option<&str>) -> Result<String> {
         ));
         return Ok(base);
     }
-    Err(UserError::new(
-        "no worlds server given",
-        TrySteps::one("pass --target-content <worlds-content-server-url>")
-            .and("the public worlds server is https://worlds-content-server.decentraland.org")
-            .and("or set DCL_ONE_SDK_DEFAULT_TARGET=<url>"),
-    )
-    .into())
+    ux::note(format!(
+        "using the public worlds server {}",
+        crate::deploy::WORLDS_CONTENT_SERVER
+    ));
+    Ok(crate::deploy::WORLDS_CONTENT_SERVER.to_string())
 }
 
 fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("building the http client")
+    crate::deploy::client(Duration::from_secs(30), Duration::from_secs(30))
 }
 
 /// The ADR signed-fetch payload: `method:path:timestamp:metadata`, lowercased.
@@ -357,7 +340,7 @@ pub fn signed_fetch_payload(method: &str, path: &str, timestamp: i64) -> String 
 /// timestamp and metadata are read back out of the payload rather than
 /// regenerated, so the headers always describe exactly the bytes that were
 /// signed — a browser signature can arrive seconds after it was minted.
-fn headers_from_chain(payload: &str, chain: &Value) -> Vec<(String, String)> {
+pub(crate) fn headers_from_chain(payload: &str, chain: &Value) -> Vec<(String, String)> {
     let parts: Vec<&str> = payload.split(':').collect();
     let timestamp = parts.get(2).copied().unwrap_or_default().to_string();
     let metadata = parts.get(3).copied().unwrap_or("{}").to_string();
@@ -519,8 +502,7 @@ fn check_permission_name(permission: &str) -> Result<()> {
 }
 
 fn check_address(address: &str) -> Result<()> {
-    let hexpart = address.strip_prefix("0x").unwrap_or("");
-    if hexpart.len() == 40 && hexpart.chars().all(|c| c.is_ascii_hexdigit()) {
+    if catalyrst_types::is_eth_address(address) {
         return Ok(());
     }
     Err(UserError::new(

@@ -24,7 +24,10 @@ pub(super) async fn mobile_preview(State(st): State<Arc<AppState>>) -> Response 
         )
             .into_response();
     };
-    let base = st.base();
+    let base = st
+        .first_project()
+        .map(|p| joinblock::base_coords(&p.scene_json))
+        .unwrap_or((0, 0));
     let url = format!(
         "decentraland://open?preview=http://{ip}:{}&position={},{}",
         st.port, base.0, base.1

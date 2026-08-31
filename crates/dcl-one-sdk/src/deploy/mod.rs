@@ -2,10 +2,18 @@ mod net;
 mod run;
 mod unpublish;
 
+#[cfg(test)]
+pub(crate) use net::ENV_LOCK;
+
 pub use net::{
     build_delete_payload, encode_segment, enforce_world_permission, env_default_target,
-    jump_in_url, non_upstream_note, sanitize_catalyst_url, scenes_on_other_parcels,
-    send_world_delete, simple_auth_chain, upload_entity, WorldScene,
+    jump_in_url, non_upstream_note, play_url, sanitize_catalyst_url, scenes_on_other_parcels,
+    send_world_delete, simple_auth_chain, sticky_default_target, upload_entity, WorldScene,
+    WORLDS_CONTENT_SERVER,
+};
+pub(crate) use net::{
+    client, denied_parcels_in, deployment_permission_in_doc, entity_content_hashes, entity_title,
+    host_of, parse_world_scenes, unreachable_server, DocAnswer,
 };
 pub use run::{deploy, load_signer};
 pub use unpublish::{unpublish, UnpublishOptions};
@@ -34,6 +42,43 @@ pub struct DeployOptions {
     pub no_browser: bool,
     pub ci: bool,
     pub port: Option<u16>,
+    /// A caller that hosts the signing routes on its own server — the preview
+    /// server's `/deploy/sign/` — so a page-driven deploy binds no second
+    /// listener. `None` (the CLI) serves the signing page itself.
+    pub host_signer: Option<crate::linker::HostSigner>,
+    /// No terminal narration — build steps, file listing, target note, jump
+    /// link. A page-driven publish tells its whole story on the page, and its
+    /// prints would land in the preview terminal as noise. Errors still print.
+    pub quiet: bool,
+    /// A delegated identity that signs this deploy with no wallet prompt: the
+    /// ephemeral key the Connect-with-DCL flow minted, kept in memory. When
+    /// set (and unexpired), the deploy signs headlessly with it instead of
+    /// hosting a browser signing page.
+    pub identity: Option<DeployIdentity>,
+}
+
+/// The in-memory delegated identity: a throwaway key the wallet authorized
+/// once, and the proof it did. It signs deploys as the wallet until the
+/// delegation expires — the wallet itself is not asked again.
+#[derive(Clone)]
+pub struct DeployIdentity {
+    /// The wallet the deploy publishes as.
+    pub signer: String,
+    /// The ephemeral private key, hex. In memory only — never written.
+    pub ephemeral_key: String,
+    /// The exact `Decentraland Login\n…` text the wallet signed.
+    pub delegation_payload: String,
+    /// The wallet's signature over that text.
+    pub delegation_signature: String,
+    /// When the delegation lapses (ms). Past it, the identity is dropped and
+    /// the deploy falls back to the wallet.
+    pub expiration_ms: i64,
+}
+
+impl DeployIdentity {
+    pub fn expired(&self, now_ms: i64) -> bool {
+        now_ms >= self.expiration_ms
+    }
 }
 
 const MAX_FILE_SIZE_BYTES: usize = 50_000_000;
@@ -77,7 +122,7 @@ pub fn catalyst_rotation() -> Vec<String> {
     })
 }
 
-const DEFAULT_DCL_IGNORE: [&str; 21] = [
+const DEFAULT_DCL_IGNORE: [&str; 27] = [
     ".*",
     "package.json",
     "package-lock.json",
@@ -88,12 +133,25 @@ const DEFAULT_DCL_IGNORE: [&str; 21] = [
     "tslint.json",
     "node_modules",
     "dclcontext",
+    // The SDK's own AI-context install and its skill docs — never scene
+    // runtime, and their prose/markup is upload bloat at best.
+    "sdk-skills",
     "**/*.ts",
     "**/*.tsx",
     "Dockerfile",
     "thumbnails",
     "dist",
     "README.md",
+    // Non-asset developer files. `*.html` earns its place twice: a DCL scene
+    // is ECS/JS rendered in the 3D client, never HTML, AND a Cloudflare-
+    // fronted content server's WAF reads raw HTML in the upload body as an
+    // injection attack and 403-challenges the whole deploy. `*.sh`/`*.cjs`/
+    // `*.md`/`*.mdc` are scripts and docs that ride along the same way.
+    "*.html",
+    "*.sh",
+    "*.cjs",
+    "*.md",
+    "*.mdc",
     "*.blend",
     "*.fbx",
     "*.zip",
@@ -437,8 +495,42 @@ pub fn base_parcel(metadata: &JsValue, pointers: &[String]) -> String {
         .unwrap_or_else(|| "0,0".to_string())
 }
 
+/// Every file under the release artifact root, as scene-relative paths. The
+/// dir holds only what a release build wrote (bundle chunks under `bin/`),
+/// so the walk is a handful of entries and needs none of `.dclignore`.
+fn release_rel_files(release_root: &Path) -> Vec<String> {
+    fn descend(dir: &Path, base: &Path, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                descend(&path, base, out);
+            } else if let Ok(rel) = path.strip_prefix(base) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    descend(release_root, release_root, &mut out);
+    out.sort();
+    out
+}
+
 pub fn prepare(project: &Project) -> Result<Prepared> {
-    let rel_paths = collect_publishable_files(&project.root)?;
+    let mut rel_paths = collect_publishable_files(&project.root)?;
+    // rustc keeps debug and release artifacts apart, and so does this tree:
+    // the watcher owns the in-place dev bundle, a deploy's production build
+    // lands under RELEASE_OUT, and the payload prefers the release copy of
+    // any path that has one. The two builds stop clobbering one file — and a
+    // publish stops rewriting the very tree the page just fingerprinted.
+    let release_root = project.root.join(crate::build::RELEASE_OUT);
+    for rel in release_rel_files(&release_root) {
+        if !rel_paths.contains(&rel) {
+            rel_paths.push(rel);
+        }
+    }
     let main = project.main_output()?;
     if !rel_paths.iter().any(|r| r == &main) {
         return Err(UserError::new(
@@ -450,7 +542,6 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
     }
 
     let mut seen_lower = HashSet::new();
-    let mut files = Vec::new();
     for rel in &rel_paths {
         if !seen_lower.insert(rel.to_lowercase()) {
             return Err(UserError::new(
@@ -461,7 +552,15 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
             )
             .into());
         }
-        let p = project.root.join(rel);
+    }
+    // Read+hash in parallel; results stay in rel_paths order, so the first
+    // failing file (by that order) is still the one reported.
+    let hashed = crate::scene::parallel_map(&rel_paths, |rel| -> Result<_> {
+        let release = release_root.join(rel);
+        let p = match release.is_file() {
+            true => release,
+            false => project.root.join(rel),
+        };
         let bytes =
             std::fs::read(&p).with_context(|| format!("reading content file {}", p.display()))?;
         if bytes.len() > MAX_FILE_SIZE_BYTES {
@@ -476,7 +575,11 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
             .into());
         }
         let hash = hash_bytes_v1(&bytes);
-        files.push((rel.clone(), hash, bytes));
+        Ok((rel.clone(), hash, bytes))
+    });
+    let mut files = Vec::with_capacity(hashed.len());
+    for entry in hashed {
+        files.push(entry?);
     }
 
     let metadata = build_metadata(project)?;
@@ -532,10 +635,16 @@ pub fn build_entity(p: &Prepared, timestamp: i64) -> Result<(String, Vec<u8>)> {
     Ok((entity_id, entity_bytes))
 }
 
+/// The one size formatter every page and printout shares — a payload must
+/// read as the same number on the sign panel, the /deploy hint and the
+/// /target datum. Decimal units, one decimal, no six-digit byte counts.
 pub fn human_size(bytes: u64) -> String {
     const MB: f64 = 1_000_000.0;
+    const KB: f64 = 1_000.0;
     if bytes as f64 >= MB {
         format!("{:.1} MB", bytes as f64 / MB)
+    } else if bytes as f64 >= KB {
+        format!("{:.1} KB", bytes as f64 / KB)
     } else {
         format!("{bytes} bytes")
     }
@@ -925,10 +1034,16 @@ mod tests {
             WorldScene {
                 title: "same".into(),
                 parcels: vec!["0,0".into(), "0,1".into()],
+                timestamp: None,
+                content_hashes: vec![],
+                size: None,
             },
             WorldScene {
                 title: "other".into(),
                 parcels: vec!["5,5".into()],
+                timestamp: None,
+                content_hashes: vec![],
+                size: None,
             },
         ];
         let deploying = vec!["0,0".to_string(), "0,1".to_string()];
@@ -968,5 +1083,53 @@ mod tests {
         assert!(load_signer(None).unwrap().is_none());
         let picked_flag_only = load_signer(Some(&key_path)).unwrap().unwrap();
         assert_eq!(picked_flag_only.address(), addr_flag);
+    }
+
+    /// rustc-style profiles: a release artifact shadows its dev-tree twin in
+    /// the payload, a release-only chunk still ships, and everything without
+    /// a release copy reads from the tree as ever.
+    #[test]
+    fn release_artifacts_shadow_the_dev_tree_in_prepare() {
+        let t = TempTree::new("release");
+        t.write(
+            "scene.json",
+            "{\"runtimeVersion\":\"7\",\"main\":\"bin/index.js\",\"display\":{\"title\":\"P\"},\"scene\":{\"parcels\":[\"0,0\"],\"base\":\"0,0\"}}",
+        );
+        t.write("bin/index.js", "dev");
+        t.write("asset.glb", "asset");
+        t.write(".dcl-one/release/bin/index.js", "release");
+        t.write(".dcl-one/release/bin/scene.js", "release-only");
+        let project = Project::load(&t.0).unwrap();
+        let prepared = prepare(&project).unwrap();
+        let bytes = |rel: &str| {
+            prepared
+                .files
+                .iter()
+                .find(|(r, _, _)| r == rel)
+                .map(|(_, _, b)| b.clone())
+                .unwrap_or_else(|| panic!("{rel} missing from the payload"))
+        };
+        assert_eq!(
+            bytes("bin/index.js").as_slice(),
+            b"release",
+            "the release copy wins"
+        );
+        assert_eq!(
+            bytes("bin/scene.js").as_slice(),
+            b"release-only",
+            "a release-only chunk still ships"
+        );
+        assert_eq!(
+            bytes("asset.glb").as_slice(),
+            b"asset",
+            "the tree serves the rest"
+        );
+        assert!(
+            !prepared
+                .files
+                .iter()
+                .any(|(r, _, _)| r.contains(".dcl-one")),
+            "artifact paths never leak into the payload listing"
+        );
     }
 }

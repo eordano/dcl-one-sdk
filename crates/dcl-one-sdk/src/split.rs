@@ -204,6 +204,7 @@ pub fn loader_stub(
     smart_chunk_rel: Option<&str>,
     scene_chunk_rel: &str,
     max_composite_entity: u32,
+    mp: bool,
 ) -> String {
     LOADER_TEMPLATE
         .replace("__DCL_ONE_SDK_CHUNK__", sdk_chunk_rel)
@@ -213,6 +214,7 @@ pub fn loader_stub(
             "__DCL_ONE_MAX_COMPOSITE_ENTITY__",
             &max_composite_entity.to_string(),
         )
+        .replace("__DCL_ONE_MP__", if mp { "true" } else { "false" })
 }
 
 pub fn write_loader_stub(
@@ -221,6 +223,7 @@ pub fn write_loader_stub(
     smart_chunk_rel: Option<&str>,
     scene_chunk_rel: &str,
     max_composite_entity: u32,
+    mp: bool,
 ) -> Result<()> {
     if let Some(dir) = outfile.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -232,6 +235,7 @@ pub fn write_loader_stub(
             smart_chunk_rel,
             scene_chunk_rel,
             max_composite_entity,
+            mp,
         ),
     )
     .map_err(|e| {
@@ -287,25 +291,31 @@ mod tests {
 
     #[test]
     fn loader_stub_substitutes_chunk_paths() {
-        let s = loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 517);
+        let s = loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 517, false);
         assert!(s.contains("'bin/sdk-runtime.js'"));
         assert!(s.contains("'bin/scene.js'"));
         assert!(s.contains("globalThis.DCL_MAX_COMPOSITE_ENTITY = 517"));
         assert!(!s.contains("__DCL_ONE_SDK_CHUNK__"));
         assert!(!s.contains("__DCL_ONE_SMART_CHUNK__"));
         assert!(!s.contains("__DCL_ONE_SCENE_CHUNK__"));
+        assert!(s.contains("var __dclOneMp = false"));
+        assert!(
+            loader_stub("a.js", None, "b.js", 0, true).contains("var __dclOneMp = true"),
+            "the mp flag arms the comms wrap"
+        );
         assert!(!s.contains("__DCL_ONE_MAX_COMPOSITE_ENTITY__"));
     }
 
     #[test]
     fn loader_stub_without_a_smart_chunk_leaves_the_path_empty() {
-        let plain = loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 0);
+        let plain = loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 0, false);
         assert!(plain.contains("__dclOneSmartChunkPath = ''"));
         let smart = loader_stub(
             "bin/sdk-runtime.js",
             Some("bin/sdk-smart-items.js"),
             "bin/scene.js",
             0,
+            false,
         );
         assert!(smart.contains("__dclOneSmartChunkPath = 'bin/sdk-smart-items.js'"));
     }
@@ -358,7 +368,7 @@ mod tests {
         assert!(!detect_split_build(&root, "bin/index.js"));
         std::fs::write(
             root.join("bin/index.js"),
-            loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 0),
+            loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 0, false),
         )
         .unwrap();
         assert!(detect_split_build(&root, "bin/index.js"));

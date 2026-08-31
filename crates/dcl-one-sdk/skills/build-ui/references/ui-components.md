@@ -1,0 +1,445 @@
+# UI Components Reference — React ECS
+
+## Setup
+
+```typescript
+// ui.tsx
+import ReactEcs, { ReactEcsRenderer, UiEntity, Label, Button, Input, Dropdown } from '@dcl/sdk/react-ecs'
+
+export function setupUi() {
+  ReactEcsRenderer.setUiRenderer(MyUI)
+}
+```
+
+Only call `ReactEcsRenderer.setUiRenderer()` once per scene. Combine all UI into a single root component. The renderer function may also return an **array** of elements — `setUiRenderer(() => [PanelA(), PanelB()])` — where later items render on top of earlier ones.
+
+The options arg is `{ virtualWidth?, virtualHeight?, screenInset? }` — every field optional. Omitting the virtual size does **not** disable scaling: a platform default applies (`1920x1080`, or `1600x720` on mobile). Pass it explicitly by default anyway (see SKILL.md). `screenInset` defaults to `'device'`, so UI is kept inside the device safe area unless you pass `'none'`.
+
+⚠️ **This describes SDK 7.26.0+.** Below 7.26.0 there is no `screenInset` field (passing it is a type error), `virtualWidth`/`virtualHeight` are required when options are passed, and omitting the options means no scaling at all. Check `@dcl/sdk` in the scene's `package.json` — see the version gate in `build-ui/SKILL.md`.
+
+## UiEntity — All Props
+
+```tsx
+<UiEntity
+  uiTransform={{
+    // Size
+    width: 300,                  // Pixels or '50%'
+    height: 200,
+    minWidth: 100,
+    maxWidth: 500,
+    minHeight: 50,
+    maxHeight: 400,
+
+    // Position
+    positionType: 'absolute',    // 'absolute' | 'relative' (default)
+    position: { top: 10, right: 10, bottom: 10, left: 10 },
+
+    // Display
+    display: 'flex',             // 'flex' | 'none'
+
+    // Flexbox
+    flexDirection: 'column',     // 'row' | 'column'
+    justifyContent: 'center',    // 'flex-start' | 'center' | 'flex-end' | 'space-between' | 'space-around'
+    alignItems: 'center',        // 'flex-start' | 'center' | 'flex-end' | 'stretch'
+    alignContent: 'center',      // cross-axis alignment of wrapped lines
+    alignSelf: 'center',         // override parent's alignItems for this element
+    flexWrap: 'wrap',            // 'nowrap' | 'wrap'
+    overflow: 'scroll',          // 'hidden' | 'visible' | 'scroll'
+    flexGrow: 1,                 // Fill remaining space in parent
+
+    // Spacing (values: number px, '50%', '400px', or 'auto'; margin also accepts CSS shorthand '16px 0 8px 270px')
+    padding: { top: 10, bottom: 10, left: 10, right: 10 },  // or single number
+    margin: { top: 5, bottom: 5, left: 5, right: 5 },       // or single number, or shorthand string
+
+    // Layering
+    opacity: 1,                  // 0–1; on the root fades whole UI, cascades multiplicatively to children
+    zIndex: 0,                   // stacking among siblings; negatives allowed; does not cross parents
+
+    // Border (also valid on Button / Input / Dropdown uiTransform)
+    borderWidth: 2,
+    borderColor: Color4.White(),
+    borderRadius: 8
+  }}
+
+  uiBackground={{
+    color: Color4.create(0, 0, 0, 0.8),           // Solid color; when combined with texture, acts as a TINT
+    texture: { src: 'images/bg.png' },             // Image (src is relative to scene root)
+    textureMode: 'stretch',                         // 'stretch' | 'nine-slices' | 'center'
+    textureSlices: { top: 0.1, bottom: 0.1, left: 0.1, right: 0.1 },  // For nine-slices
+    avatarTexture: { userId: 'user-id' }           // Avatar portrait (use instead of texture)
+  }}
+
+  uiText={{
+    value: 'Hello!',
+    fontSize: 18,
+    color: Color4.White(),
+    textAlign: 'middle-center',
+    font: 'sans-serif'           // 'sans-serif' | 'serif' | 'monospace'
+  }}
+
+  // Events
+  onMouseDown={() => { }}
+  onMouseUp={() => { }}
+  onMouseEnter={() => { }}
+  onMouseLeave={() => { }}
+/>
+```
+
+## Label
+
+```tsx
+<Label
+  value="Score: 100"
+  fontSize={18}
+  color={Color4.White()}
+  textAlign="middle-center"
+  font="serif"
+  uiTransform={{ width: 200, height: 30 }}
+/>
+```
+
+**textAlign values:** `top-left`, `top-center`, `top-right`, `middle-left`, `middle-center`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right`
+
+**font values:** `sans-serif` (default), `serif`, `monospace`
+
+⚠️ **Always give a `Label` an explicit `width` and `height` in `uiTransform`** (as above). Text intrinsic sizing is engine-dependent: the Bevy explorer measures the rendered text and feeds its height into flex layout, the Unity explorer gives an unset dimension ~0 while still drawing the glyphs. So on Unity, labels stacked in a column overlap and any parent auto-sizing from text children collapses to its padding — while the same code looks correct on Bevy. Wrapped text needs a height for its line count (two lines at `fontSize: 20` → 60); a label filling a fixed-size parent can use `width: '100%', height: '100%'`. Containers that stack labels need explicit heights too. Verified in-world with side-by-side screenshots.
+
+⚠️ **Never put emoji in a `value` string.** Emoji glyph coverage is not part of the SDK — it depends on the fonts the explorer bundles, and the Unity explorer has no emoji glyphs, so an emoji renders as a missing-glyph box or as nothing at all. Verified in-world: `value="✨ Particles"` showed no sparkle on the Unity explorer. Use plain text, and put pictorial affordances in a `uiBackground.texture` on a `UiEntity` beside the label.
+
+## Button
+
+```tsx
+<Button
+  value="Click Me"
+  variant="primary"           // 'primary' | 'secondary'
+  fontSize={16}
+  color={Color4.White()}      // Text color
+  uiTransform={{ width: 150, height: 40 }}
+  uiBackground={{ color: Color4.Blue() }}  // Override default style
+  onMouseDown={() => { console.log('clicked') }}
+/>
+```
+
+A `Button` can also carry a textured background and border props, e.g. a nine-slices image button. `value` supports simple markup like `<b>`:
+
+```tsx
+<Button
+  value="<b>OK</b>"
+  textAlign="middle-center"
+  fontSize={28}
+  color={Color4.White()}
+  uiTransform={{ width: 214, height: 74 }}
+  uiBackground={{ texture: { src: 'images/ok_button.png' }, textureMode: 'nine-slices' }}
+  onMouseDown={() => {}}
+/>
+```
+
+Alternatively, a plain `UiEntity` with `uiText`, `uiBackground` and `onMouseDown` behaves as a clickable button without the `Button` component's default styling.
+
+## Input
+
+```tsx
+<Input
+  placeholder="Enter text..."
+  placeholderColor={Color4.Gray()}
+  color={Color4.Black()}
+  fontSize={16}
+  font="sans-serif"
+  textAlign="middle-left"
+  disabled={false}
+  uiTransform={{ width: 250, height: 40 }}           // also accepts borderWidth/borderColor/borderRadius
+  uiBackground={{ color: Color4.White() }}
+  onChange={(value) => { console.log('Changing:', value) }}
+  onSubmit={(value) => { console.log('Submitted:', value) }}
+/>
+```
+
+**Uncontrolled:** the field manages its own text; it does not re-read the `value` prop every frame like React. To clear it programmatically, set `value` to a non-empty sentinel (`' '`) for one frame, then back to `''`. Read typed text from `onChange`, not from a bound `value`.
+
+## Dropdown
+
+```tsx
+<Dropdown
+  options={['Option A', 'Option B', 'Option C']}
+  selectedIndex={0}
+  onChange={(index) => { console.log('Selected:', index) }}
+  fontSize={14}
+  color={Color4.Black()}
+  font="sans-serif"
+  textAlign="middle-left"
+  uiTransform={{ width: 200, height: 40 }}            // also accepts borderWidth/borderColor/borderRadius
+  uiBackground={{ color: Color4.Teal() }}
+  acceptEmpty={true}
+  emptyLabel="-- Select --"
+  disabled={false}
+/>
+```
+
+`onChange` receives the selected **index**. With `acceptEmpty` the empty entry is index-shifted; drive `selectedIndex` from a module variable to control it externally (e.g. prev/next buttons).
+
+## screenInset (Renderer-Level Inset — Prefer This)
+
+**Requires SDK 7.26.0+.** On older versions the option does not exist and the wrapper components below are the only way to inset UI.
+
+The renderer options select the screen area a UI is positioned in. This is the primary mechanism; the `ScreenInsetArea` / `InteractableArea` components below are for the narrower case of insetting a single subtree.
+
+```ts
+type UiScreenInset = 'device' | 'interactable' | 'none'
+```
+
+| Value | Area the UI is placed in | Source |
+|---|---|---|
+| `'device'` **(default)** | Device safe area — excludes notch, status bar, home indicator, rounded corners | `UiCanvasInformation.screenInsetArea` |
+| `'interactable'` | Area free of the client's own HUD (minimap, chat, overlays) | `UiCanvasInformation.interactableArea` |
+| `'none'` | Whole screen, `0,0` at top-left | — |
+
+```ts
+ReactEcsRenderer.setUiRenderer(MyUI, { virtualWidth: 1920, virtualHeight: 1080 })                        // device safe area (default)
+ReactEcsRenderer.setUiRenderer(MyUI, { screenInset: 'interactable' })                                     // clear of client HUD
+ReactEcsRenderer.setUiRenderer(MyUI, { screenInset: 'none' })                                             // whole screen
+ReactEcsRenderer.addUiRenderer(owner, MyWidget, { screenInset: 'interactable' })                          // per-renderer, independent of main UI
+```
+
+- Applied **per renderer**: the main UI and each `addUiRenderer` widget can use different areas simultaneously. (Contrast with the virtual size, which is scene-wide.)
+- Re-read every tick, so the UI follows the insets on rotation or when system bars appear/hide.
+- On desktop the device insets are zero, so `'device'` behaves like `'none'` there.
+- Inset values are reported in canvas pixels and are compensated for the UI scale factor internally, so they stay correct at any virtual screen size.
+
+## ScreenInsetArea (Mobile Hardware-Safe Region)
+
+Wraps children so they stay inside the device's hardware-reserved margins — notch, status bar, home indicator, rounded corners. Mobile-only effect: on desktop the insets are `(0,0,0,0)`, so the wrapper has no effect and is safe to leave in cross-platform UI. Reacts automatically to insets reported by the device (rotation, system bars appearing/hiding).
+
+**On SDK 7.26.0+ you usually do not need this component** — `screenInset` already defaults to `'device'`, which insets the whole renderer. Use it only to inset one subtree while the renderer uses `screenInset: 'none'`. **Below 7.26.0 this component is the only mechanism available**, so wrapping is the correct pattern there and there is no double-application to worry about (ignore the `screenInset` argument in the snippet below).
+
+⚠️ **Never stack it on the matching renderer inset.** A `<ScreenInsetArea>` inside a renderer that is already using `'device'` applies the margin twice, pushing the UI inwards by double the amount. That is why the snippet below passes `screenInset: 'none'`.
+
+The component sets its own `positionType: 'absolute'` and `position` from the device insets — those two fields in `uiTransform` are reserved and ignored. All other `uiTransform`, `uiBackground`, and event props are forwarded normally.
+
+```tsx
+import ReactEcs, { ReactEcsRenderer, UiEntity, ScreenInsetArea } from '@dcl/sdk/react-ecs'
+import { Color4 } from '@dcl/sdk/math'
+
+export function setupUi() {
+  ReactEcsRenderer.setUiRenderer(() => (
+    <ScreenInsetArea
+      uiTransform={{
+        // positionType and position are reserved — any values here are ignored
+        padding: 10,
+        flexDirection: 'column',
+        alignItems: 'center'
+      }}
+    >
+      {/* A child sized 100%×100% fills the safe area exactly */}
+      <UiEntity
+        uiTransform={{ width: '100%', height: '100%' }}
+        uiBackground={{ color: Color4.create(0, 0, 0, 0.5) }}
+      />
+    </ScreenInsetArea>
+    // 'none' so the component's inset is not applied on top of the renderer's default
+  ), { virtualWidth: 1920, virtualHeight: 1080, screenInset: 'none' })
+}
+```
+
+**Hardware insets vs. Decentraland system HUD:** `ScreenInsetArea` (and `screenInset: 'device'`) only covers the physical device's reserved regions. It does *not* avoid Decentraland's on-screen controls — keep those clear manually on mobile: the joystick sits on the left, the chat/profile/camera buttons on the top-right, and the interaction button on the bottom-right of the canvas. The *input* controls among those (joystick, crosshair, gamepad buttons) can also be hidden outright with `TouchScreenControls` on SDK 7.26.0+ — see the **advanced-input** skill. The client's own HUD (chat, profile, emote wheel) cannot.
+
+## InteractableArea (Client-UI-Safe Region)
+
+Wraps children so they stay inside the renderer-reported **interactable area** — the portion of the screen *not* covered by the client's own UI (minimap, chat window, and other platform overlays). Reads `UiCanvasInformation.interactableArea` and constrains children to it via absolute positioning.
+
+**For a whole UI, prefer `screenInset: 'interactable'` on the renderer.** Use the component to inset a single subtree, or when the renderer sits in a different area.
+
+⚠️ **Client support.** Either form needs an explorer that reports the area. It works on desktop, and on mobile from client version `1.12.1` onwards — older mobile clients report no margins, so the area falls back to the whole screen and the inset silently does nothing. Note that `1.12.1` is also the release that normalizes the `'device'` area between Android and iOS, so treat it as the floor for any inset-sensitive mobile layout.
+
+```tsx
+import ReactEcs, { ReactEcsRenderer, UiEntity, InteractableArea } from '@dcl/sdk/react-ecs'
+
+export function setupUi() {
+  ReactEcsRenderer.setUiRenderer(() => (
+    <InteractableArea>
+      {/* A child sized 100%×100% fills the interactable area exactly */}
+      <UiEntity uiTransform={{ width: '100%', height: '100%' }} />
+    </InteractableArea>
+    // 'none' so the renderer's default 'device' inset is not stacked under this wrapper
+  ), { screenInset: 'none' })
+}
+```
+
+- Types: `function InteractableArea(props: UiInteractableAreaProps)`; `UiInteractableAreaProps = Omit<EntityPropTypes, 'uiTransform'> & { uiTransform?: Omit<NonNullable<EntityPropTypes['uiTransform']>, 'positionType' | 'position'> }`. Import from `@dcl/sdk/react-ecs`.
+- The component owns `positionType: 'absolute'` and `position` (set from the reported insets) — any values you pass for those in `uiTransform` are **ignored**. All other `uiTransform`, `uiBackground`, and event props forward normally.
+- On the **Unity desktop client** the left ~25% of the screen is reserved for client UI, so children are placed within the remaining ~75%.
+- Falls back to zero insets (no-op) when `UiCanvasInformation` is unavailable.
+- **Distinct from `ScreenInsetArea`:** `InteractableArea` avoids the *client's* UI (minimap/chat/overlays); `ScreenInsetArea` avoids the *device's* hardware margins (notch/status bar). They read different sources and can be nested to apply both (the renderer's `screenInset` picks only one).
+
+## Layout Patterns
+
+### Health Bar
+
+```tsx
+<UiEntity
+  uiTransform={{ width: 200, height: 20, positionType: 'absolute', position: { bottom: 20, left: '50%' } }}
+  uiBackground={{ color: Color4.create(0.3, 0.3, 0.3, 0.8) }}
+>
+  <UiEntity
+    uiTransform={{ width: `${health}%`, height: '100%' }}
+    uiBackground={{ color: Color4.create(0.2, 0.8, 0.2, 1) }}
+  />
+</UiEntity>
+```
+
+### Modal Dialog
+
+```tsx
+const Modal = () => {
+  if (!isOpen) return null
+  return (
+    <UiEntity
+      uiTransform={{ width: '100%', height: '100%', positionType: 'absolute', alignItems: 'center', justifyContent: 'center' }}
+      uiBackground={{ color: Color4.create(0, 0, 0, 0.5) }}
+    >
+      <UiEntity
+        uiTransform={{ width: 400, height: 300, flexDirection: 'column', alignItems: 'center', padding: 20 }}
+        uiBackground={{ color: Color4.create(0.2, 0.2, 0.2, 1) }}
+      >
+        <Label value="Title" fontSize={24} uiTransform={{ width: '100%', height: 40, margin: { bottom: 12 } }} />
+        <Button value="Close" variant="primary" onMouseDown={() => { isOpen = false }} uiTransform={{ width: 100, height: 40 }} />
+      </UiEntity>
+    </UiEntity>
+  )
+}
+```
+
+The `100%`×`100%` backdrop deliberately has **no** pointer handler and no `pointerFilter`: only the `Close` button does. Putting a listener on a full-screen element makes it capture clicks over the entire screen, blocking every other UI element and the 3D world behind it — see the pointer-blocking gotchas in `build-ui/SKILL.md`. If the modal should swallow background clicks while open, add `pointerFilter: 'block'` to the backdrop as a conscious choice; it is safe here only because the component returns `null` when closed, so the blocking rect does not exist the rest of the time.
+
+### Scrollable Container
+
+```tsx
+<UiEntity
+  uiTransform={{
+    width: 300,
+    height: 400,
+    overflow: 'scroll',
+    flexDirection: 'column',
+  }}
+>
+  {/* Children exceeding 400px height become scrollable via drag or mouse wheel */}
+  {items.map((item, i) => (
+    <UiEntity
+      key={i}
+      uiTransform={{ width: '100%', height: 80 }}
+      uiBackground={{ color: i % 2 === 0 ? Color4.create(0.2, 0.2, 0.2, 1) : Color4.create(0.25, 0.25, 0.25, 1) }}
+    >
+      <Label value={item.name} fontSize={14} />
+    </UiEntity>
+  ))}
+</UiEntity>
+```
+
+### Dialog with Fixed Header and Scrollable Body
+
+```tsx
+<UiEntity uiTransform={{ width: 400, height: 500, flexDirection: 'column' }}>
+  {/* Fixed header */}
+  <UiEntity uiTransform={{ width: '100%', height: 60 }}>
+    <Label value="Inventory" fontSize={20} uiTransform={{ width: '100%', height: '100%' }} />
+  </UiEntity>
+  {/* Scrollable body fills remaining space */}
+  <UiEntity
+    uiTransform={{
+      width: '100%',
+      flexGrow: 1,
+      overflow: 'scroll',
+      flexDirection: 'column',
+    }}
+  >
+    {items.map((item, i) => (
+      <UiEntity key={i} uiTransform={{ width: '100%', height: 80 }}>
+        <Label value={item.name} fontSize={14} uiTransform={{ width: '100%', height: '100%' }} />
+      </UiEntity>
+    ))}
+  </UiEntity>
+</UiEntity>
+```
+
+### Inventory Grid
+
+```tsx
+<UiEntity uiTransform={{ width: 350, flexDirection: 'row', flexWrap: 'wrap' }}>
+  {items.map((item, i) => (
+    <UiEntity
+      key={i}
+      uiTransform={{ width: 70, height: 70, margin: 5, alignItems: 'center', justifyContent: 'center' }}
+      uiBackground={{ color: Color4.create(0.3, 0.3, 0.3, 1) }}
+      uiText={{ value: item.name, fontSize: 10 }}
+      onMouseDown={() => selectItem(i)}
+    />
+  ))}
+</UiEntity>
+```
+
+## UiCanvasInformation (Responsive Design)
+
+Fields: `width`, `height`, `devicePixelRatio` (all numbers), plus `screenInsetArea` and `interactableArea` (`BorderRect` — `top`/`bottom`/`left`/`right`). `devicePixelRatio` is a display-density hint, useful for picking a 1x/2x/3x texture; it does not take part in UI layout.
+
+⚠️ **`width` and `height` are RAW canvas pixels, not virtual/scaled units** — the SDK derives the UI scale factor from them (`Math.min(width / virtualWidth, height / virtualHeight)`), so they cannot already be scaled. The two `BorderRect`s are raw canvas pixels too. They are the right input for *decisions* (which layout, which texture resolution), not for computing sizes — the renderer already scales pixel values for you.
+
+```typescript
+import { UiCanvasInformation, engine } from '@dcl/sdk/ecs'
+
+const canvasInfo = UiCanvasInformation.get(engine.RootEntity)   // throws if not yet present
+const canvasInfoSafe = UiCanvasInformation.getOrNull(engine.RootEntity) // null-safe
+```
+
+**Verified responsive pattern (test scene 76):** the component sizes itself from a module-level object that a system refreshes each frame, so absolute pixel sizes track the live canvas:
+
+```typescript
+// index.ts
+export let canvasInfo = { width: 0, height: 0 }
+
+export function main() {
+  setupUi()
+  engine.addSystem(() => {
+    const c = UiCanvasInformation.getOrNull(engine.RootEntity)
+    if (!c) return
+    canvasInfo.width = c.width
+    canvasInfo.height = c.height
+  })
+}
+```
+
+```tsx
+// ui.tsx
+import { canvasInfo } from './index'
+<UiEntity uiTransform={{ width: canvasInfo.width * 0.8, height: canvasInfo.height * 0.8 }} />
+```
+
+Prefer `%` sizing where possible; reach for `UiCanvasInformation` when you need exact pixel math against the current screen.
+
+## State Management
+
+React hooks (`useState`, `useEffect`) are NOT available. Use module-level variables:
+
+```typescript
+let score = 0
+let showMenu = false
+
+const UI = () => (
+  <UiEntity uiTransform={{ width: '100%', height: '100%' }}>
+    <Label value={`Score: ${score}`} fontSize={20} uiTransform={{ width: 240, height: 30 }} />
+    {showMenu && <MenuPanel />}
+  </UiEntity>
+)
+
+// Update from game logic
+export function addScore(points: number) { score += points }
+export function toggleMenu() { showMenu = !showMenu }
+```
+
+The UI re-renders every frame, so module-level variable changes are reflected immediately.
+
+## Important Rules
+
+- File must be `.tsx` for JSX support
+- Only one `ReactEcsRenderer.setUiRenderer()` per scene
+- No React hooks — use module-level variables
+- Use `display: 'none'` to hide elements without removing them
+- UI renders as a 2D overlay on top of the 3D scene

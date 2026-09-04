@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use std::env;
 
+pub mod service_scaffold;
+
 pub fn required(key: &str) -> Result<String> {
     env::var(key).map_err(|_| anyhow!("missing required env var: {}", key))
 }

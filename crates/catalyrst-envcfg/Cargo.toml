@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-envcfg"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 description = "Shared env-var config helpers + standard --help/--version argv handling for catalyrst service bins"
 
@@ -8,5 +8,10 @@ description = "Shared env-var config helpers + standard --help/--version argv ha
 anyhow = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }

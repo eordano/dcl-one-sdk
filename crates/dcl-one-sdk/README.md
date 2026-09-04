@@ -10,7 +10,7 @@ converter is embedded too. A machine with this binary and nothing else can
 scaffold a scene, build it, serve a live preview to the desktop client, and
 deploy it to a catalyst.
 
-**Compared with upstream.** The parity target is `@dcl/sdk-commands` 7.26.0,
+**Compared with upstream.** The parity target is `@dcl/sdk-commands` 7.27.0,
 which is npm `latest`; the vendored toolchain and the `init` scaffold pin the
 same line, and scenes still on 7.22.6 keep working because every behaviour
 change ported here is backward-compatible with them. Commands, flags and output
@@ -18,10 +18,21 @@ match upstream closely enough to drop into a supervisor that invokes the npm
 CLI, including flags this binary accepts and ignores. Where it deliberately
 differs: builds are in-process rather than shelling out to node, `main.crdt` is
 generated natively instead of through `@dcl/inspector`, the preview runs an
-asset-bundle sidecar upstream has no equivalent of, a preview content hash
-carries a digest of the file's bytes rather than being derived from its path
-alone, and scene runtime errors are pulled out of the running client and
-printed in your terminal. Each of those is called out below where it matters.
+asset-bundle sidecar upstream has no equivalent of, and scene runtime errors
+are pulled out of the running client and printed in your terminal. Each of
+those is called out below where it matters.
+
+The 7.27.0 number is carried by the vendored `@dcl/ecs` / `@dcl/sdk` runtime,
+which moves wholesale at each npm release. The `@dcl/sdk-commands` side of
+7.26.0..7.27.0 was audited commit by commit: #1542 (free-port probing on
+`0.0.0.0`) and #1529 (content-versioned preview ids) were already matched,
+#1536 (event-system helpers) is runtime code the blob carries, and two are
+deliberate differences. #1551 forwards real request headers through upstream's
+`/auth/*` proxy to decentraland.org, a route this linker does not have because
+it signs in-process instead of proxying the auth dApp. #1481 reads and hashes
+project files through 32 concurrent workers, a node event-loop optimisation
+with no behaviour change; `deploy::prepare` reads them synchronously on a
+blocking thread and produces the same file set and hashes.
 
 ---
 
@@ -82,8 +93,13 @@ Two things happen here that upstream does differently.
 **Type checking runs beside the build, not in front of it.** tsc keeps its
 state in `.dcl-cache/tsbuildinfo`, so it stops re-checking all of `@dcl/sdk`'s
 declarations on every run — roughly 790 ms down to 390 ms on a real scene. A
-missing or stale info file costs exactly one full check. `--skip-type-check`
-turns it off; the bundle is written either way.
+missing or stale info file costs exactly one full check. When every file the
+last program read still hashes the same, the tsconfig chain and compiler are
+unchanged, and no source was added under the project, tsc does not run: the
+step reports "unchanged since the last pass" and a warm `build` takes tens of
+milliseconds. The stamp (`.dcl-cache/tscheck.json`) is written only by a pass
+and deleted by a failure. `--skip-type-check` turns checking off; the bundle
+is written either way.
 
 **`main.crdt` is generated in Rust.** Composites are parsed and encoded
 natively, including components that carry their own `jsonSchema` — which is
@@ -205,7 +221,8 @@ threw.
 and tells the client to reload. Saving a `.glb` sends a message naming that one
 file. Content hashes include a digest of the file's bytes, so an edited asset
 gets a new hash and the client refetches that one asset instead of dropping
-its whole cache.
+its whole cache. Upstream 7.27.0 does the same (#1529) with an mtime-derived
+version, and both keep the scene entity id path-only so it survives edits.
 
 Only that half is content addressing, and the asymmetry is worth knowing
 before you build anything on these hashes. The digest names a version; it does
@@ -284,10 +301,13 @@ timestamp minted at deploy time, so any value here would be a different one.
 `--dry-run` prints an id, but it mints its own timestamp too — only
 `--timestamp` makes that id the one a real deploy would produce.
 
-Without a target it walks a rotation of public catalysts until one is healthy.
-A world scene needs an explicit `--target-content`, because publishing a world
-to a random Genesis City catalyst is not what you meant.
-`DCL_ONE_SDK_DEFAULT_TARGET` sets your own default.
+Without a target it walks a rotation of public catalysts until one is healthy;
+a scene whose `worldConfiguration.name` is set goes to the public worlds
+server instead. `DCL_ONE_SDK_DEFAULT_TARGET` sets your own default. A
+`worldConfiguration` section that names no world is refused before anything
+is signed: a World needs the name, and a Genesis City catalyst refuses the
+section (ADR-173) — remove it (the /target page's "Point at Genesis City
+LAND" does this) or name the world.
 
 Related: `unpublish` takes a scene down, `pack` builds the `.zip` a smart
 wearable is submitted as, and `world` reads and writes a world's settings and
@@ -301,8 +321,9 @@ permissions on a worlds content server.
 5141 a local catalyrst if you run one.
 
 **Files written into the scene.** `bin/` holds the built chunks.
-`.dcl-one/` holds the generated entrypoint and composite index. `.dcl-cache/`
-holds the tsc info file and fetched upstream content. `.dcl-optimized-assets/`
+`.dcl-one/` holds the generated entrypoint and composite index, and ignores
+itself with its own `.gitignore`. `.dcl-cache/` holds the tsc info file, the
+type-check stamp and fetched upstream content. `.dcl-optimized-assets/`
 holds abgen's output and JIT cache. All are watcher-ignored, and none are
 deployed.
 

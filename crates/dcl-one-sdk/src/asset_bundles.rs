@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// abgen ships inside this binary, so a failure here is never a missing install.
 const INSTALL_HINT: &str =
     "ABGEN_BIN overrides the embedded copy; --no-asset-bundles silences this";
 
@@ -19,16 +18,14 @@ fn free_port() -> Option<u16> {
     Some(l.local_addr().ok()?.port())
 }
 
-/// The sidecar's registered port (ports.toml :5175), purely a debuggability
-/// nicety: the preview server proxies to whichever port was actually bound, so
-/// a second preview on the same box just lands on a random free port. It must
-/// never be 5147 — the dedicated stack abgen owns that (deploy/PORTS.md), and a
-/// sidecar preferring it races the stack unit for the bind on every restart.
+/// The sidecar's registered port (ports.toml :5175), a debuggability nicety:
+/// the preview proxies to whichever port was actually bound. Never 5147 — the
+/// dedicated stack abgen owns that (deploy/PORTS.md) and a sidecar preferring
+/// it races the stack unit for the bind on every restart.
 const SIDECAR_PREFERRED_PORT: u16 = 5175;
 
-/// The probe binds the wildcard address because that is what abgen binds: a
-/// loopback probe false-passes when another abgen holds the wildcard with
-/// SO_REUSEADDR.
+/// Probes the wildcard address because that is what abgen binds: a loopback
+/// probe false-passes when another abgen holds the wildcard with SO_REUSEADDR.
 fn sidecar_port() -> Option<u16> {
     if std::net::TcpListener::bind(("0.0.0.0", SIDECAR_PREFERRED_PORT)).is_ok() {
         return Some(SIDECAR_PREFERRED_PORT);
@@ -36,21 +33,15 @@ fn sidecar_port() -> Option<u16> {
     free_port()
 }
 
-/// Where abgen looks for an already-converted bundle before converting one
-/// itself (ABGEN_UPSTREAM_AB_CDN overrides). Must never be the sidecar's own
-/// address: every miss re-entered the same server until "Too many open files
-/// (os error 24)". A real CDN also makes wearables usable without converting
-/// Decentraland's own on every boot.
-fn upstream_ab_cdn_default() -> String {
-    "https://ab-cdn.interconnected.online".to_string()
-}
+/// Where abgen looks for an already-converted bundle (ABGEN_UPSTREAM_AB_CDN
+/// overrides). Must never be the sidecar's own address: every miss re-entered
+/// the same server until "Too many open files (os error 24)".
+const UPSTREAM_AB_CDN: &str = "https://ab-cdn.interconnected.online";
 
-/// The upstream to hand the sidecar, with an upstream that IS the sidecar
-/// dropped: the loop it causes reads as descriptor exhaustion, not as a
-/// misconfiguration. Empty is abgen's own "no read-through" (`abcdn/config.rs`
-/// filters an empty value out), so disabling needs no sentinel of ours.
+/// Empty is abgen's own "no read-through" (`abcdn/config.rs` filters an empty
+/// value out), so disabling needs no sentinel of ours.
 fn upstream_ab_cdn_for(port: u16) -> String {
-    let url = env_or("ABGEN_UPSTREAM_AB_CDN", upstream_ab_cdn_default());
+    let url = env_or("ABGEN_UPSTREAM_AB_CDN", UPSTREAM_AB_CDN.to_string());
     if !points_at_port(&url, port) {
         return url;
     }
@@ -83,8 +74,6 @@ fn host_platform() -> &'static str {
     }
 }
 
-/// abgen lanes get ceil(3/4 · ncpu), leaving a quarter for the preview server,
-/// the explorer and the rest of the machine.
 fn three_quarter_cpus() -> usize {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -102,8 +91,6 @@ fn pick_bin(env_bin: Option<String>, embedded: Option<PathBuf>) -> String {
     }
 }
 
-/// The abgen the sidecar runs. Every binary embeds one, so there is no install
-/// step and no per-scene lookup; ABGEN_BIN overrides it.
 pub fn resolve_bin() -> String {
     pick_bin(
         std::env::var("ABGEN_BIN").ok(),
@@ -118,11 +105,9 @@ pub struct Sidecar {
     gpu: std::sync::Arc<std::sync::Mutex<GpuQual>>,
 }
 
-/// What abgen's startup qualification chatter amounts to: which GPU backend
-/// qualified, if any. The banner prints this one word instead of the four
-/// stderr lines the qualification takes to say it (`gpu/mod.rs log_status` in
-/// abgen: the `qualified=true` line names the backend auto settled on, since
-/// auto returns on its first success).
+/// Which GPU backend abgen's startup qualification settled on, so the banner
+/// prints one word instead of the four stderr lines (abgen's `gpu/mod.rs
+/// log_status`: the `qualified=true` line names the backend auto stopped at).
 #[derive(Default)]
 struct GpuQual {
     cuda: bool,
@@ -141,9 +126,8 @@ impl GpuQual {
     }
 }
 
-/// The startup lines the one-word label replaces, parsed and withheld (they
-/// still print under --verbose). Only qualification-time chatter is absorbed:
-/// a mid-run "GPU init panicked" or a forced-GPU error still flows through
+/// Withholds qualification-time chatter only (still printed under --verbose);
+/// a mid-run GPU panic or forced-GPU error still flows through
 /// [`looks_like_problem`].
 fn absorb_gpu_chatter(line: &str, qual: &std::sync::Mutex<GpuQual>) -> bool {
     let line = line.trim_start();
@@ -243,25 +227,27 @@ fn relay_output(
     gpu: std::sync::Arc<std::sync::Mutex<GpuQual>>,
 ) {
     use tokio::io::AsyncBufReadExt;
+    let emit = move |line: &str| {
+        if to_stderr {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
     tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stream).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if absorb_gpu_chatter(&line, &gpu) {
                 if crate::ux::verbose() {
-                    if to_stderr {
-                        eprintln!("{line}");
-                    } else {
-                        println!("{line}");
-                    }
+                    emit(&line);
                 }
                 continue;
             }
             match rewrite_build_line(&line, &project_root) {
                 Some((msg, true)) => crate::ux::note_stderr(msg),
                 Some((msg, false)) => crate::ux::note(msg),
-                None if !crate::ux::verbose() && !looks_like_problem(&line) => {}
-                None if to_stderr => eprintln!("{line}"),
-                None => println!("{line}"),
+                None if crate::ux::verbose() || looks_like_problem(&line) => emit(&line),
+                None => {}
             }
         }
     });
@@ -369,9 +355,8 @@ pub fn spawn_sidecar(preview_port: u16, project_root: &Path) -> Option<Sidecar> 
 }
 
 impl Sidecar {
-    /// The backend abgen settled on, as one word for the banner. Read after
-    /// [`Self::wait_ready`]: qualification runs during abgen's startup, so by
-    /// the time /readyz answers the chatter has been relayed and parsed.
+    /// Read after [`Self::wait_ready`]: qualification runs during abgen's
+    /// startup, so by the time /readyz answers the chatter has been parsed.
     pub fn backend_label(&self) -> &'static str {
         self.gpu
             .lock()
@@ -420,13 +405,16 @@ impl Sidecar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::test_tree::TempTree;
 
-    fn scratch(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "dcl-one-sdk-{tag}-{}-{:x}",
-            std::process::id(),
-            rand::random::<u64>()
-        ))
+    fn resolve_bin_without_env() -> String {
+        let prev = std::env::var("ABGEN_BIN").ok();
+        std::env::remove_var("ABGEN_BIN");
+        let bin = resolve_bin();
+        if let Some(v) = prev {
+            std::env::set_var("ABGEN_BIN", v);
+        }
+        bin
     }
 
     #[test]
@@ -441,10 +429,9 @@ mod tests {
     #[test]
     fn the_upstream_ab_cdn_is_never_this_sidecar() {
         std::env::remove_var("ABGEN_UPSTREAM_AB_CDN");
-        let default = upstream_ab_cdn_default();
-        assert!(default.starts_with("https://"), "{default}");
-        assert!(!points_at_port(&default, 5147));
-        assert_eq!(upstream_ab_cdn_for(5147), default);
+        assert!(UPSTREAM_AB_CDN.starts_with("https://"), "{UPSTREAM_AB_CDN}");
+        assert!(!points_at_port(UPSTREAM_AB_CDN, 5147));
+        assert_eq!(upstream_ab_cdn_for(5147), UPSTREAM_AB_CDN);
 
         for form in [
             "http://127.0.0.1:5147",
@@ -463,13 +450,12 @@ mod tests {
 
     #[test]
     fn rewrite_build_line_formats_ok_fail_and_passthrough() {
-        let root = scratch("abgen-line-test");
-        std::fs::create_dir_all(root.join("images")).unwrap();
-        std::fs::write(root.join("images/scene-thumbnail.png"), vec![0u8; 2048]).unwrap();
+        let root = TempTree::new("abgen-line");
+        root.write("images/scene-thumbnail.png", &[0u8; 2048]);
 
         let ok = r#"ABGEN_BUILD {"entity":"b64-x","entity_type":"scene","file":"images/scene-thumbnail.png","platform":"mac","hash":"b64-y","build_ms":16,"out_bytes":33866,"result":"ok"}"#;
         assert_eq!(
-            rewrite_build_line(ok, &root),
+            rewrite_build_line(ok, &root.0),
             Some((
                 "abgen build: images/scene-thumbnail.png (mac) 16.0 ms, in 2.0kb, out 33.1kb"
                     .to_string(),
@@ -479,7 +465,7 @@ mod tests {
 
         let fail = r#"ABGEN_BUILD {"file":"assets/tree.glb","platform":"windows","build_ms":6230,"result":"decode error"}"#;
         assert_eq!(
-            rewrite_build_line(fail, &root),
+            rewrite_build_line(fail, &root.0),
             Some((
                 "abgen build FAIL: assets/tree.glb (windows) 6.23 sec \u{2014} decode error"
                     .to_string(),
@@ -487,16 +473,10 @@ mod tests {
             ))
         );
 
-        assert_eq!(rewrite_build_line("plain log line", &root), None);
-        assert_eq!(rewrite_build_line("ABGEN_BUILD not-json", &root), None);
-        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(rewrite_build_line("plain log line", &root.0), None);
+        assert_eq!(rewrite_build_line("ABGEN_BUILD not-json", &root.0), None);
     }
 
-    /// The four startup lines the terminal used to carry fold into one word:
-    /// a `qualified=true` line names the backend abgen picked (auto stops at
-    /// its first success), and everything else means CPU. Runtime problems —
-    /// a mid-run GPU panic, a forced-GPU error — are not qualification
-    /// chatter and must keep flowing to the terminal.
     #[test]
     fn gpu_chatter_folds_into_one_backend_word() {
         let qual = std::sync::Mutex::new(GpuQual::default());
@@ -572,12 +552,7 @@ mod tests {
 
     #[test]
     fn resolve_bin_lands_on_the_embedded_abgen_without_any_install() {
-        let prev = std::env::var("ABGEN_BIN").ok();
-        std::env::remove_var("ABGEN_BIN");
-        let bin = resolve_bin();
-        if let Some(v) = prev {
-            std::env::set_var("ABGEN_BIN", v);
-        }
+        let bin = resolve_bin_without_env();
         assert_ne!(
             bin, "abgen",
             "resolved to bare PATH; the embed did not unpack"
@@ -614,27 +589,15 @@ mod tests {
         kill_process_group(pgid);
     }
 
-    /// The scene's own `@dcl/abgen` package was once in the lookup chain; a
-    /// scene that still has it installed must not swap the sidecar version.
+    /// The scene's own `@dcl/abgen` package was once in the lookup chain.
     #[test]
     fn an_npm_abgen_in_the_scene_is_ignored() {
-        let root = scratch("npm-abgen");
-        let pkg = root
-            .join("node_modules")
-            .join("@dcl")
-            .join("abgen-darwin-arm64");
-        std::fs::create_dir_all(&pkg).unwrap();
-        std::fs::write(pkg.join("abgen"), b"").unwrap();
-        let prev = std::env::var("ABGEN_BIN").ok();
-        std::env::remove_var("ABGEN_BIN");
-        let bin = resolve_bin();
-        if let Some(v) = prev {
-            std::env::set_var("ABGEN_BIN", v);
-        }
+        let root = TempTree::new("npm-abgen");
+        root.write("node_modules/@dcl/abgen-darwin-arm64/abgen", b"");
+        let bin = resolve_bin_without_env();
         assert!(
             !bin.contains("node_modules"),
             "resolved to the scene's npm abgen: {bin}"
         );
-        std::fs::remove_dir_all(&root).unwrap();
     }
 }

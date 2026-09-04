@@ -4,19 +4,16 @@
 use super::super::chrome::esc;
 use serde_json::Value;
 
-/// The deep-link flags offered, from the client's own allowlist
-/// (`DeepLinkAllowlist.cs`): the first four survive only on a whitelisted
-/// realm (loopback, or a world the `deeplink-whitelisted-worlds` flag names),
-/// `force-open-backpack` on any. The client's other ~90 flags are dropped for
-/// every realm, so offering them would promise changes it silently discards;
-/// [`Carry`] renders what the target would drop as fixed text.
-///
-/// Terrain is the inverted one: the client draws it unless the param arrives
-/// `=false` (`!HasFlagWithValueFalse` in `DynamicWorldContainer`), so the box
-/// ships checked and only the unchecked state emits a token — `=true` would
-/// be a no-op dressed as a control.
+/// Terrain is inverted in the client (`!HasFlagWithValueFalse` in
+/// `DynamicWorldContainer`): drawn unless the param arrives `=false`, so the
+/// box ships checked and only the unchecked state emits a token.
 pub(super) const TERRAIN: &str = "landscape-terrain-enabled";
 
+/// The client's own allowlist (`DeepLinkAllowlist.cs`): the first four
+/// survive only on a whitelisted realm (loopback, or a world the
+/// `deeplink-whitelisted-worlds` flag names), `force-open-backpack` on any.
+/// Its other ~90 flags are dropped for every realm, so offering them would
+/// promise changes it silently discards.
 pub(super) const TOGGLES: [(&str, &str); 5] = [
     (
         "multi-instance",
@@ -28,17 +25,16 @@ pub(super) const TOGGLES: [(&str, &str); 5] = [
     ("force-open-backpack", "Land with the backpack open"),
 ];
 
-/// How much of the deep link a target's client will actually keep, which is
-/// decided by whether its realm is loopback ([`TOGGLES`]).
+/// How much of the deep link a target's client keeps, decided by whether its
+/// realm is loopback ([`TOGGLES`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Carry {
-    /// A loopback realm: the client keeps every knob this page offers.
+    /// Loopback realm: every knob this page offers.
     Loopback,
-    /// A routable realm — the LAN address another device has to dial. The
-    /// client drops the loopback-only tier of its allowlist.
+    /// Routable (LAN) realm: the loopback-only tier is dropped.
     Routable,
-    /// A link with no deep-link params at all: the web build reads none of
-    /// them, and the mobile link is a realm and a position.
+    /// No deep-link params at all: the web build reads none, the mobile link
+    /// is a realm and a position.
     Nothing,
 }
 
@@ -53,8 +49,7 @@ impl Carry {
     pub(super) fn keeps_mcp(self) -> bool {
         self == Carry::Loopback
     }
-    /// `spawnpoint` is not in the loopback-only tier, so it survives anywhere
-    /// the client reads deep-link params at all.
+    /// `spawnpoint` is not in the loopback-only tier.
     pub(super) fn keeps_spawn(self) -> bool {
         self != Carry::Nothing
     }
@@ -66,9 +61,8 @@ pub(super) const WHERE_WEB: &str = "web";
 pub(super) const WHERE_PHONE: &str = "phone";
 pub(super) const WHERE_KEYS: [&str; 4] = [WHERE_DESKTOP, WHERE_LAN, WHERE_WEB, WHERE_PHONE];
 
-/// The page's own state, carried in the query string because the knobs have no
-/// JavaScript to hold it: the one form GETs back here and the server rebuilds
-/// the launch link with the choices folded in.
+/// The page's state, carried in the query string: the one form GETs back here
+/// and the server rebuilds the launch link with the choices folded in.
 #[derive(Default)]
 pub(super) struct Knobs {
     /// Checked `opt=` boxes, in [`TOGGLES`] order.
@@ -77,20 +71,15 @@ pub(super) struct Knobs {
     pub(super) spawn: String,
     /// A [`WHERE_KEYS`] entry, or empty for the first target on offer.
     pub(super) where_key: String,
-    /// The mcp radio, or `None` before anyone has touched it — the server's
-    /// own `--mcp` decides the default.
+    /// `None` until touched: the server's own `--mcp` decides the default.
     pub(super) mcp: Option<bool>,
 }
 
 impl Knobs {
     /// The `--key=value` tokens these knobs add, in the form
-    /// [`joinblock::parse_passthrough_params`] already understands — so the
-    /// same rules apply as to `--` params on the command line: a core key
-    /// (realm, position, …) or one a flag already set is dropped rather than
-    /// allowed to repoint the link.
-    ///
-    /// A knob the target's client would throw away is left out of the link
-    /// rather than sent and silently dropped.
+    /// [`joinblock::parse_passthrough_params`] understands, so a core key or
+    /// one a flag already set is dropped rather than allowed to repoint the
+    /// link. A knob the target's client would discard is left out.
     pub(super) fn tokens(&self, carry: Carry) -> Vec<String> {
         let mut out: Vec<String> = self
             .opts
@@ -108,28 +97,27 @@ impl Knobs {
     }
 }
 
-/// The flags a fresh page starts with checked: a second client beside the
-/// one already running, and no auth screen in the way — what every local
-/// iteration loop wants. They apply only to the query-less first visit; a
-/// submitted form names its own set, so unchecking sticks (the form always
-/// carries `where`, so a submission is never mistaken for a fresh visit).
+/// Checked on a query-less first visit: what every local iteration loop
+/// wants. A submitted form always carries `where`, so it names its own set
+/// and unchecking sticks.
 pub(in crate::start) const DEFAULT_ON: [&str; 2] = ["multi-instance", "skip-auth-screen"];
 
-/// Every knob on the page comes back through the query string, and nothing
-/// else does: a key this page does not own is ignored, and so is a value the
-/// page never offered. The page can therefore only ever build a link out of
-/// what it drew — there is no free-text field to smuggle a flag through.
+/// Every key is an allowlist over what the page drew, so a link can only be
+/// built out of what it offered — there is no free-text field to smuggle a
+/// flag through.
 pub(super) fn knobs(query: Option<&str>, spawn_names: &[String]) -> Knobs {
     let Some(query) = query else {
-        // The page's fresh visit also draws the terrain by default — a
-        // preview wants the scene in its surroundings — but that one stays a
-        // page default only: the terminal deep link carries just DEFAULT_ON.
-        let mut knobs = Knobs {
-            opts: DEFAULT_ON.iter().map(|s| s.to_string()).collect(),
+        // The fresh page also draws the terrain, but only as a page default:
+        // the terminal deep link carries just DEFAULT_ON.
+        return Knobs {
+            opts: DEFAULT_ON
+                .iter()
+                .copied()
+                .chain([TERRAIN])
+                .map(str::to_string)
+                .collect(),
             ..Knobs::default()
         };
-        knobs.opts.push(TERRAIN.to_string());
-        return knobs;
     };
     let mut knobs = Knobs::default();
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -160,9 +148,28 @@ pub(super) struct Target {
     pub(super) carry: Carry,
 }
 
+impl Target {
+    pub(super) fn new(
+        key: &'static str,
+        label: &'static str,
+        hint: &str,
+        url: String,
+        carry: Carry,
+    ) -> Self {
+        Target {
+            key,
+            label,
+            hint: hint.to_string(),
+            url,
+            qr: String::new(),
+            carry,
+        }
+    }
+}
+
 /// Which tier of the client's deep-link allowlist a realm qualifies for.
 /// `ApplicationParametersParser` asks `Uri.IsLoopback`, so this asks the same
-/// question of the host — a LAN address is not loopback however local it feels.
+/// of the host — a LAN address is not loopback however local it feels.
 pub(super) fn realm_carry(realm: &str) -> Carry {
     let host = realm
         .split_once("://")
@@ -184,9 +191,8 @@ pub(super) fn realm_carry(realm: &str) -> Carry {
     }
 }
 
-/// A knob the client would throw away is disabled, but the choice is not
-/// forgotten: it rides along hidden so switching back to a target that can use
-/// it finds it still set.
+/// A knob the client would throw away rides along hidden, so switching back
+/// to a target that can use it finds it still set.
 pub(super) fn kept(name: &str, value: &str) -> String {
     format!(
         r#"<input type="hidden" name="{}" value="{}">"#,
@@ -195,11 +201,9 @@ pub(super) fn kept(name: &str, value: &str) -> String {
     )
 }
 
-/// The join surface: one card that IS the GET form — header, target tabs,
-/// knobs, footer with the launch button and deep link. Knobs the target's
-/// client would discard render disabled with a note rather than live and
-/// ignored. Tab/segment radios are `appearance: none` stretched over their
-/// labels: still real, focusable inputs.
+/// The join card IS the GET form: header, target tabs, knobs, footer with the
+/// launch button and deep link. Tab/segment radios are `appearance: none`
+/// stretched over their labels — still real, focusable inputs.
 pub(super) fn join_control(
     targets: &[Target],
     selected: usize,
@@ -211,6 +215,7 @@ pub(super) fn join_control(
 ) -> String {
     let target = &targets[selected];
     let carry = target.carry;
+    let on_off = |on: bool| if on { "On" } else { "Off" };
 
     let tabs: String = targets
         .iter()
@@ -218,9 +223,6 @@ pub(super) fn join_control(
         .map(|(i, t)| crate::start::chrome::radio_tab("where", t.key, &esc(t.label), i == selected))
         .collect();
 
-    // No disabled controls anywhere on the card: a knob the target's client
-    // would throw away reads as its value in plain text, and a hidden input
-    // keeps that value riding an Apply round-trip.
     let mcp_control = match carry.keeps_mcp() {
         true => {
             let opts: String = [("off", false), ("on", true)]
@@ -228,7 +230,7 @@ pub(super) fn join_control(
                 .map(|(name, on)| {
                     format!(
                         r#"<label class="seg"><input class="seg__r" type="radio" name="mcp" value="{name}"{c}>{label}</label>"#,
-                        label = if *on { "On" } else { "Off" },
+                        label = on_off(*on),
                         c = if *on == mcp_on { " checked" } else { "" },
                     )
                 })
@@ -237,51 +239,54 @@ pub(super) fn join_control(
         }
         false => format!(
             r#"<span class="note">{} — this target's link never carries the MCP flag</span>{}"#,
-            if mcp_on { "On" } else { "Off" },
+            on_off(mcp_on),
             kept("mcp", if mcp_on { "on" } else { "off" }),
         ),
     };
     let mcp_note = match (carry.keeps_mcp(), mcp_server) {
-        (false, _) => "",
-        (true, true) => "The client opens its MCP port and this preview reads the running scene's errors out of it",
-        (true, false) => "This preview was started with --no-mcp, so nothing here reads the port even when the link opens it",
-    };
-    let mcp_note = match mcp_note {
-        "" => String::new(),
-        note => format!(r#"<span class="knob__note">{}</span>"#, esc(note)),
-    };
+        (false, _) => None,
+        (true, true) => Some("The client opens its MCP port and this preview reads the running scene's errors out of it"),
+        (true, false) => Some("This preview was started with --no-mcp, so nothing here reads the port even when the link opens it"),
+    }
+    .map_or_else(String::new, |note| {
+        format!(r#"<span class="knob__note">{note}</span>"#)
+    });
 
+    let checked = |key: &str| knobs.opts.iter().any(|o| o == key);
     let flags: String = TOGGLES
         .iter()
         .map(|(key, what)| {
-            let on = knobs.opts.iter().any(|o| o == key);
+            let on = checked(key);
             let live = carry.keeps_toggle(key);
-            let mut row = match live {
-                true => format!(
-                    r#"<div class="flag"><label class="flag__l"><input class="sw" type="checkbox" name="opt" value="{k}"{c}><span class="chk__k">{k}</span></label><span class="chk__w">{w}</span>"#,
-                    k = esc(key),
-                    w = esc(what),
-                    c = if on { " checked" } else { "" },
+            let k = esc(key);
+            let (class, control) = match live {
+                true => (
+                    "flag",
+                    format!(
+                        r#"<label class="flag__l"><input class="sw" type="checkbox" name="opt" value="{k}"{c}><span class="chk__k">{k}</span></label>"#,
+                        c = if on { " checked" } else { "" },
+                    ),
                 ),
-                false => format!(
-                    r#"<div class="flag flag--off"><span class="flag__l"><span class="chk__k">{k}</span>{state}</span><span class="chk__w">{w}</span>"#,
-                    k = esc(key),
-                    w = esc(what),
-                    state = if on { r#"<b class="knob__on">on</b>"# } else { "" },
+                false => (
+                    "flag flag--off",
+                    format!(
+                        r#"<span class="flag__l"><span class="chk__k">{k}</span>{state}</span>"#,
+                        state = if on { r#"<b class="knob__on">on</b>"# } else { "" },
+                    ),
                 ),
             };
-            if on && !live {
-                row.push_str(&kept("opt", key));
-            }
-            row.push_str("</div>");
-            row
+            format!(
+                r#"<div class="{class}">{control}<span class="chk__w">{w}</span>{keep}</div>"#,
+                w = esc(what),
+                keep = if on && !live { kept("opt", key) } else { String::new() },
+            )
         })
         .collect();
-    let flags_on = TOGGLES
+    let flag_count = match TOGGLES
         .iter()
-        .filter(|(k, _)| carry.keeps_toggle(k) && knobs.opts.iter().any(|o| o == *k))
-        .count();
-    let flag_count = match flags_on {
+        .filter(|(k, _)| carry.keeps_toggle(k) && checked(k))
+        .count()
+    {
         0 => String::new(),
         n => format!(r#"<b class="knob__on">{n} on</b>"#),
     };
@@ -299,20 +304,17 @@ pub(super) fn join_control(
     )
 }
 
-/// What the header pill names: the host the visitor reached this page on,
-/// scheme and prefix stripped.
+/// The host the visitor reached this page on, scheme and prefix stripped.
 pub(super) fn host_label(realm: &str) -> &str {
     let rest = realm.split_once("://").map_or(realm, |(_, r)| r);
     rest.split('/').next().unwrap_or(rest)
 }
 
-/// `spawnpoint` picks which of the scene's own named spawn points the player
-/// lands on; a scene that names none has nothing to choose, so the knob is
-/// left out rather than shown empty.
+/// The spawn-point knob; a scene that names no spawn points gets none.
 pub(super) fn spawn_select(knobs: &Knobs, spawns: &[Value], carry: Carry) -> String {
     let options: String = spawns
         .iter()
-        .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+        .filter_map(|s| s.get("name").and_then(Value::as_str))
         .map(|name| {
             format!(
                 r#"<option value="{n}"{sel}>{n}</option>"#,
@@ -324,25 +326,18 @@ pub(super) fn spawn_select(knobs: &Knobs, spawns: &[Value], carry: Carry) -> Str
     if options.is_empty() {
         return String::new();
     }
+    let default = knobs.spawn.is_empty();
     if !carry.keeps_spawn() {
+        let (chosen, keep) = match default {
+            true => ("The scene's default".to_string(), String::new()),
+            false => (esc(&knobs.spawn), kept("spawn", &knobs.spawn)),
+        };
         return format!(
-            r#"<span class="knob__k">Spawn point</span><span class="note">{chosen} — this link carries only the realm and a position</span>{keep}"#,
-            chosen = match knobs.spawn.is_empty() {
-                true => "The scene's default".to_string(),
-                false => esc(&knobs.spawn),
-            },
-            keep = match knobs.spawn.is_empty() {
-                true => String::new(),
-                false => kept("spawn", &knobs.spawn),
-            },
+            r#"<span class="knob__k">Spawn point</span><span class="note">{chosen} — this link carries only the realm and a position</span>{keep}"#
         );
     }
     format!(
         r#"<label class="knob__k" for="spawn">Spawn point</label><select class="knob__sel" id="spawn" name="spawn"><option value=""{def}>The scene's default</option>{options}</select>"#,
-        def = if knobs.spawn.is_empty() {
-            " selected"
-        } else {
-            ""
-        },
+        def = if default { " selected" } else { "" },
     )
 }

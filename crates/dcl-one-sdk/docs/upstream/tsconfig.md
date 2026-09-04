@@ -266,5 +266,8 @@ Inferred, not executed:
 * that no downstream repo depends on the exact `import("../internal/provider")` spelling in the
   emitted `ethereum-provider/index.d.ts`.
 
-Our own overlay of this patch lives in `scripts/build-base-blob.py` (`patch_ecs7_tsconfig`) with the
-rationale in `docs/ts7-migration.md`; it exists only until this lands upstream.
+Our own overlay of this patch lives in `scripts/blob_overlays.py` (`patch_ecs7_tsconfig()`, run by
+`scripts/build-base-blob.py`) with the rationale in `docs/ts7-migration.md`; it exists only until
+this lands upstream: each of its three edits must match the vendored `tsconfig.ecs7.json` exactly
+once, so the blob build fails naming any edit upstream has already shipped, and with the instruction
+to delete the overlay once none of the three finds anything left to change.

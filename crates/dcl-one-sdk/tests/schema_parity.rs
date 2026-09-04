@@ -763,3 +763,111 @@ fn the_rust_encoder_agrees_with_dcl_ecs_on_generated_schemas() {
         );
     }
 }
+
+const NETWORK_DELETE_RUNNER: &str = r#"
+const fs = require('fs')
+const path = require('path')
+const root = process.argv[2]
+const crdt = 'node_modules/@dcl/ecs/dist-cjs/serialization/crdt'
+const { ReadWriteByteBuffer } = require(path.join(root, 'node_modules/@dcl/ecs/dist-cjs/serialization/ByteBuffer'))
+const { DeleteEntityNetwork } = require(path.join(root, crdt, 'network/deleteEntityNetwork'))
+const { DeleteEntity } = require(path.join(root, crdt, 'deleteEntity'))
+const buffer = new ReadWriteByteBuffer()
+DeleteEntityNetwork.write(512, 7, buffer)
+DeleteEntityNetwork.write(513, 9, buffer)
+DeleteEntity.write(514, buffer)
+fs.writeFileSync(process.argv[3], Buffer.from(buffer.toBinary()))
+"#;
+
+const CRDT_HEADER: usize = 8;
+const DELETE_ENTITY: u32 = 3;
+const DELETE_ENTITY_NETWORK: u32 = 7;
+
+fn word(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+/// The rule the bevy engine applies to a tick's batch: a record's declared
+/// length covers its own header and exactly the body that follows, and the
+/// next record starts where that length ends. A record that declares less
+/// than it wrote puts the reader four bytes inside its body, and the engine
+/// discards the rest of the batch rather than parse the misaligned remainder.
+fn strict_frames(bytes: &[u8]) -> Vec<(u32, &[u8])> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        assert!(
+            at + CRDT_HEADER <= bytes.len(),
+            "record at {at} is cut inside its header"
+        );
+        let length = word(bytes, at) as usize;
+        let kind = word(bytes, at + 4);
+        let body = length
+            .checked_sub(CRDT_HEADER)
+            .unwrap_or_else(|| panic!("record at {at} declares {length}, below its header"));
+        assert!(
+            at + CRDT_HEADER + body <= bytes.len(),
+            "record at {at} declares {body} body bytes, only {} remain",
+            bytes.len() - at - CRDT_HEADER
+        );
+        out.push((kind, &bytes[at + CRDT_HEADER..at + CRDT_HEADER + body]));
+        at += length;
+    }
+    assert_eq!(
+        at,
+        bytes.len(),
+        "the batch does not end on a record boundary"
+    );
+    out
+}
+
+/// Upstream 7.27.0 declares a network entity delete as 12 bytes and writes 16;
+/// the blob carries the #1595 fix as an overlay. This runs the vendored
+/// `dist-cjs` for real and frames its output the way the engine does, so the
+/// overlay is proven on bytes the runtime produced, not on a source grep.
+#[test]
+fn the_vendored_ecs_frames_a_network_entity_delete_by_its_declared_length() {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let tmp = Tmp(std::env::temp_dir().join(format!(
+        "dcl-one-sdk-netdelete-framing-{}",
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&tmp.0);
+    std::fs::create_dir_all(&tmp.0).unwrap();
+    assert!(
+        vendored_ecs(&tmp.0),
+        "the vendored node_modules must carry @dcl/ecs for this test to mean anything"
+    );
+    std::fs::write(tmp.0.join("runner.js"), NETWORK_DELETE_RUNNER).unwrap();
+    let status = Command::new("node")
+        .arg(tmp.0.join("runner.js"))
+        .arg(&tmp.0)
+        .arg(tmp.0.join("out.bin"))
+        .status()
+        .expect("running the vendored @dcl/ecs");
+    assert!(
+        status.success(),
+        "the vendored @dcl/ecs must write the batch"
+    );
+    let bytes = std::fs::read(tmp.0.join("out.bin")).unwrap();
+
+    assert_eq!(bytes.len(), 16 + 16 + 12);
+    assert_eq!(
+        word(&bytes, 0),
+        16,
+        "a network entity delete is 8 + 8 bytes"
+    );
+    let records = strict_frames(&bytes);
+    let entity = |body: &[u8]| word(body, 0);
+    let network = |body: &[u8]| word(body, 4);
+    assert_eq!(records.len(), 3, "strict framing must land on every record");
+    assert_eq!(records[0].0, DELETE_ENTITY_NETWORK);
+    assert_eq!((entity(records[0].1), network(records[0].1)), (512, 7));
+    assert_eq!(records[1].0, DELETE_ENTITY_NETWORK);
+    assert_eq!((entity(records[1].1), network(records[1].1)), (513, 9));
+    assert_eq!(records[2].0, DELETE_ENTITY);
+    assert_eq!(records[2].1, 514u32.to_le_bytes());
+}

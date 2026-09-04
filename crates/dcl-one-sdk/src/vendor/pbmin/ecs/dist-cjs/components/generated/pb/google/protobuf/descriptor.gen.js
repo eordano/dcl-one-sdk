@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GeneratedCodeInfo_Annotation = exports.GeneratedCodeInfo = exports.SourceCodeInfo_Location = exports.SourceCodeInfo = exports.UninterpretedOption_NamePart = exports.UninterpretedOption = exports.MethodOptions = exports.ServiceOptions = exports.EnumValueOptions = exports.EnumOptions = exports.OneofOptions = exports.FieldOptions = exports.MessageOptions = exports.FileOptions = exports.MethodDescriptorProto = exports.ServiceDescriptorProto = exports.EnumValueDescriptorProto = exports.EnumDescriptorProto = exports.OneofDescriptorProto = exports.FieldDescriptorProto = exports.DescriptorProto_ReservedRange = exports.DescriptorProto_ExtensionRange = exports.DescriptorProto = exports.FileDescriptorProto = exports.FileDescriptorSet = exports.FieldOptions_JSType = exports.FieldOptions_CType = exports.FileOptions_OptimizeMode = exports.FieldDescriptorProto_Label = exports.FieldDescriptorProto_Type = void 0;
+exports.GeneratedCodeInfo_Annotation = exports.GeneratedCodeInfo = exports.SourceCodeInfo_Location = exports.SourceCodeInfo = exports.UninterpretedOption_NamePart = exports.UninterpretedOption = exports.MethodOptions = exports.ServiceOptions = exports.EnumValueOptions = exports.EnumOptions = exports.OneofOptions = exports.FieldOptions = exports.MessageOptions = exports.FileOptions = exports.MethodDescriptorProto = exports.ServiceDescriptorProto = exports.EnumValueDescriptorProto = exports.EnumDescriptorProto_EnumReservedRange = exports.EnumDescriptorProto = exports.OneofDescriptorProto = exports.FieldDescriptorProto = exports.ExtensionRangeOptions = exports.DescriptorProto_ReservedRange = exports.DescriptorProto_ExtensionRange = exports.DescriptorProto = exports.FileDescriptorProto = exports.FileDescriptorSet = exports.MethodOptions_IdempotencyLevel = exports.FieldOptions_JSType = exports.FieldOptions_CType = exports.FileOptions_OptimizeMode = exports.FieldDescriptorProto_Label = exports.FieldDescriptorProto_Type = void 0;
 /* eslint-disable */
 const long_1 = __importDefault(require("long"));
 const minimal_1 = __importDefault(require("protobufjs/minimal"));
@@ -13,23 +13,45 @@ const protobufPackageSarasa = "google.protobuf";
  */
 var FieldDescriptorProto_Type;
 (function (FieldDescriptorProto_Type) {
+    /**
+     * TYPE_DOUBLE - 0 is reserved for errors.
+     * Order is weird for historical reasons.
+     */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_DOUBLE"] = 1] = "TYPE_DOUBLE";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_FLOAT"] = 2] = "TYPE_FLOAT";
+    /**
+     * TYPE_INT64 - Not ZigZag encoded.  Negative numbers take 10 bytes.  Use TYPE_SINT64 if
+     * negative values are likely.
+     */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_INT64"] = 3] = "TYPE_INT64";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_UINT64"] = 4] = "TYPE_UINT64";
+    /**
+     * TYPE_INT32 - Not ZigZag encoded.  Negative numbers take 10 bytes.  Use TYPE_SINT32 if
+     * negative values are likely.
+     */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_INT32"] = 5] = "TYPE_INT32";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_FIXED64"] = 6] = "TYPE_FIXED64";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_FIXED32"] = 7] = "TYPE_FIXED32";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_BOOL"] = 8] = "TYPE_BOOL";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_STRING"] = 9] = "TYPE_STRING";
+    /**
+     * TYPE_GROUP - Tag-delimited aggregate.
+     * Group type is deprecated and not supported in proto3. However, Proto3
+     * implementations should still be able to parse the group wire format and
+     * treat group fields as unknown fields.
+     */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_GROUP"] = 10] = "TYPE_GROUP";
+    /** TYPE_MESSAGE - Length-delimited aggregate. */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_MESSAGE"] = 11] = "TYPE_MESSAGE";
+    /** TYPE_BYTES - New in version 2. */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_BYTES"] = 12] = "TYPE_BYTES";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_UINT32"] = 13] = "TYPE_UINT32";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_ENUM"] = 14] = "TYPE_ENUM";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_SFIXED32"] = 15] = "TYPE_SFIXED32";
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_SFIXED64"] = 16] = "TYPE_SFIXED64";
+    /** TYPE_SINT32 - Uses ZigZag encoding. */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_SINT32"] = 17] = "TYPE_SINT32";
+    /** TYPE_SINT64 - Uses ZigZag encoding. */
     FieldDescriptorProto_Type[FieldDescriptorProto_Type["TYPE_SINT64"] = 18] = "TYPE_SINT64";
 })(FieldDescriptorProto_Type = exports.FieldDescriptorProto_Type || (exports.FieldDescriptorProto_Type = {}));
 /**
@@ -37,17 +59,22 @@ var FieldDescriptorProto_Type;
  */
 var FieldDescriptorProto_Label;
 (function (FieldDescriptorProto_Label) {
+    /** LABEL_OPTIONAL - 0 is reserved for errors */
     FieldDescriptorProto_Label[FieldDescriptorProto_Label["LABEL_OPTIONAL"] = 1] = "LABEL_OPTIONAL";
     FieldDescriptorProto_Label[FieldDescriptorProto_Label["LABEL_REQUIRED"] = 2] = "LABEL_REQUIRED";
     FieldDescriptorProto_Label[FieldDescriptorProto_Label["LABEL_REPEATED"] = 3] = "LABEL_REPEATED";
 })(FieldDescriptorProto_Label = exports.FieldDescriptorProto_Label || (exports.FieldDescriptorProto_Label = {}));
+/** Generated classes can be optimized for speed or code size. */
 /**
  * @public
  */
 var FileOptions_OptimizeMode;
 (function (FileOptions_OptimizeMode) {
+    /** SPEED - Generate complete code for parsing, serialization, */
     FileOptions_OptimizeMode[FileOptions_OptimizeMode["SPEED"] = 1] = "SPEED";
+    /** CODE_SIZE - etc. */
     FileOptions_OptimizeMode[FileOptions_OptimizeMode["CODE_SIZE"] = 2] = "CODE_SIZE";
+    /** LITE_RUNTIME - Generate code using MessageLite and the lite runtime. */
     FileOptions_OptimizeMode[FileOptions_OptimizeMode["LITE_RUNTIME"] = 3] = "LITE_RUNTIME";
 })(FileOptions_OptimizeMode = exports.FileOptions_OptimizeMode || (exports.FileOptions_OptimizeMode = {}));
 /**
@@ -55,6 +82,7 @@ var FileOptions_OptimizeMode;
  */
 var FieldOptions_CType;
 (function (FieldOptions_CType) {
+    /** STRING - Default mode. */
     FieldOptions_CType[FieldOptions_CType["STRING"] = 0] = "STRING";
     FieldOptions_CType[FieldOptions_CType["CORD"] = 1] = "CORD";
     FieldOptions_CType[FieldOptions_CType["STRING_PIECE"] = 2] = "STRING_PIECE";
@@ -64,10 +92,29 @@ var FieldOptions_CType;
  */
 var FieldOptions_JSType;
 (function (FieldOptions_JSType) {
+    /** JS_NORMAL - Use the default type. */
     FieldOptions_JSType[FieldOptions_JSType["JS_NORMAL"] = 0] = "JS_NORMAL";
+    /** JS_STRING - Use JavaScript strings. */
     FieldOptions_JSType[FieldOptions_JSType["JS_STRING"] = 1] = "JS_STRING";
+    /** JS_NUMBER - Use JavaScript numbers. */
     FieldOptions_JSType[FieldOptions_JSType["JS_NUMBER"] = 2] = "JS_NUMBER";
 })(FieldOptions_JSType = exports.FieldOptions_JSType || (exports.FieldOptions_JSType = {}));
+/**
+ * Is this method side-effect-free (or safe in HTTP parlance), or idempotent,
+ * or neither? HTTP based RPC implementation may choose GET verb for safe
+ * methods, and PUT verb for idempotent methods instead of the default POST.
+ */
+/**
+ * @public
+ */
+var MethodOptions_IdempotencyLevel;
+(function (MethodOptions_IdempotencyLevel) {
+    MethodOptions_IdempotencyLevel[MethodOptions_IdempotencyLevel["IDEMPOTENCY_UNKNOWN"] = 0] = "IDEMPOTENCY_UNKNOWN";
+    /** NO_SIDE_EFFECTS - implies idempotent */
+    MethodOptions_IdempotencyLevel[MethodOptions_IdempotencyLevel["NO_SIDE_EFFECTS"] = 1] = "NO_SIDE_EFFECTS";
+    /** IDEMPOTENT - idempotent, but may have side effects */
+    MethodOptions_IdempotencyLevel[MethodOptions_IdempotencyLevel["IDEMPOTENT"] = 2] = "IDEMPOTENT";
+})(MethodOptions_IdempotencyLevel = exports.MethodOptions_IdempotencyLevel || (exports.MethodOptions_IdempotencyLevel = {}));
 function createBaseFileDescriptorSet() {
     return { file: [] };
 }
@@ -405,7 +452,7 @@ var DescriptorProto;
     DescriptorProto.decode = decode;
 })(DescriptorProto = exports.DescriptorProto || (exports.DescriptorProto = {}));
 function createBaseDescriptorProto_ExtensionRange() {
-    return { start: 0, end: 0 };
+    return { start: 0, end: 0, options: undefined };
 }
 /**
  * @public
@@ -418,6 +465,9 @@ var DescriptorProto_ExtensionRange;
         }
         if (message.end !== 0) {
             writer.uint32(16).int32(message.end);
+        }
+        if (message.options !== undefined) {
+            ExtensionRangeOptions.encode(message.options, writer.uint32(26).fork()).ldelim();
         }
         return writer;
     }
@@ -440,6 +490,12 @@ var DescriptorProto_ExtensionRange;
                         break;
                     }
                     message.end = reader.int32();
+                    continue;
+                case 3:
+                    if (tag !== 26) {
+                        break;
+                    }
+                    message.options = ExtensionRangeOptions.decode(reader, reader.uint32());
                     continue;
             }
             if ((tag & 7) === 4 || tag === 0) {
@@ -498,6 +554,44 @@ var DescriptorProto_ReservedRange;
     }
     DescriptorProto_ReservedRange.decode = decode;
 })(DescriptorProto_ReservedRange = exports.DescriptorProto_ReservedRange || (exports.DescriptorProto_ReservedRange = {}));
+function createBaseExtensionRangeOptions() {
+    return { uninterpretedOption: [] };
+}
+/**
+ * @public
+ */
+var ExtensionRangeOptions;
+(function (ExtensionRangeOptions) {
+    function encode(message, writer = minimal_1.default.Writer.create()) {
+        for (const v of message.uninterpretedOption) {
+            UninterpretedOption.encode(v, writer.uint32(7994).fork()).ldelim();
+        }
+        return writer;
+    }
+    ExtensionRangeOptions.encode = encode;
+    function decode(input, length) {
+        const reader = input instanceof minimal_1.default.Reader ? input : minimal_1.default.Reader.create(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseExtensionRangeOptions();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 999:
+                    if (tag !== 7994) {
+                        break;
+                    }
+                    message.uninterpretedOption.push(UninterpretedOption.decode(reader, reader.uint32()));
+                    continue;
+            }
+            if ((tag & 7) === 4 || tag === 0) {
+                break;
+            }
+            reader.skipType(tag & 7);
+        }
+        return message;
+    }
+    ExtensionRangeOptions.decode = decode;
+})(ExtensionRangeOptions = exports.ExtensionRangeOptions || (exports.ExtensionRangeOptions = {}));
 function createBaseFieldDescriptorProto() {
     return {
         name: "",
@@ -510,6 +604,7 @@ function createBaseFieldDescriptorProto() {
         oneofIndex: 0,
         jsonName: "",
         options: undefined,
+        proto3Optional: false,
     };
 }
 /**
@@ -547,6 +642,9 @@ var FieldDescriptorProto;
         }
         if (message.options !== undefined) {
             FieldOptions.encode(message.options, writer.uint32(66).fork()).ldelim();
+        }
+        if (message.proto3Optional === true) {
+            writer.uint32(136).bool(message.proto3Optional);
         }
         return writer;
     }
@@ -618,6 +716,12 @@ var FieldDescriptorProto;
                     }
                     message.options = FieldOptions.decode(reader, reader.uint32());
                     continue;
+                case 17:
+                    if (tag !== 136) {
+                        break;
+                    }
+                    message.proto3Optional = reader.bool();
+                    continue;
             }
             if ((tag & 7) === 4 || tag === 0) {
                 break;
@@ -676,7 +780,7 @@ var OneofDescriptorProto;
     OneofDescriptorProto.decode = decode;
 })(OneofDescriptorProto = exports.OneofDescriptorProto || (exports.OneofDescriptorProto = {}));
 function createBaseEnumDescriptorProto() {
-    return { name: "", value: [], options: undefined };
+    return { name: "", value: [], options: undefined, reservedRange: [], reservedName: [] };
 }
 /**
  * @public
@@ -692,6 +796,12 @@ var EnumDescriptorProto;
         }
         if (message.options !== undefined) {
             EnumOptions.encode(message.options, writer.uint32(26).fork()).ldelim();
+        }
+        for (const v of message.reservedRange) {
+            EnumDescriptorProto_EnumReservedRange.encode(v, writer.uint32(34).fork()).ldelim();
+        }
+        for (const v of message.reservedName) {
+            writer.uint32(42).string(v);
         }
         return writer;
     }
@@ -721,6 +831,18 @@ var EnumDescriptorProto;
                     }
                     message.options = EnumOptions.decode(reader, reader.uint32());
                     continue;
+                case 4:
+                    if (tag !== 34) {
+                        break;
+                    }
+                    message.reservedRange.push(EnumDescriptorProto_EnumReservedRange.decode(reader, reader.uint32()));
+                    continue;
+                case 5:
+                    if (tag !== 42) {
+                        break;
+                    }
+                    message.reservedName.push(reader.string());
+                    continue;
             }
             if ((tag & 7) === 4 || tag === 0) {
                 break;
@@ -731,6 +853,53 @@ var EnumDescriptorProto;
     }
     EnumDescriptorProto.decode = decode;
 })(EnumDescriptorProto = exports.EnumDescriptorProto || (exports.EnumDescriptorProto = {}));
+function createBaseEnumDescriptorProto_EnumReservedRange() {
+    return { start: 0, end: 0 };
+}
+/**
+ * @public
+ */
+var EnumDescriptorProto_EnumReservedRange;
+(function (EnumDescriptorProto_EnumReservedRange) {
+    function encode(message, writer = minimal_1.default.Writer.create()) {
+        if (message.start !== 0) {
+            writer.uint32(8).int32(message.start);
+        }
+        if (message.end !== 0) {
+            writer.uint32(16).int32(message.end);
+        }
+        return writer;
+    }
+    EnumDescriptorProto_EnumReservedRange.encode = encode;
+    function decode(input, length) {
+        const reader = input instanceof minimal_1.default.Reader ? input : minimal_1.default.Reader.create(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseEnumDescriptorProto_EnumReservedRange();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    if (tag !== 8) {
+                        break;
+                    }
+                    message.start = reader.int32();
+                    continue;
+                case 2:
+                    if (tag !== 16) {
+                        break;
+                    }
+                    message.end = reader.int32();
+                    continue;
+            }
+            if ((tag & 7) === 4 || tag === 0) {
+                break;
+            }
+            reader.skipType(tag & 7);
+        }
+        return message;
+    }
+    EnumDescriptorProto_EnumReservedRange.decode = decode;
+})(EnumDescriptorProto_EnumReservedRange = exports.EnumDescriptorProto_EnumReservedRange || (exports.EnumDescriptorProto_EnumReservedRange = {}));
 function createBaseEnumValueDescriptorProto() {
     return { name: "", number: 0, options: undefined };
 }
@@ -945,10 +1114,16 @@ function createBaseFileOptions() {
         ccGenericServices: false,
         javaGenericServices: false,
         pyGenericServices: false,
+        phpGenericServices: false,
         deprecated: false,
         ccEnableArenas: false,
         objcClassPrefix: "",
         csharpNamespace: "",
+        swiftPrefix: "",
+        phpClassPrefix: "",
+        phpNamespace: "",
+        phpMetadataNamespace: "",
+        rubyPackage: "",
         uninterpretedOption: [],
     };
 }
@@ -988,6 +1163,9 @@ var FileOptions;
         if (message.pyGenericServices === true) {
             writer.uint32(144).bool(message.pyGenericServices);
         }
+        if (message.phpGenericServices === true) {
+            writer.uint32(336).bool(message.phpGenericServices);
+        }
         if (message.deprecated === true) {
             writer.uint32(184).bool(message.deprecated);
         }
@@ -999,6 +1177,21 @@ var FileOptions;
         }
         if (message.csharpNamespace !== "") {
             writer.uint32(298).string(message.csharpNamespace);
+        }
+        if (message.swiftPrefix !== "") {
+            writer.uint32(314).string(message.swiftPrefix);
+        }
+        if (message.phpClassPrefix !== "") {
+            writer.uint32(322).string(message.phpClassPrefix);
+        }
+        if (message.phpNamespace !== "") {
+            writer.uint32(330).string(message.phpNamespace);
+        }
+        if (message.phpMetadataNamespace !== "") {
+            writer.uint32(354).string(message.phpMetadataNamespace);
+        }
+        if (message.rubyPackage !== "") {
+            writer.uint32(362).string(message.rubyPackage);
         }
         for (const v of message.uninterpretedOption) {
             UninterpretedOption.encode(v, writer.uint32(7994).fork()).ldelim();
@@ -1073,6 +1266,12 @@ var FileOptions;
                     }
                     message.pyGenericServices = reader.bool();
                     continue;
+                case 42:
+                    if (tag !== 336) {
+                        break;
+                    }
+                    message.phpGenericServices = reader.bool();
+                    continue;
                 case 23:
                     if (tag !== 184) {
                         break;
@@ -1096,6 +1295,36 @@ var FileOptions;
                         break;
                     }
                     message.csharpNamespace = reader.string();
+                    continue;
+                case 39:
+                    if (tag !== 314) {
+                        break;
+                    }
+                    message.swiftPrefix = reader.string();
+                    continue;
+                case 40:
+                    if (tag !== 322) {
+                        break;
+                    }
+                    message.phpClassPrefix = reader.string();
+                    continue;
+                case 41:
+                    if (tag !== 330) {
+                        break;
+                    }
+                    message.phpNamespace = reader.string();
+                    continue;
+                case 44:
+                    if (tag !== 354) {
+                        break;
+                    }
+                    message.phpMetadataNamespace = reader.string();
+                    continue;
+                case 45:
+                    if (tag !== 362) {
+                        break;
+                    }
+                    message.rubyPackage = reader.string();
                     continue;
                 case 999:
                     if (tag !== 7994) {
@@ -1194,7 +1423,16 @@ var MessageOptions;
     MessageOptions.decode = decode;
 })(MessageOptions = exports.MessageOptions || (exports.MessageOptions = {}));
 function createBaseFieldOptions() {
-    return { ctype: 0, packed: false, jstype: 0, lazy: false, deprecated: false, weak: false, uninterpretedOption: [] };
+    return {
+        ctype: 0,
+        packed: false,
+        jstype: 0,
+        lazy: false,
+        unverifiedLazy: false,
+        deprecated: false,
+        weak: false,
+        uninterpretedOption: [],
+    };
 }
 /**
  * @public
@@ -1213,6 +1451,9 @@ var FieldOptions;
         }
         if (message.lazy === true) {
             writer.uint32(40).bool(message.lazy);
+        }
+        if (message.unverifiedLazy === true) {
+            writer.uint32(120).bool(message.unverifiedLazy);
         }
         if (message.deprecated === true) {
             writer.uint32(24).bool(message.deprecated);
@@ -1256,6 +1497,12 @@ var FieldOptions;
                         break;
                     }
                     message.lazy = reader.bool();
+                    continue;
+                case 15:
+                    if (tag !== 120) {
+                        break;
+                    }
+                    message.unverifiedLazy = reader.bool();
                     continue;
                 case 3:
                     if (tag !== 24) {
@@ -1474,7 +1721,7 @@ var ServiceOptions;
     ServiceOptions.decode = decode;
 })(ServiceOptions = exports.ServiceOptions || (exports.ServiceOptions = {}));
 function createBaseMethodOptions() {
-    return { deprecated: false, uninterpretedOption: [] };
+    return { deprecated: false, idempotencyLevel: 0, uninterpretedOption: [] };
 }
 /**
  * @public
@@ -1484,6 +1731,9 @@ var MethodOptions;
     function encode(message, writer = minimal_1.default.Writer.create()) {
         if (message.deprecated === true) {
             writer.uint32(264).bool(message.deprecated);
+        }
+        if (message.idempotencyLevel !== 0) {
+            writer.uint32(272).int32(message.idempotencyLevel);
         }
         for (const v of message.uninterpretedOption) {
             UninterpretedOption.encode(v, writer.uint32(7994).fork()).ldelim();
@@ -1503,6 +1753,12 @@ var MethodOptions;
                         break;
                     }
                     message.deprecated = reader.bool();
+                    continue;
+                case 34:
+                    if (tag !== 272) {
+                        break;
+                    }
+                    message.idempotencyLevel = reader.int32();
                     continue;
                 case 999:
                     if (tag !== 7994) {

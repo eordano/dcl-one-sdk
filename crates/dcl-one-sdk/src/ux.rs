@@ -132,12 +132,17 @@ fn write_block(out: &mut String, prefix: &str, sgr: &str, u: &UserError, color: 
     }
 }
 
-pub fn render(err: &anyhow::Error, verbose: bool, color: bool) -> String {
+fn user_block(err: &anyhow::Error, prefix: &str, sgr: &str, color: bool) -> String {
     let mut out = String::new();
     match find_user(err) {
-        Some(u) => write_block(&mut out, "Error:", "1;31", u, color),
-        None => write_block(&mut out, "Error:", "1;31", &fallback(err), color),
+        Some(u) => write_block(&mut out, prefix, sgr, u, color),
+        None => write_block(&mut out, prefix, sgr, &fallback(err), color),
     }
+    out
+}
+
+pub fn render(err: &anyhow::Error, verbose: bool, color: bool) -> String {
+    let mut out = user_block(err, "Error:", "1;31", color);
     if verbose {
         out.push_str("  caused by:\n");
         for (i, cause) in err.chain().enumerate() {
@@ -158,13 +163,7 @@ pub fn report(err: &anyhow::Error, verbose: bool) {
 }
 
 pub fn report_watch(err: &anyhow::Error) {
-    let color = stderr_color();
-    let mut out = String::new();
-    match find_user(err) {
-        Some(u) => write_block(&mut out, "warning:", "1;33", u, color),
-        None => write_block(&mut out, "warning:", "1;33", &fallback(err), color),
-    }
-    eprint!("{out}");
+    eprint!("{}", user_block(err, "warning:", "1;33", stderr_color()));
 }
 
 pub struct Steps {
@@ -182,9 +181,8 @@ impl Steps {
         }
     }
 
-    /// The same accounting, none of the lines: for a run whose story is told
-    /// somewhere else (a page-driven publish narrates on the page, not into
-    /// the preview terminal).
+    /// No lines: for a run whose story is told somewhere else (a page-driven
+    /// publish narrates on the page).
     pub fn silent() -> Self {
         Steps {
             total: 0,
@@ -207,9 +205,8 @@ impl Steps {
     }
 }
 
-/// A step that redraws its elapsed time in place once it passes [`SLOW_AFTER`].
-/// Terminal only: a carriage-return spinner in a piped log is noise, not
-/// progress.
+/// A step that redraws its elapsed time in place once it passes [`SLOW_AFTER`];
+/// terminal only, since a carriage-return spinner in a piped log is noise.
 pub struct Slow {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -226,6 +223,7 @@ impl Slow {
         }
         let s = stop.clone();
         let handle = std::thread::spawn(move || {
+            use std::io::Write;
             let began = std::time::Instant::now();
             let mut drawn = false;
             while !s.load(std::sync::atomic::Ordering::Relaxed) {
@@ -234,13 +232,11 @@ impl Slow {
                 if waited < SLOW_AFTER {
                     continue;
                 }
-                use std::io::Write;
                 print!("\r\x1b[2K  {label} {}s", waited.as_secs());
                 let _ = std::io::stdout().flush();
                 drawn = true;
             }
             if drawn {
-                use std::io::Write;
                 print!("\r\x1b[2K");
                 let _ = std::io::stdout().flush();
             }
@@ -251,7 +247,7 @@ impl Slow {
         }
     }
 
-    /// Stops the redraw and clears the line. Idempotent via Drop.
+    /// Stops the redraw and clears the line (via Drop).
     pub fn finish(self) {}
 }
 
@@ -268,16 +264,9 @@ pub fn note(message: impl AsRef<str>) {
     emit(tint(stdout_color(), "2", message.as_ref()));
 }
 
-fn note_indented(sgr: &str, message: &str) {
-    marked("\u{2192}", sgr, message);
-}
-
 fn marked(mark: &str, sgr: &str, message: &str) {
     let body = tint(stdout_color(), sgr, &format!("{mark} {message}"));
     match session_gutter() {
-        // Inside a watch session the two-space indent becomes the same
-        // ten-column gutter the timestamped lines use, so a `!` or a `→`
-        // hangs under the event that produced it rather than beside it.
         Some(g) => emit(format!("{g}{body}")),
         None => emit(format!("  {body}")),
     }
@@ -289,19 +278,14 @@ pub fn note_absent(message: impl AsRef<str>) {
     marked("!", "33", message.as_ref());
 }
 
-/// Wall-clock `HH:MM:SS`, local. A watch session scrolls for hours, and "did
-/// that rebuild fire when I hit save, or is it from ten minutes ago" is only
-/// answerable with a clock on the line.
+/// Wall-clock `HH:MM:SS`, local.
 pub fn clock_now() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-/// An event worth putting a clock on, printed with the time in a left gutter.
-///
-/// The stamp is printed only when the second CHANGES; a repeat becomes a `·`
-/// continuation. A save fires a rebuild, a type check and a reload push within
-/// the same second, and printing `15:11:22` four times reads as four moments
-/// instead of one — the elision is what makes the burst legible as a burst.
+/// An event with the time in a left gutter. The stamp is printed only when the
+/// second CHANGES; a repeat becomes a `·` continuation, so a save's rebuild,
+/// type check and reload push read as one burst rather than four moments.
 pub fn note_clocked(message: impl AsRef<str>) {
     let body = tint(stdout_color(), "2", message.as_ref());
     match session_gutter_stamped() {
@@ -310,22 +294,18 @@ pub fn note_clocked(message: impl AsRef<str>) {
     }
 }
 
-/// Width of `HH:MM:SS` plus its two trailing spaces. Every gutter — stamp,
-/// continuation, or the blank one — is exactly this wide, or the column bends.
+/// Width of `HH:MM:SS` plus two trailing spaces; every gutter variant is
+/// exactly this wide, or the column bends.
 const GUTTER: usize = 10;
 
-/// A re-float needs BOTH: a screenful of lines since the last one, AND this
-/// long since the last one. Either alone misfires — a screenful can scroll
-/// past in ten seconds during a burst of saves, and five quiet minutes can
-/// pass with three lines on screen, where the address is still perfectly
-/// visible. The line count when the terminal will not say its height —
-/// stdout is a pipe, or the ioctl fails.
+/// A re-float needs BOTH a screenful of lines since the last one AND this long
+/// since it: a screenful can scroll past in ten seconds during a burst of
+/// saves, and five quiet minutes can pass with the address still on screen.
+/// The line count applies when the terminal will not say its height.
 const FLOAT_EVERY_FALLBACK: usize = 100;
 const FLOAT_AFTER: Duration = Duration::from_secs(5 * 60);
 
-/// The line half of the threshold: one terminal height, because that is
-/// exactly when the address crosses the top of the screen. Asked fresh each
-/// time so a resized window changes the answer.
+/// One terminal height, asked fresh each time so a resize changes the answer.
 fn float_every() -> usize {
     let rows = terminal_size::terminal_size()
         .map(|(_, h)| h.0 as usize)
@@ -333,10 +313,8 @@ fn float_every() -> usize {
     every_from_rows(rows)
 }
 
-/// A height of zero is "unknown", not "tiny": that is what the ioctl reports
-/// on a pipe. The floor keeps a genuinely tiny window from floating on every
-/// few lines — the quiet period still gates it, but ten lines is already a
-/// screenful nobody is reading addresses off of.
+/// Zero is what the ioctl reports on a pipe: "unknown", not "tiny". The floor
+/// keeps a genuinely tiny window from floating every few lines.
 fn every_from_rows(rows: usize) -> usize {
     match rows {
         0 => FLOAT_EVERY_FALLBACK,
@@ -344,8 +322,6 @@ fn every_from_rows(rows: usize) -> usize {
     }
 }
 
-/// Both conditions, in one place a test can reach without a clock or a
-/// terminal.
 fn should_float(lines: usize, every: usize, since: Duration) -> bool {
     lines >= every && since >= FLOAT_AFTER
 }
@@ -356,12 +332,9 @@ static LAST_STAMP: Mutex<String> = Mutex::new(String::new());
 static SESSION_NOTE: Mutex<String> = Mutex::new(String::new());
 static LAST_FLOAT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-/// Turn on the watch session's left gutter, and register the line to re-float
-/// once a screenful of lines has scrolled it away ([`float_every`]).
-///
-/// A preview runs for hours and its address scrolls away in the first minute;
-/// by the time someone wants to open it on a phone the banner is a thousand
-/// lines up. Off for one-shot commands, whose whole output is one event.
+/// Turn on the watch session's left gutter, and register the line (the preview
+/// address, which scrolls away in the first minute of an hours-long session)
+/// to re-float once a screenful of lines has scrolled it away.
 pub fn set_session_note(note: impl Into<String>) {
     *SESSION_NOTE.lock().unwrap_or_else(PoisonError::into_inner) = note.into();
     // The banner just printed the address, so the clock starts now: the first
@@ -374,13 +347,10 @@ fn in_session() -> bool {
     SESSION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The gutter for a continuation line: blank, with a `·` holding the column.
 fn session_gutter() -> Option<String> {
     in_session().then(|| format!("{:>width$}\u{b7} ", "", width = GUTTER - 2))
 }
 
-/// The gutter for an event: the clock if it has moved since the last one,
-/// otherwise the same continuation marker.
 fn session_gutter_stamped() -> Option<String> {
     if !in_session() {
         return None;
@@ -417,51 +387,36 @@ fn emit(line: String) {
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
     if !note.is_empty() {
-        // At column 0, outside the gutter: this is not an event in the stream,
-        // it is the stream pausing to say where it lives. `\u{2302}` is a
-        // house — an address, the one thing this line is for — and it is not
-        // used anywhere else in the output, so it cannot be mistaken for a
-        // rebuild, a warning or a continuation.
-        //
-        // Straight to println: routing it through `emit` would count the
-        // re-float itself and eventually float on top of a float.
+        // println, not emit: emit would count the re-float itself.
         println!("{}", tint(stdout_color(), "2", &format!("\u{2302} {note}")));
     }
 }
 
-/// An indented arrow in green, shaped like the `\u{2192} try:` lines of the failure
-/// block still on screen above it: for something broken working again.
+/// A green arrow, shaped like the `\u{2192} try:` lines of the failure block
+/// above it: for something broken working again.
 pub fn note_good(message: impl AsRef<str>) {
-    note_indented("32", message.as_ref());
+    marked("\u{2192}", "32", message.as_ref());
 }
 
-/// [`note_good`]'s arrow in [`note`]'s dim register: something that came up,
-/// rather than something that recovered.
+/// [`note_good`]'s arrow in [`note`]'s dim register.
 pub fn note_arrow(message: impl AsRef<str>) {
-    note_indented("2", message.as_ref());
+    marked("\u{2192}", "2", message.as_ref());
 }
 
-/// A scene's own error, as the running client saw it. Deliberately not a
-/// `UserError`: those are OUR failures, in our voice. This is the developer's
-/// TypeScript, so it leads with their source line.
-/// The three shapes a scene log entry can take on screen. They are three and
-/// not one because the client records a thrown error and a `console.error`
-/// under the same prefix: printing a logged line as a crash blames a line that
-/// may have handled it perfectly (see `scene_logs::Origin`).
+/// The shape of a scene log entry on screen. Three, not one, because the client
+/// records a thrown error and a `console.error` under the same prefix, and
+/// printing a logged line as a crash blames a line that may have handled it
+/// perfectly (see `scene_logs::Origin`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneNote {
-    /// Nobody caught it. The loud one.
     Thrown,
-    /// The scene called `console.error`. Its own words, not a diagnosis.
     LoggedError,
-    /// The scene called `console.warn`.
     LoggedWarning,
 }
 
 impl SceneNote {
-    /// Marker, label, preposition and SGR colour. The preposition carries the
-    /// distinction as much as the marker: a throw happened *in* a line, a log
-    /// was emitted *from* one.
+    /// Marker, label, preposition and SGR colour: a throw happened *in* a line,
+    /// a log was emitted *from* one.
     fn shape(self) -> (&'static str, &'static str, &'static str, &'static str) {
         match self {
             SceneNote::Thrown => ("\u{2718}", "scene error", "in", "31"),
@@ -478,10 +433,7 @@ impl SceneNote {
     }
 }
 
-/// The headline, split out so a test can read it without a terminal: the
-/// colour must be a parameter, not `stderr_color()`, because a test whose
-/// stdout is a pipe would otherwise assert on an empty escape sequence and
-/// pass for the wrong reason.
+/// Colour is a parameter so a test under cargo's capture can assert on it.
 fn scene_headline(kind: SceneNote, where_: &str, color: bool) -> String {
     let (mark, label, prep, sgr) = kind.shape();
     match color {
@@ -574,7 +526,7 @@ pub fn note_stderr(message: impl AsRef<str>) {
     eprintln!("{}", tint(stderr_color(), "2", message.as_ref()));
 }
 
-/// Re-open dim after a nested colour has reset it. Pass as `restore` to
+/// Re-open dim after a nested colour has reset it: the `restore` for
 /// [`fmt_elapsed_tinted`] from anything printed through [`note`].
 pub const RESTORE_DIM: &str = "\x1b[2m";
 
@@ -593,15 +545,13 @@ pub fn elapsed_is_notable(d: Duration) -> bool {
 }
 
 /// `restore` is re-emitted after the colour resets, because a nested `\x1b[0m`
-/// clears the surrounding style too. Pass `""` from a default-styled line,
+/// clears the surrounding style too: `""` from a default-styled line,
 /// [`RESTORE_DIM`] from a dim one.
 pub fn fmt_elapsed_tinted(d: Duration, restore: &str) -> String {
     tinted(d, restore, stdout_color())
 }
 
-/// Colour is a parameter, not ambient tty state: reading the tty here left the
-/// tinted branch untestable, so the assertion passed under redirected output
-/// while proving nothing, and failed in a terminal.
+/// Colour is a parameter so the tinted branch is testable under capture.
 fn tinted(d: Duration, restore: &str, color: bool) -> String {
     let text = fmt_elapsed(d);
     match (color, elapsed_sgr(d)) {
@@ -655,6 +605,17 @@ pub fn fmt_bytes(n: u64) -> String {
     } else {
         format!("{:.1}gb", v / (KB * KB * KB))
     }
+}
+
+/// The error for a file under the project tree that could not be written.
+pub(crate) fn write_error(path: &Path, e: std::io::Error) -> anyhow::Error {
+    UserError::new(
+        format!("cannot write to {}", path.display()),
+        TrySteps::one("check write permission on the project directory")
+            .and("re-run from a writable checkout (not a read-only mount)"),
+    )
+    .caused_by(e)
+    .into()
 }
 
 pub fn rel_to(root: &Path, path: &Path) -> String {
@@ -711,9 +672,6 @@ fn loc_file(line: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Both conditions, and neither alone. The AND is the whole design: a
-    /// screenful can scroll in ten seconds during a burst of saves, and
-    /// five quiet minutes can pass with three lines on screen.
     #[test]
     fn a_refloat_needs_both_the_lines_and_the_quiet() {
         let quiet = FLOAT_AFTER;
@@ -731,9 +689,6 @@ mod tests {
         assert!(!should_float(0, 50, Duration::ZERO));
     }
 
-    /// The line threshold is the screen: a taller window scrolls the address
-    /// away later. Zero is a pipe saying nothing, not a zero-row terminal,
-    /// and a toy-sized window still gets a floor the quiet period paces.
     #[test]
     fn the_line_threshold_is_one_screen_height() {
         assert_eq!(every_from_rows(50), 50, "a screenful of a 50-row window");
@@ -741,8 +696,6 @@ mod tests {
         assert_eq!(every_from_rows(3), 10, "a tiny window keeps the floor");
     }
 
-    /// The gutter is a column, so every variant of it must be the same width
-    /// or the log bends. Widths, not contents, are the invariant here.
     #[test]
     fn every_gutter_is_the_same_width() {
         SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -751,16 +704,12 @@ mod tests {
         let stamped = session_gutter_stamped().expect("in session");
         assert_eq!(stamped.chars().count(), GUTTER, "{stamped:?}");
         assert!(stamped.trim_end().len() == 8, "HH:MM:SS, got {stamped:?}");
-        // The second call inside the same second elides to the continuation.
         assert_eq!(session_gutter_stamped().as_deref(), Some(cont.as_str()));
         SESSION.store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(session_gutter(), None, "off outside a session");
         assert_eq!(session_gutter_stamped(), None);
     }
 
-    /// Three shapes, and the difference has to survive both a terminal and a
-    /// pipe: colour is a parameter here precisely because a test that read
-    /// stderr_color() would assert on nothing when run under cargo's capture.
     #[test]
     fn a_logged_line_never_wears_the_shape_of_a_crash() {
         for color in [true, false] {

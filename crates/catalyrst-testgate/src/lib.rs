@@ -1,3 +1,7 @@
+pub mod router;
+pub mod scratch_dir;
+pub mod sql_capture;
+
 pub const OPT_OUT: &str = "ALLOW_SKIPPED_INTEGRATION";
 pub const SKIP_LOG: &str = "CATALYRST_TESTGATE_SKIPLOG";
 pub const SHARED_PG: &str = "CATALYRST_TEST_PG";

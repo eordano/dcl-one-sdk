@@ -1,12 +1,8 @@
 //! `dcl-one-sdk host` -- run the scene's authoritative-server isolate
-//! (docs/multiplayer-server-design.md, M1).
-//!
-//! The isolate is a node process running the built scene with
-//! `isServer() == true`, joined to a preview's mini-comms room through the
-//! JSON host door (`/mini-comms/{room}/host`). Storage lands in
-//! `.dcl-one/storage.json`. This command hosts against an ALREADY RUNNING
-//! preview; `start` growing an auto-host when scene.json carries
-//! `authoritativeMultiplayer` is the M4 integration.
+//! (docs/multiplayer-server-design.md, M1): a node process running the built
+//! scene with `isServer() == true`, joined to an ALREADY RUNNING preview's
+//! mini-comms room through the JSON host door. Auto-hosting from `start` when
+//! scene.json carries `authoritativeMultiplayer` is the M4 integration.
 
 use crate::scene::Project;
 use crate::ux::{TrySteps, UserError};
@@ -22,39 +18,30 @@ pub struct HostOptions {
     pub room: String,
 }
 
-fn write_harness(root: &Path) -> Result<PathBuf> {
-    let dir = root.join(".dcl-one");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join("host-runtime.mjs");
-    std::fs::write(&path, HOST_TEMPLATE).with_context(|| format!("writing {}", path.display()))?;
-    Ok(path)
-}
-
-/// A running server isolate. Dropping it closes the stdin lifeline, which
-/// the harness exits on -- covering every way the parent can die, including
-/// the hard exit(0) paths that skip kill_on_drop (the data-layer driver's
-/// pattern).
+/// A running server isolate. Dropping it closes the stdin lifeline the harness
+/// exits on, which covers the hard exit(0) paths that skip kill_on_drop.
 pub struct Isolate {
     pub child: tokio::process::Child,
     _stdin: Option<tokio::process::ChildStdin>,
 }
 
-/// Spawn the scene's server isolate against a preview's room. The scene must
-/// already be built; the harness reconnects until the door answers, so the
-/// preview may still be binding when this returns.
+/// Spawns the built scene's server isolate; the harness reconnects until the
+/// door answers, so the preview may still be binding when this returns.
 pub fn spawn_isolate(root: &Path, preview: &str, room: &str) -> Result<Isolate> {
     let node = crate::build::require_node(
         "the authoritative-server isolate",
         "the host runs the scene under node",
     )?;
-    let harness = write_harness(root)?;
-    let storage = root.join(".dcl-one").join("storage.json");
-    let url = door_url(preview, room);
+    let dir = crate::scene::work_dir(root)
+        .with_context(|| format!("creating {}", root.join(".dcl-one").display()))?;
+    let harness = dir.join("host-runtime.mjs");
+    std::fs::write(&harness, HOST_TEMPLATE)
+        .with_context(|| format!("writing {}", harness.display()))?;
     let mut child = tokio::process::Command::new(&node)
         .arg(&harness)
         .arg(root)
-        .arg(&url)
-        .arg(&storage)
+        .arg(door_url(preview, room))
+        .arg(storage_path(root))
         .current_dir(root)
         .stdin(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -65,6 +52,10 @@ pub fn spawn_isolate(root: &Path, preview: &str, room: &str) -> Result<Isolate> 
         child,
         _stdin: stdin,
     })
+}
+
+fn storage_path(root: &Path) -> PathBuf {
+    root.join(".dcl-one").join("storage.json")
 }
 
 fn door_url(preview: &str, room: &str) -> String {
@@ -108,7 +99,7 @@ pub async fn host(opts: &HostOptions) -> Result<()> {
     crate::ux::note_arrow(format!("hosting {main} against {url}"));
     crate::ux::note(format!(
         "storage: {}",
-        project.root.join(".dcl-one").join("storage.json").display()
+        storage_path(&project.root).display()
     ));
     let mut isolate = spawn_isolate(&project.root, &opts.preview, &opts.room)?;
     let status = isolate

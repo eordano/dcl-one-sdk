@@ -1,6 +1,6 @@
 use crate::scene::Project;
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const LOADER_TEMPLATE: &str = include_str!("templates/split-loader.js");
 const LOADER_MARKER: &str = "__dclOneSdkChunkPath";
@@ -90,6 +90,7 @@ pub fn has_asset_packs(project: &Project) -> bool {
             .is_some()
 }
 
+/// react 18 ships `react/jsx-runtime`; a tree without it cannot bundle the key.
 fn has_jsx_runtime(project: &Project) -> bool {
     project.node_module("react/jsx-runtime.js").is_some()
         || project
@@ -97,11 +98,8 @@ fn has_jsx_runtime(project: &Project) -> bool {
             .is_some()
 }
 
-/// The core chunk's keys for one tree: the fixed list plus `react/jsx-runtime`
-/// when the installed react ships it (react 18 does; the key is conditional
-/// because a tree without it cannot bundle the entry). Never the asset-packs
-/// keys — with the split those belong to the smart chunk alone, which is what
-/// keeps a scene with no smart items off the +30% asset-packs payload.
+/// The core chunk's keys: never the asset-packs ones, which belong to the smart
+/// chunk alone so a scene without smart items stays off that +30% payload.
 pub fn core_registry_keys(project: &Project) -> Vec<&'static str> {
     let mut keys: Vec<&'static str> = REGISTRY_KEYS.to_vec();
     if has_jsx_runtime(project) {
@@ -123,14 +121,8 @@ pub fn registry_keys(project: &Project) -> Vec<&'static str> {
 }
 
 pub fn scene_externals(project: &Project) -> Vec<String> {
-    let mut externals: Vec<String> = SDK_EXTERNALS
-        .iter()
-        .map(|s| s.to_string())
-        .chain([
-            "~sdk/all-composites".to_string(),
-            "~sdk/script-utils".to_string(),
-        ])
-        .collect();
+    let mut externals = smart_externals();
+    externals.push("~sdk/script-utils".to_string());
     if has_asset_packs(project) || crate::prebuilt::locate(project).is_some() {
         externals.push("@dcl/asset-packs".to_string());
         externals.push("@dcl/asset-packs/*".to_string());
@@ -252,18 +244,62 @@ pub fn write_loader_stub(
     })
 }
 
-pub fn chunk_rel_paths(main: &str) -> (String, String) {
+/// `name` in `main`'s directory, scene-relative.
+fn beside(main: &str, name: &str) -> String {
     match main.rsplit_once('/') {
-        Some((dir, _)) => (format!("{dir}/sdk-runtime.js"), format!("{dir}/scene.js")),
-        None => ("sdk-runtime.js".to_string(), "scene.js".to_string()),
+        Some((dir, _)) => format!("{dir}/{name}"),
+        None => name.to_string(),
     }
 }
 
-/// Where the optional smart-item chunk lands, next to the other two.
+pub fn chunk_rel_paths(main: &str) -> (String, String) {
+    (beside(main, "sdk-runtime.js"), beside(main, "scene.js"))
+}
+
 pub fn smart_chunk_rel_path(main: &str) -> String {
-    match main.rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/sdk-smart-items.js"),
-        None => "sdk-smart-items.js".to_string(),
+    beside(main, "sdk-smart-items.js")
+}
+
+/// The three chunk paths, scene-relative, next to `main`.
+pub struct ChunkPaths {
+    pub sdk: String,
+    pub scene: String,
+    pub smart: String,
+}
+
+impl ChunkPaths {
+    pub fn of(main: &str) -> Self {
+        let (sdk, scene) = chunk_rel_paths(main);
+        ChunkPaths {
+            sdk,
+            scene,
+            smart: smart_chunk_rel_path(main),
+        }
+    }
+}
+
+/// Everything the loader stub at `outfile` names; `write` re-emits it after a
+/// field moves.
+pub struct Loader {
+    pub outfile: PathBuf,
+    pub paths: ChunkPaths,
+    pub smart_installed: bool,
+    pub max_composite_entity: u32,
+    pub mp: bool,
+}
+
+impl Loader {
+    pub fn write(&self) -> Result<()> {
+        write_loader_stub(
+            &self.outfile,
+            &self.paths.sdk,
+            self.smart_installed.then_some(self.paths.smart.as_str()),
+            &self.paths.scene,
+            self.max_composite_entity,
+            self.mp,
+        )?;
+        tracing::info!("loader stub saved {}", self.outfile.display());
+        Ok(())
     }
 }
 
@@ -353,32 +389,25 @@ mod tests {
 
     #[test]
     fn detect_split_build_via_loader_marker_or_marker_file() {
-        let root = std::env::temp_dir().join(format!(
-            "dcl-one-sdk-split-detect-test-{}",
-            std::process::id()
-        ));
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        assert!(!detect_split_build(&root, "bin/index.js"));
-        std::fs::write(
-            root.join("bin/index.js"),
+        let t = crate::scene::Tmp::new("split-detect");
+        let root = &t.0;
+        assert!(!detect_split_build(root, "bin/index.js"));
+        t.write(
+            "bin/index.js",
             "'use strict'\nmodule.exports.onStart = async function () {}\n",
-        )
-        .unwrap();
-        assert!(!detect_split_build(&root, "bin/index.js"));
-        std::fs::write(
-            root.join("bin/index.js"),
+        );
+        assert!(!detect_split_build(root, "bin/index.js"));
+        t.write(
+            "bin/index.js",
             loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 0, false),
-        )
-        .unwrap();
-        assert!(detect_split_build(&root, "bin/index.js"));
+        );
+        assert!(detect_split_build(root, "bin/index.js"));
         std::fs::remove_file(root.join("bin/index.js")).unwrap();
         std::fs::create_dir_all(root.join(".dcl-one")).unwrap();
         write_marker(&root.join(".dcl-one")).unwrap();
-        assert!(detect_split_build(&root, "bin/index.js"));
+        assert!(detect_split_build(root, "bin/index.js"));
         clear_marker(&root.join(".dcl-one"));
-        assert!(!detect_split_build(&root, "bin/index.js"));
-        std::fs::remove_dir_all(&root).ok();
+        assert!(!detect_split_build(root, "bin/index.js"));
     }
 
     #[test]

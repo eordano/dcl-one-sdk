@@ -4,11 +4,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      abgen_tag:
-        description: "abgen release tag whose binaries get embedded (from https://github.com/eordano/abgen/releases)"
-        required: false
-        default: "v0.9.9"
 
 permissions:
   contents: write
@@ -16,7 +11,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  ABGEN_TAG: ${{ github.event.inputs.abgen_tag || 'v0.9.9' }}
 
 jobs:
   build:
@@ -29,34 +23,24 @@ jobs:
           - name: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            abgen_target: x86_64-unknown-linux-gnu
             bin: dcl-one-sdk
-            abgen_bin: abgen
           - name: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            abgen_target: aarch64-unknown-linux-gnu
             bin: dcl-one-sdk
-            abgen_bin: abgen
           - name: x86_64-pc-windows-gnu
             runner: ubuntu-22.04
             target: x86_64-pc-windows-gnu
-            abgen_target: x86_64-pc-windows-gnu
             bin: dcl-one-sdk.exe
-            abgen_bin: abgen.exe
           - name: aarch64-apple-darwin
             runner: macos-14
             target: aarch64-apple-darwin
-            abgen_target: aarch64-apple-darwin
             bin: dcl-one-sdk
-            abgen_bin: abgen
           - name: x86_64-apple-darwin
             # the last free Intel image; scheduled to live through August 2027
             runner: macos-15-intel
             target: x86_64-apple-darwin
-            abgen_target: x86_64-apple-darwin
             bin: dcl-one-sdk
-            abgen_bin: abgen
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -65,15 +49,6 @@ jobs:
         with:
           toolchain: "1.97.0"
           targets: ${{ matrix.target }}
-
-      - name: install protoc
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            brew install protobuf
-          else
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends protobuf-compiler
-          fi
 
       - name: install mingw cross toolchain
         if: matrix.target == 'x86_64-pc-windows-gnu'
@@ -94,16 +69,8 @@ jobs:
             echo "AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar"
           } >> "$GITHUB_ENV"
 
-      - name: fetch the abgen release archive to embed
-        run: |
-          base="https://github.com/eordano/abgen/releases/download/$ABGEN_TAG"
-          archive="abgen-$ABGEN_TAG-${{ matrix.abgen_target }}.tar.gz"
-          curl -fsSLO "$base/$archive"
-          curl -fsSLO "$base/SHA256SUMS.txt"
-          grep " $archive\$" SHA256SUMS.txt | shasum -a 256 -c
-          tar -xzf "$archive"
-          echo "ABGEN_EMBED_BIN=$PWD/abgen-$ABGEN_TAG-${{ matrix.abgen_target }}/${{ matrix.abgen_bin }}" >> "$GITHUB_ENV"
-
+      # build.rs downloads the abgen bundle abgen-release.lock pins for the
+      # cargo target and verifies its sha256, so nothing is fetched by hand.
       - name: build
         run: cargo build --release --locked --target ${{ matrix.target }} -p dcl-one-sdk
 
@@ -118,7 +85,7 @@ jobs:
           server=$!
           # the banner prints only after the sidecar passed its /readyz gate
           for _ in $(seq 1 120); do
-            url=$(grep -o 'abgen JIT): http://[^ ]*' /tmp/smoke-start.log | grep -o 'http://[^ ]*') && break
+            url=$(grep -o 'Selected abgen backend: [^ ]* at http://[^ ]*' /tmp/smoke-start.log | grep -o 'http://[^ ]*') && break
             sleep 0.5
           done
           cat /tmp/smoke-start.log

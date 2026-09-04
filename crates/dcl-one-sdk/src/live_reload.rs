@@ -29,13 +29,17 @@ pub fn scene_update_json(scene_id: &str) -> String {
     .to_string()
 }
 
-pub fn update_scene_frame(scene_id: &str) -> Vec<u8> {
+fn frame(message: ws_scene_message::Message) -> Vec<u8> {
     WsSceneMessage {
-        message: Some(ws_scene_message::Message::UpdateScene(UpdateScene {
-            scene_id: scene_id.to_string(),
-        })),
+        message: Some(message),
     }
     .encode_to_vec()
+}
+
+pub fn update_scene_frame(scene_id: &str) -> Vec<u8> {
+    frame(ws_scene_message::Message::UpdateScene(UpdateScene {
+        scene_id: scene_id.to_string(),
+    }))
 }
 
 pub fn update_model_frame(scene_id: &str, src: &str, hash: &str, removed: bool) -> Vec<u8> {
@@ -44,15 +48,12 @@ pub fn update_model_frame(scene_id: &str, src: &str, hash: &str, removed: bool) 
     } else {
         UpdateModelType::UmtChange
     };
-    WsSceneMessage {
-        message: Some(ws_scene_message::Message::UpdateModel(UpdateModel {
-            scene_id: scene_id.to_string(),
-            src: src.to_string(),
-            hash: hash.to_string(),
-            r#type: r#type as i32,
-        })),
-    }
-    .encode_to_vec()
+    frame(ws_scene_message::Message::UpdateModel(UpdateModel {
+        scene_id: scene_id.to_string(),
+        src: src.to_string(),
+        hash: hash.to_string(),
+        r#type: r#type as i32,
+    }))
 }
 
 pub fn model_src(root: &Path, path: &Path) -> String {
@@ -86,6 +87,31 @@ pub fn reload_frames(
 mod tests {
     use super::*;
 
+    fn decode_model(bytes: &[u8]) -> UpdateModel {
+        match WsSceneMessage::decode(bytes).unwrap().message {
+            Some(ws_scene_message::Message::UpdateModel(u)) => u,
+            other => panic!("unexpected oneof: {other:?}"),
+        }
+    }
+
+    fn model_frames(removed: bool) -> Vec<ReloadFrame> {
+        let root = Path::new("/proj");
+        let event = ReloadEvent::Model {
+            path: root.join("assets/tree.glb"),
+            removed,
+        };
+        reload_frames(root, "scene-1", "host", &event)
+    }
+
+    fn binary_frame(frames: &[ReloadFrame]) -> &[u8] {
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(&frames[0], ReloadFrame::Text(t) if t.contains("SCENE_UPDATE")));
+        let ReloadFrame::Binary(bytes) = &frames[1] else {
+            panic!("second frame must be binary");
+        };
+        bytes
+    }
+
     #[test]
     fn update_scene_golden_bytes() {
         let bytes = update_scene_frame("abc");
@@ -106,31 +132,29 @@ mod tests {
 
     #[test]
     fn update_model_round_trip() {
-        let bytes = update_model_frame("scene-1", "assets/tree.glb", "b64-aGFzaA==", false);
-        let decoded = WsSceneMessage::decode(bytes.as_slice()).unwrap();
-        match decoded.message {
-            Some(ws_scene_message::Message::UpdateModel(u)) => {
-                assert_eq!(u.scene_id, "scene-1");
-                assert_eq!(u.src, "assets/tree.glb");
-                assert_eq!(u.hash, "b64-aGFzaA==");
-                assert_eq!(u.r#type, UpdateModelType::UmtChange as i32);
-                assert_eq!(u.r#type(), UpdateModelType::UmtChange);
-            }
-            other => panic!("unexpected oneof: {other:?}"),
-        }
+        let u = decode_model(&update_model_frame(
+            "scene-1",
+            "assets/tree.glb",
+            "b64-aGFzaA==",
+            false,
+        ));
+        assert_eq!(u.scene_id, "scene-1");
+        assert_eq!(u.src, "assets/tree.glb");
+        assert_eq!(u.hash, "b64-aGFzaA==");
+        assert_eq!(u.r#type, UpdateModelType::UmtChange as i32);
+        assert_eq!(u.r#type(), UpdateModelType::UmtChange);
     }
 
     #[test]
     fn removed_model_round_trips_as_umt_remove() {
-        let bytes = update_model_frame("scene-1", "assets/tree.glb", "b64-aGFzaA==", true);
-        let decoded = WsSceneMessage::decode(bytes.as_slice()).unwrap();
-        match decoded.message {
-            Some(ws_scene_message::Message::UpdateModel(u)) => {
-                assert_eq!(u.r#type(), UpdateModelType::UmtRemove);
-                assert_eq!(u.src, "assets/tree.glb");
-            }
-            other => panic!("unexpected oneof: {other:?}"),
-        }
+        let u = decode_model(&update_model_frame(
+            "scene-1",
+            "assets/tree.glb",
+            "b64-aGFzaA==",
+            true,
+        ));
+        assert_eq!(u.r#type(), UpdateModelType::UmtRemove);
+        assert_eq!(u.src, "assets/tree.glb");
     }
 
     #[test]
@@ -151,51 +175,21 @@ mod tests {
 
     #[test]
     fn model_frames_use_relative_src_and_the_content_mapping_hash() {
-        let root = Path::new("/proj");
-        let event = ReloadEvent::Model {
-            path: root.join("assets/tree.glb"),
-            removed: false,
-        };
-        let frames = reload_frames(root, "scene-1", "host", &event);
-        assert_eq!(frames.len(), 2);
-        assert!(matches!(&frames[0], ReloadFrame::Text(t) if t.contains("SCENE_UPDATE")));
-        let ReloadFrame::Binary(bytes) = &frames[1] else {
-            panic!("second frame must be binary");
-        };
-        let decoded = WsSceneMessage::decode(bytes.as_slice()).unwrap();
-        match decoded.message {
-            Some(ws_scene_message::Message::UpdateModel(u)) => {
-                assert_eq!(u.src, "assets/tree.glb");
-                assert_eq!(
-                    u.hash,
-                    crate::scene::b64_content_hash("/proj/assets/tree.glb", "host")
-                );
-                assert_eq!(u.scene_id, "scene-1");
-                assert_eq!(u.r#type(), UpdateModelType::UmtChange);
-            }
-            other => panic!("unexpected oneof: {other:?}"),
-        }
+        let frames = model_frames(false);
+        let u = decode_model(binary_frame(&frames));
+        assert_eq!(u.src, "assets/tree.glb");
+        assert_eq!(
+            u.hash,
+            crate::scene::b64_content_hash("/proj/assets/tree.glb", "host")
+        );
+        assert_eq!(u.scene_id, "scene-1");
+        assert_eq!(u.r#type(), UpdateModelType::UmtChange);
     }
 
     #[test]
     fn removed_model_frames_keep_the_legacy_text_frame() {
-        let root = Path::new("/proj");
-        let event = ReloadEvent::Model {
-            path: root.join("assets/tree.glb"),
-            removed: true,
-        };
-        let frames = reload_frames(root, "scene-1", "host", &event);
-        assert_eq!(frames.len(), 2);
-        assert!(matches!(&frames[0], ReloadFrame::Text(t) if t.contains("SCENE_UPDATE")));
-        let ReloadFrame::Binary(bytes) = &frames[1] else {
-            panic!("second frame must be binary");
-        };
-        let decoded = WsSceneMessage::decode(bytes.as_slice()).unwrap();
-        match decoded.message {
-            Some(ws_scene_message::Message::UpdateModel(u)) => {
-                assert_eq!(u.r#type(), UpdateModelType::UmtRemove);
-            }
-            other => panic!("unexpected oneof: {other:?}"),
-        }
+        let frames = model_frames(true);
+        let u = decode_model(binary_frame(&frames));
+        assert_eq!(u.r#type(), UpdateModelType::UmtRemove);
     }
 }

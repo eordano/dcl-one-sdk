@@ -1,38 +1,37 @@
 //! Who may publish where: the verdict for the scene's declared target, and
-//! the worlds and land the remembered wallet could target instead. Everything
-//! here is public chain/catalyst state keyed by an address — no signature is
-//! involved — so the page asks for an address, never a "connection", and
-//! every fetch failure collapses into a sentence rather than a guess: a
-//! verdict is ✓, ✗, or "could not check", and the third is never dressed up
-//! as either of the others.
+//! the worlds and land the remembered wallet could target instead. All of it
+//! is public chain/catalyst state keyed by an address — no signature — so the
+//! page asks for an address, never a "connection", and a fetch failure is a
+//! sentence, never a guess: a verdict is ✓, ✗, or "could not check".
 
-use super::deploy_status::{host_of, status_client, Dest, STATUS_TTL};
-use crate::deploy::{self, DocAnswer};
+use super::deploy_status::{
+    cache_get, cache_put, fetch_json, host_of, lock, plural, status_client, Dest, STATUS_TTL,
+};
+use crate::deploy::{self, DocAnswer, WORLDS_CONTENT_SERVER};
 use serde_json::Value;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Whether the deploy's own permission check would pass, said before the
 /// wallet prompt instead of after it.
 pub(super) enum Verdict {
-    /// The address may publish to the declared target, and why.
     May(String),
-    /// It may not; the why names what is missing and the remedy is the exact
-    /// step that fixes it.
-    MayNot { why: String, remedy: String },
-    /// The question went unanswered. The sentence says by whom.
+    /// The remedy is the exact step that fixes it.
+    MayNot {
+        why: String,
+        remedy: String,
+    },
+    /// Unanswered; the sentence says by whom.
     Unchecked(String),
 }
 
 /// One world the address could deploy to.
 pub(super) struct WorldRow {
     pub(super) name: String,
-    /// `None` when the worlds list never answered for this name — an owned
-    /// name with no row is simply empty, and says so.
+    /// `None` when the worlds list never answered for this name.
     pub(super) scenes: Option<i64>,
     pub(super) last_deployed: Option<i64>,
-    /// What the world calls itself — in practice the deployed scene's title,
-    /// which is exactly the "what is there" a row wants to say.
+    /// In practice the deployed scene's title.
     pub(super) title: Option<String>,
     /// Owned on-chain, as opposed to reachable through a grant.
     pub(super) owned: bool,
@@ -48,9 +47,11 @@ pub(super) struct Holdings {
     pub(super) parcels: i64,
     pub(super) estates: i64,
     pub(super) operated: i64,
-    /// The coordinates the wallet owns or operates (as far as one page of
-    /// each answer goes) — what the land map lights up.
+    /// Owned or operated (one page of each answer) — what the land map lights up.
     pub(super) coords: Vec<(i64, i64)>,
+    /// `coords` split by the right held; an owned parcel is not repeated.
+    pub(super) owned: Vec<(i64, i64)>,
+    pub(super) operated_coords: Vec<(i64, i64)>,
 }
 
 /// Everything the rights fetch learned about one address at one destination.
@@ -61,9 +62,11 @@ pub(super) struct Rights {
     pub(super) worlds_note: Option<String>,
     pub(super) holdings: Option<Holdings>,
     pub(super) parcel_rights: Vec<ParcelRight>,
-    /// Declared parcels beyond the per-parcel probe cap, named so a capped
-    /// check never reads as a complete one.
+    /// Declared parcels beyond the per-parcel probe cap, so a capped check
+    /// never reads as a complete one.
     pub(super) unchecked_parcels: usize,
+    /// Set when the parcel rows came from the chain lambdas, not the target's.
+    pub(super) parcels_note: Option<String>,
 }
 
 impl Rights {
@@ -76,33 +79,27 @@ impl Rights {
             holdings: None,
             parcel_rights: Vec::new(),
             unchecked_parcels: 0,
+            parcels_note: None,
         }
     }
 }
 
-/// An address is worth asking servers about only when it is one: a page form
-/// feeds this, and a stranger's garbage becomes a refusal, not a URL.
+/// A page form feeds this; a stranger's garbage becomes a refusal, not a URL.
 pub(super) fn valid_address(s: &str) -> bool {
     s.len() == 42 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Where "connect a Decentraland account" happens: the authorize page the
-/// person's signed-in browser opens, and the relay this process polls for
-/// the signed answer. A configured target hosts both on its own domain (the
-/// sites tier serves `/auth/native` and its single-read relay); without one,
-/// catalyst.example.com — the flow only needs a mailbox and a page that can sign, not the
-/// destination's blessing, and the signature is verified here either way.
+/// signed-in browser opens, and the relay this process polls for the signed
+/// answer. The relay is only a mailbox — the signature is verified here.
 pub(super) struct AuthBases {
     pub(super) page: String,
     pub(super) relay: String,
 }
 
-/// The bases whose authorize page actually answers: the configured target's
-/// own pair when its sites tier serves `/auth/native`, else the catalyst.example.com
-/// pair — probed at connect time, because a stale self-hosted realm 404s
-/// the page and a sign-in that lands on a 404 helps nobody. The relay is
-/// only a mailbox and the signature verifies here either way, so the
-/// fallback grants catalyst.example.com no authority.
+/// The configured target's own pair when its sites tier serves `/auth/native`
+/// (a stale self-hosted realm 404s it, and a sign-in on a 404 helps nobody),
+/// else the catalyst.example.com pair, which grants catalyst.example.com no authority.
 pub(super) async fn working_auth_bases(default_target: Option<&str>) -> AuthBases {
     let own = auth_bases(default_target);
     let public = auth_bases(None);
@@ -135,18 +132,15 @@ pub(super) fn auth_bases(default_target: Option<&str>) -> AuthBases {
     }
 }
 
-/// The delegation message the authorize page has the wallet sign — the sites
-/// tier's `buildEphemeralMessage`, byte for byte, because recovery only
+/// The sites tier's `buildEphemeralMessage`, byte for byte: recovery only
 /// proves an address against the exact text.
 pub(super) fn ephemeral_message(ephemeral: &str, expiration: &str) -> String {
     format!("Decentraland Login\nEphemeral address: {ephemeral}\nExpiration: {expiration}")
 }
 
-/// The address a relayed approval proves, or why it proves nothing. The
-/// relay stores whatever was posted at it, so nothing in the entry is
-/// trusted: the ephemeral and expiration must be the ones this process
-/// minted, and the signature must recover to the signer it names — a
-/// forgery is a refusal, never a shrug.
+/// The address a relayed approval proves, or why it proves nothing. Nothing
+/// in the entry is trusted: the ephemeral and expiration must be the ones
+/// this process minted, and the signature must recover to the named signer.
 pub(super) fn relayed_address(
     ephemeral: &str,
     expiration: &str,
@@ -176,40 +170,9 @@ pub(super) fn relayed_address(
 pub(super) const PARCEL_PROBE_CAP: usize = 12;
 
 async fn get_json(url: &str) -> Result<Value, String> {
-    let resp = status_client()
-        .get(url)
-        .send()
+    fetch_json(status_client().get(url))
         .await
-        .map_err(|_| format!("could not reach {}", host_of(url)))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "{} answered HTTP {}",
-            host_of(url),
-            resp.status().as_u16()
-        ));
-    }
-    resp.json()
-        .await
-        .map_err(|_| format!("{} sent an unreadable answer", host_of(url)))
-}
-
-async fn post_json(url: &str, body: &Value) -> Result<Value, String> {
-    let resp = status_client()
-        .post(url)
-        .json(body)
-        .send()
-        .await
-        .map_err(|_| format!("could not reach {}", host_of(url)))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "{} answered HTTP {}",
-            host_of(url),
-            resp.status().as_u16()
-        ));
-    }
-    resp.json()
-        .await
-        .map_err(|_| format!("{} sent an unreadable answer", host_of(url)))
+        .map_err(|e| e.sentence(url))
 }
 
 /// `elements[].name` of the lambdas names page, as world names.
@@ -228,8 +191,7 @@ pub(super) fn parse_names(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A timestamp the way either worlds tier says it: epoch milliseconds, or
-/// the ISO-8601 string the public server sends.
+/// Epoch milliseconds, or the ISO-8601 string the public worlds server sends.
 fn when_ms(v: &Value) -> Option<i64> {
     if let Some(ms) = v.as_i64() {
         return Some(ms);
@@ -239,8 +201,7 @@ fn when_ms(v: &Value) -> Option<i64> {
         .map(|t| t.timestamp_millis())
 }
 
-/// The `/worlds` rows: name, scene count, title, last deploy. Field absence
-/// is data too — a server that lists worlds without counts still lists.
+/// The `/worlds` rows; a server that lists worlds without counts still lists.
 pub(super) fn parse_world_rows(v: &Value) -> Vec<WorldRow> {
     v.get("worlds")
         .and_then(|w| w.as_array())
@@ -265,9 +226,9 @@ pub(super) fn parse_world_rows(v: &Value) -> Vec<WorldRow> {
         .unwrap_or_default()
 }
 
-/// Owned names and the deployer-authorized list, as one list: the worlds DB
-/// only knows names that have touched it, so a name owned on-chain with no
-/// row still belongs on the page — as an empty world.
+/// Owned names and the deployer-authorized list as one list: the worlds DB
+/// only knows names that have touched it, so an owned name with no row still
+/// lists, as an empty world.
 pub(super) fn merge_worlds(names: Vec<String>, mut listed: Vec<WorldRow>) -> Vec<WorldRow> {
     for name in names {
         match listed.iter_mut().find(|w| w.name == name) {
@@ -290,10 +251,9 @@ pub(super) fn merge_worlds(names: Vec<String>, mut listed: Vec<WorldRow>) -> Vec
     listed
 }
 
-/// The lands and lands-permissions pages, folded to the numbers the
-/// inventory line says and the coordinates the map lights up. Both routes
-/// speak stringified coordinates; a number is taken too rather than argued
-/// with.
+/// The lands and lands-permissions pages, folded to the inventory numbers and
+/// the map's coordinates. Both routes speak stringified coordinates; a number
+/// is taken too.
 pub(super) fn parse_holdings(lands: &Value, operated: &Value) -> Holdings {
     let count = |v: &Value, cat: &str| {
         v.get("elements")
@@ -311,18 +271,32 @@ pub(super) fn parse_holdings(lands: &Value, operated: &Value) -> Holdings {
             other => other.as_i64(),
         }
     };
-    let mut coords: Vec<(i64, i64)> = Vec::new();
-    for v in [lands, operated] {
-        if let Some(arr) = v.get("elements").and_then(|e| e.as_array()) {
-            for e in arr {
-                if let (Some(x), Some(y)) = (axis(e, "x"), axis(e, "y")) {
-                    if !coords.contains(&(x, y)) {
-                        coords.push((x, y));
-                    }
+    let listed = |v: &Value| -> Vec<(i64, i64)> {
+        let mut out: Vec<(i64, i64)> = Vec::new();
+        for e in v
+            .get("elements")
+            .and_then(|e| e.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(x), Some(y)) = (axis(e, "x"), axis(e, "y")) {
+                if !out.contains(&(x, y)) {
+                    out.push((x, y));
                 }
             }
         }
-    }
+        out
+    };
+    let owned = listed(lands);
+    let operated_coords: Vec<(i64, i64)> = listed(operated)
+        .into_iter()
+        .filter(|p| !owned.contains(p))
+        .collect();
+    let coords = owned
+        .iter()
+        .chain(operated_coords.iter())
+        .copied()
+        .collect();
     Holdings {
         parcels: count(lands, "parcel"),
         estates: count(lands, "estate"),
@@ -331,12 +305,13 @@ pub(super) fn parse_holdings(lands: &Value, operated: &Value) -> Holdings {
             .and_then(|t| t.as_i64())
             .unwrap_or(0),
         coords,
+        owned,
+        operated_coords,
     }
 }
 
 /// The strongest deploy-granting leg in a flags document, in the validator's
-/// own precedence order — `null` flags (an unindexed parcel) grant nothing,
-/// which is exactly what the deploy would decide.
+/// precedence order; `null` flags (an unindexed parcel) grant nothing.
 pub(super) fn flags_leg(flags: &Value) -> Option<&'static str> {
     const LEGS: [(&str, &str); 5] = [
         ("owner", "owner"),
@@ -350,8 +325,6 @@ pub(super) fn flags_leg(flags: &Value) -> Option<&'static str> {
         .map(|(_, label)| *label)
 }
 
-/// Why a granted world verdict is granted, from the same document the
-/// decision read.
 pub(super) fn world_grant_reason(doc: &Value, address: &str) -> &'static str {
     if doc
         .get("owner")
@@ -394,7 +367,7 @@ pub(super) fn world_verdict(
         return Verdict::May(format!(
             "granted on all {} declared parcel{}",
             deploying.len().max(1),
-            if deploying.len() == 1 { "" } else { "s" },
+            plural(deploying.len()),
         ));
     }
     let owner = doc
@@ -404,7 +377,7 @@ pub(super) fn world_verdict(
     Verdict::MayNot {
         why: format!(
             "no deploy permission on {world} for parcel{} {}",
-            if denied.len() == 1 { "" } else { "s" },
+            plural(denied.len()),
             denied.join(", ")
         ),
         remedy: format!(
@@ -427,7 +400,7 @@ pub(super) fn land_verdict(rows: &[ParcelRight], unchecked: usize) -> Verdict {
         return Verdict::MayNot {
             why: format!(
                 "this wallet holds no right on parcel{} {}",
-                if denied.len() == 1 { "" } else { "s" },
+                plural(denied.len()),
                 denied.join(", ")
             ),
             remedy: "sign with a wallet that owns or operates every declared parcel, \
@@ -439,7 +412,7 @@ pub(super) fn land_verdict(rows: &[ParcelRight], unchecked: usize) -> Verdict {
         0 => Verdict::May(format!(
             "rights held on all {} declared parcel{}",
             rows.len(),
-            if rows.len() == 1 { "" } else { "s" },
+            plural(rows.len()),
         )),
         n => Verdict::May(format!(
             "rights held on the {} parcels checked ({n} more unchecked)",
@@ -454,13 +427,16 @@ pub(super) async fn fetch_rights(dest: &Dest, address: &str) -> Rights {
     let addr = address.to_lowercase();
     let lambdas = dest.chain_lambdas.trim_end_matches('/');
     let worlds = dest.worlds_base.trim_end_matches('/');
+    let user = |page: &str| format!("{lambdas}/users/{addr}/{page}?pageSize=100&pageNum=1");
+    let list = |base: &str| format!("{base}/worlds?authorized_deployer={addr}&limit=100");
 
-    let names_url = format!("{lambdas}/users/{addr}/names?pageSize=100&pageNum=1");
-    let list_url = format!("{worlds}/worlds?authorized_deployer={addr}&limit=100");
-    let lands_url = format!("{lambdas}/users/{addr}/lands?pageSize=100&pageNum=1");
-    let operated_url = format!("{lambdas}/users/{addr}/lands-permissions?pageSize=100&pageNum=1");
-
-    let (names, listed, lands, operated, verdict_parts) = tokio::join!(
+    let (names_url, list_url, lands_url, operated_url) = (
+        user("names"),
+        list(worlds),
+        user("lands"),
+        user("lands-permissions"),
+    );
+    let (names, listed, lands, operated, target) = tokio::join!(
         get_json(&names_url),
         get_json(&list_url),
         get_json(&lands_url),
@@ -476,36 +452,24 @@ pub(super) async fn fetch_rights(dest: &Dest, address: &str) -> Rights {
             Vec::new()
         }
     };
-    let rows = match listed {
-        Ok(v) => parse_world_rows(&v),
+    let listed = match listed {
         // A self-hosted realm often runs no worlds service at all — the
         // route 404s by design, not by failure — so the list falls back to
         // the public worlds server, where the wallet's worlds actually
         // live, and the note says whose answer this is.
-        Err(_) if worlds != deploy::WORLDS_CONTENT_SERVER => {
-            let upstream = format!(
-                "{}/worlds?authorized_deployer={addr}&limit=100",
-                deploy::WORLDS_CONTENT_SERVER
-            );
-            match get_json(&upstream).await {
-                Ok(v) => {
-                    worlds_note = Some(format!(
-                        "the target runs no worlds service \u{2014} listing {}",
-                        host_of(deploy::WORLDS_CONTENT_SERVER)
-                    ));
-                    parse_world_rows(&v)
-                }
-                Err(why) => {
-                    if worlds_note.is_none() {
-                        worlds_note = Some(format!("granted worlds unchecked: {why}"));
-                    }
-                    Vec::new()
-                }
-            }
+        Err(_) if worlds != WORLDS_CONTENT_SERVER => {
+            get_json(&list(WORLDS_CONTENT_SERVER)).await.inspect(|_| {
+                worlds_note = Some(format!(
+                    "the target runs no worlds service \u{2014} listing {}",
+                    host_of(WORLDS_CONTENT_SERVER)
+                ));
+            })
         }
+        other => other,
+    };
+    let rows = match listed {
+        Ok(v) => parse_world_rows(&v),
         Err(why) => {
-            // The public worlds server answered no list; owned names still
-            // render, so this is a footnote, not a failure.
             if worlds_note.is_none() {
                 worlds_note = Some(format!("granted worlds unchecked: {why}"));
             }
@@ -517,34 +481,49 @@ pub(super) async fn fetch_rights(dest: &Dest, address: &str) -> Rights {
         (Ok(l), Err(_)) => Some(parse_holdings(l, &Value::Null)),
         _ => None,
     };
-    let (verdict, parcel_rights, unchecked_parcels) = verdict_parts;
 
     Rights {
         address: address.to_string(),
-        verdict,
+        verdict: target.verdict,
         worlds: merge_worlds(owned, rows),
         worlds_note,
         holdings,
-        parcel_rights,
-        unchecked_parcels,
+        parcel_rights: target.rows,
+        unchecked_parcels: target.unchecked,
+        parcels_note: target.note,
     }
 }
 
-/// The declared target's verdict: the world permission documents, or the
-/// per-parcel flags — batch route first (one request), the per-parcel route
-/// as the fallback that also works against a public catalyst.
-async fn verdict_fetch(dest: &Dest, addr: &str) -> (Verdict, Vec<ParcelRight>, usize) {
+/// The declared target's verdict, with the per-parcel rows behind a land one
+/// and their note when the answer is not the target's own.
+struct TargetVerdict {
+    verdict: Verdict,
+    rows: Vec<ParcelRight>,
+    unchecked: usize,
+    note: Option<String>,
+}
+
+impl TargetVerdict {
+    fn bare(verdict: Verdict) -> Self {
+        TargetVerdict {
+            verdict,
+            rows: Vec::new(),
+            unchecked: 0,
+            note: None,
+        }
+    }
+}
+
+async fn verdict_fetch(dest: &Dest, addr: &str) -> TargetVerdict {
     if let Some(w) = &dest.world {
         let worlds = dest.worlds_base.trim_end_matches('/');
         let doc_url = format!("{worlds}/world/{}/permissions", deploy::encode_segment(w));
         let doc = match get_json(&doc_url).await {
             Ok(doc) => doc,
             Err(why) => {
-                return (
-                    Verdict::Unchecked(format!("could not check permissions: {why}")),
-                    Vec::new(),
-                    0,
-                )
+                return TargetVerdict::bare(Verdict::Unchecked(format!(
+                    "could not check permissions: {why}"
+                )))
             }
         };
         let scoped = match deploy::deployment_permission_in_doc(&doc, addr) {
@@ -557,23 +536,75 @@ async fn verdict_fetch(dest: &Dest, addr: &str) -> (Verdict, Vec<ParcelRight>, u
                 Some(get_json(&url).await.unwrap_or(Value::Null))
             }
         };
-        return (
-            world_verdict(&doc, scoped.as_ref(), w, addr, &dest.pointers),
-            Vec::new(),
-            0,
-        );
+        return TargetVerdict::bare(world_verdict(
+            &doc,
+            scoped.as_ref(),
+            w,
+            addr,
+            &dest.pointers,
+        ));
     }
     if dest.pointers.is_empty() {
-        return (
-            Verdict::Unchecked("scene.json declares no parcels".to_string()),
-            Vec::new(),
-            0,
-        );
+        return TargetVerdict::bare(Verdict::Unchecked(
+            "scene.json declares no parcels".to_string(),
+        ));
     }
-    let lambdas = dest.lambdas_base.trim_end_matches('/');
-    let batch_url = format!("{lambdas}/users/{addr}/parcels/permissions");
-    let batch: Vec<String> = dest.pointers.iter().take(100).cloned().collect();
-    if let Ok(v) = post_json(&batch_url, &serde_json::json!({ "parcels": batch })).await {
+    // A worlds server (or a self-hosted realm without a squid) has no parcel
+    // routes at all and 404s them by design; parcel rights are chain state,
+    // network-wide consistent, so the public chain lambdas answer instead
+    // and the note says whose answer the rows are. Only when neither
+    // answers is the check "unchecked".
+    let target = dest.lambdas_base.trim_end_matches('/');
+    let chain = dest.chain_lambdas.trim_end_matches('/');
+    let (rows, note) = match probe_parcels(target, addr, &dest.pointers).await {
+        Ok(rows) => (rows, None),
+        Err((why, partial)) => {
+            let fallback = match target != chain {
+                true => probe_parcels(chain, addr, &dest.pointers).await.ok(),
+                false => None,
+            };
+            match fallback {
+                Some(rows) => (
+                    rows,
+                    Some(format!(
+                        "{why} \u{2014} parcel rights read from {}",
+                        host_of(chain)
+                    )),
+                ),
+                None => {
+                    return TargetVerdict {
+                        verdict: Verdict::Unchecked(format!(
+                            "could not check parcel rights: {why}"
+                        )),
+                        rows: partial,
+                        unchecked: 0,
+                        note: None,
+                    }
+                }
+            }
+        }
+    };
+    let unchecked = dest.pointers.len().saturating_sub(rows.len());
+    TargetVerdict {
+        verdict: land_verdict(&rows, unchecked),
+        rows,
+        unchecked,
+        note,
+    }
+}
+
+/// Batch route first, else one probe per parcel; an error carries the rows
+/// gathered before it.
+async fn probe_parcels(
+    lambdas: &str,
+    addr: &str,
+    pointers: &[String],
+) -> Result<Vec<ParcelRight>, (String, Vec<ParcelRight>)> {
+    let batch: Vec<String> = pointers.iter().take(100).cloned().collect();
+    let req = status_client()
+        .post(format!("{lambdas}/users/{addr}/parcels/permissions"))
+        .json(&serde_json::json!({ "parcels": batch }));
+    if let Ok(v) = fetch_json::<Value>(req).await {
         let rows: Vec<ParcelRight> = v
             .get("elements")
             .and_then(|e| e.as_array())
@@ -591,8 +622,7 @@ async fn verdict_fetch(dest: &Dest, addr: &str) -> (Verdict, Vec<ParcelRight>, u
             })
             .unwrap_or_default();
         if !rows.is_empty() {
-            let unchecked = dest.pointers.len().saturating_sub(rows.len());
-            return (land_verdict(&rows, unchecked), rows, unchecked);
+            return Ok(rows);
         }
     }
     // One probe per parcel, a handful in flight at once: serially this was
@@ -602,8 +632,7 @@ async fn verdict_fetch(dest: &Dest, addr: &str) -> (Verdict, Vec<ParcelRight>, u
     // check exactly where the serial loop did — in-flight probes drop.
     use futures::StreamExt;
     let mut rows = Vec::new();
-    let probe_stream = dest
-        .pointers
+    let probes: Vec<_> = pointers
         .iter()
         .take(PARCEL_PROBE_CAP)
         .filter_map(|pointer| {
@@ -616,26 +645,19 @@ async fn verdict_fetch(dest: &Dest, addr: &str) -> (Verdict, Vec<ParcelRight>, u
                 })
             })
         })
-        .collect::<Vec<_>>();
-    let mut probe_stream = futures::stream::iter(probe_stream).buffered(6);
-    while let Some(result) = probe_stream.next().await {
+        .collect();
+    let mut probes = futures::stream::iter(probes).buffered(6);
+    while let Some(result) = probes.next().await {
         match result {
             Ok(row) => rows.push(row),
-            Err(why) => {
-                return (
-                    Verdict::Unchecked(format!("could not check parcel rights: {why}")),
-                    rows,
-                    0,
-                )
-            }
+            Err(why) => return Err((why, rows)),
         }
     }
-    let unchecked = dest.pointers.len().saturating_sub(rows.len());
-    (land_verdict(&rows, unchecked), rows, unchecked)
+    Ok(rows)
 }
 
-/// The rights cache: same TTL and eviction as the live-status cache, keyed
-/// by everything that can change the answer.
+/// Same TTL and eviction as the live-status cache, keyed by everything that
+/// can change the answer.
 pub(super) type RightsCache = Mutex<Vec<(String, Instant, Arc<Rights>)>>;
 
 fn rights_key(dest: &Dest, address: &str) -> String {
@@ -649,44 +671,44 @@ fn rights_key(dest: &Dest, address: &str) -> String {
     )
 }
 
-/// The cached answer if it is still warm, without ever fetching: the no-wait
-/// read the instant page render uses while a background task warms the cache.
+/// The cached answer if still warm, never fetching: the no-wait read the
+/// instant page render uses while a background task warms the cache.
 pub(super) fn rights_peek(cache: &RightsCache, dest: &Dest, address: &str) -> Option<Arc<Rights>> {
-    let key = rights_key(dest, address);
-    cache
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .find(|(k, at, _)| *k == key && at.elapsed() < STATUS_TTL)
-        .map(|(_, _, v)| v.clone())
+    cache_get(&lock(cache), &rights_key(dest, address), STATUS_TTL)
 }
 
 pub(super) async fn cached_rights(cache: &RightsCache, dest: &Dest, address: &str) -> Arc<Rights> {
-    let key = rights_key(dest, address);
-    let hit = cache
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .find(|(k, at, _)| *k == key && at.elapsed() < STATUS_TTL)
-        .map(|(_, _, v)| v.clone());
-    if let Some(hit) = hit {
+    if let Some(hit) = rights_peek(cache, dest, address) {
         return hit;
     }
     let entry = Arc::new(fetch_rights(dest, address).await);
-    let mut c = cache.lock().unwrap_or_else(PoisonError::into_inner);
-    c.retain(|(k, at, _)| *k != key && at.elapsed() < STATUS_TTL);
-    c.push((key, Instant::now(), entry.clone()));
+    cache_put(
+        &mut lock(cache),
+        rights_key(dest, address),
+        entry.clone(),
+        STATUS_TTL,
+    );
     entry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::get;
+    use axum::Router;
     use serde_json::json;
 
+    async fn serve(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        base
+    }
+
     /// The names page answers bare labels; the worlds tier speaks
-    /// `name.dcl.eth`. The parser speaks the worlds dialect so the merge has
-    /// one spelling to match on.
+    /// `name.dcl.eth`, so the parser does too and the merge has one spelling.
     #[test]
     fn names_become_world_names() {
         let v = json!({ "elements": [
@@ -696,10 +718,9 @@ mod tests {
         assert!(parse_names(&json!({})).is_empty());
     }
 
-    /// An owned name with no worlds row still lists — as an empty world —
-    /// and a listed world the wallet also owns is marked owned rather than
-    /// listed twice. The public server speaks ISO timestamps and the
-    /// self-hosted one milliseconds; both become the same clock.
+    /// An owned name with no worlds row still lists, as an empty world; a
+    /// listed world the wallet owns is marked owned, not listed twice; ISO
+    /// and millisecond timestamps become the same clock.
     #[test]
     fn owned_names_merge_into_the_listed_worlds() {
         let listed = parse_world_rows(&json!({ "worlds": [
@@ -728,9 +749,7 @@ mod tests {
         assert!(fresh.owned && fresh.scenes.is_none() && fresh.name == "fresh.dcl.eth");
     }
 
-    /// The five legs in the validator's order, and a `null` flags document
-    /// (an unindexed parcel) grants nothing — the same answer the deploy
-    /// would give.
+    /// The five legs in the validator's order; `null` flags grant nothing.
     #[test]
     fn the_strongest_leg_names_the_right() {
         let flags = |k: &str| {
@@ -752,10 +771,9 @@ mod tests {
         );
     }
 
-    /// The world verdict over the same documents the deploy reads: owner and
-    /// world-wide grants pass on the first document, a parcel-scoped grant
-    /// passes only when it covers every declared parcel, and the refusal
-    /// carries the exact grant command.
+    /// Owner and world-wide grants pass on the first document, a
+    /// parcel-scoped grant only when it covers every declared parcel, and
+    /// the refusal carries the exact grant command.
     #[test]
     fn the_world_verdict_matches_the_deploy_check() {
         let deploying = vec!["0,0".to_string(), "0,1".to_string()];
@@ -792,9 +810,8 @@ mod tests {
         ));
     }
 
-    /// The land verdict never averages: one right-less parcel refuses, a
-    /// capped check says how much it did not see, and an empty check is
-    /// unchecked rather than a quiet pass.
+    /// One right-less parcel refuses, a capped check says how much it did
+    /// not see, and an empty check is unchecked rather than a quiet pass.
     #[test]
     fn the_land_verdict_refuses_on_one_bad_parcel() {
         let row = |p: &str, leg: Option<&'static str>| ParcelRight {
@@ -818,8 +835,6 @@ mod tests {
         assert!(matches!(land_verdict(&[], 0), Verdict::Unchecked(_)));
     }
 
-    /// The holdings line counts what the two pages actually say, and the
-    /// map's coordinates come from both — deduped, stringified or not.
     #[test]
     fn holdings_count_by_category_and_keep_their_coordinates() {
         let lands = json!({ "elements": [
@@ -837,9 +852,14 @@ mod tests {
             [(5, -3), (6, -3), (9, 9)],
             "deduped, both sources"
         );
+        assert_eq!(h.owned, [(5, -3), (6, -3)]);
+        assert_eq!(
+            h.operated_coords,
+            [(9, 9)],
+            "an owned parcel that is also operated lists once, as owned"
+        );
     }
 
-    /// The address form feeds URLs; only a plausible address may become one.
     #[test]
     fn only_a_plausible_address_is_worth_asking_about() {
         assert!(valid_address("0x1234567890abcdef1234567890abcdef12345678"));
@@ -848,30 +868,23 @@ mod tests {
         assert!(!valid_address("0x1234567890abcdef1234567890abcdef1234567g"));
     }
 
-    /// A configured target keeps the sign-in on its own domain only while
-    /// its sites tier actually serves the authorize page: a stale realm
-    /// 404s it, an unreachable one answers nothing, and both fall back to
-    /// the catalyst.example.com pair instead of bouncing the browser onto a dead page.
+    /// A configured target keeps the sign-in on its own domain only while it
+    /// serves the authorize page: a 404 and an unreachable host both fall
+    /// back to the catalyst.example.com pair.
     #[tokio::test]
     async fn the_connect_bases_fall_back_when_the_target_page_is_missing() {
-        let serve = |ok: bool| async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let base = format!("http://{}", listener.local_addr().unwrap());
-            let app = axum::Router::new().route(
+        let serve_page = |ok: bool| {
+            serve(Router::new().route(
                 "/auth/native",
-                axum::routing::get(move || async move {
+                get(move || async move {
                     match ok {
                         true => axum::http::StatusCode::OK,
                         false => axum::http::StatusCode::NOT_FOUND,
                     }
                 }),
-            );
-            tokio::spawn(async move {
-                axum::serve(listener, app).await.unwrap();
-            });
-            base
+            ))
         };
-        let fresh = serve(true).await;
+        let fresh = serve_page(true).await;
         let bases = working_auth_bases(Some(&fresh)).await;
         assert_eq!(
             bases.page,
@@ -879,7 +892,7 @@ mod tests {
             "a target that serves the page keeps the sign-in"
         );
 
-        let stale = serve(false).await;
+        let stale = serve_page(false).await;
         let bases = working_auth_bases(Some(&stale)).await;
         assert_eq!(
             bases.page, "https://catalyst.example.com/auth/native",
@@ -893,27 +906,74 @@ mod tests {
         );
     }
 
-    /// The sign-in happens on the configured target's own domain — where
-    /// the sites tier serves the authorize page and its relay — or on
-    /// catalyst.example.com when nothing is configured.
+    #[tokio::test]
+    async fn parcel_rights_fall_back_to_the_chain_lambdas_when_the_target_has_none() {
+        let serve_lambdas = |answers: bool| {
+            serve(match answers {
+                true => Router::new().route(
+                    "/lambdas/users/{addr}/parcels/{x}/{y}/permissions",
+                    get(|| async { axum::Json(json!({ "owner": false, "operator": true })) }),
+                ),
+                false => Router::new(),
+            })
+        };
+        let worlds_only = serve_lambdas(false).await;
+        let chain = serve_lambdas(true).await;
+        let dest = |lambdas: &str, chain: &str| Dest {
+            world: None,
+            pointers: vec!["2,12".into(), "3,12".into()],
+            base_pointer: "2,12".into(),
+            read_bases: Vec::new(),
+            lambdas_base: format!("{lambdas}/lambdas"),
+            chain_lambdas: format!("{chain}/lambdas"),
+            worlds_base: worlds_only.clone(),
+            headline: String::new(),
+            server_line: String::new(),
+        };
+        let addr = "0x1234567890abcdef1234567890abcdef12345678";
+
+        let t = verdict_fetch(&dest(&worlds_only, &chain), addr).await;
+        assert!(
+            matches!(&t.verdict, Verdict::May(why) if why.contains("all 2 declared parcels")),
+            "the chain answer rules"
+        );
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.rows[0].leg, Some("operator"));
+        assert_eq!(t.unchecked, 0);
+        let note = t.note.expect("the rows say whose answer they are");
+        assert!(
+            note.contains("answered HTTP 404") && note.contains("parcel rights read from"),
+            "{note}"
+        );
+
+        let t = verdict_fetch(&dest(&chain, &chain), addr).await;
+        assert!(matches!(t.verdict, Verdict::May(_)));
+        assert_eq!(t.rows.len(), 2);
+        assert!(t.note.is_none(), "the target's own answer needs no note");
+
+        let t = verdict_fetch(&dest(&worlds_only, &worlds_only), addr).await;
+        assert!(
+            matches!(&t.verdict, Verdict::Unchecked(why) if why.contains("could not check parcel rights")),
+            "no fallback to itself"
+        );
+        assert!(t.rows.is_empty() && t.note.is_none());
+    }
+
     #[test]
     fn the_auth_bases_follow_the_target() {
         let public = auth_bases(None);
+        let public_relay = "https://catalyst.example.com/internal/native-auth-relay";
         assert_eq!(public.page, "https://catalyst.example.com/auth/native");
-        assert_eq!(public.relay, "https://catalyst.example.com/internal/native-auth-relay");
+        assert_eq!(public.relay, public_relay);
         let own = auth_bases(Some("peer.example.net/content"));
+        let own_relay = "https://peer.example.net/internal/native-auth-relay";
         assert_eq!(own.page, "https://peer.example.net/auth/native");
-        assert_eq!(
-            own.relay,
-            "https://peer.example.net/internal/native-auth-relay"
-        );
+        assert_eq!(own.relay, own_relay);
         assert_eq!(auth_bases(Some("  ")).page, public.page, "blank is unset");
     }
 
-    /// A relayed approval proves an address only through its signature over
-    /// the exact delegation this process minted — a forged entry, a swapped
-    /// session key, a shifted expiration or somebody else's signature all
-    /// become refusals.
+    /// A forged entry, a swapped session key, a shifted expiration or
+    /// somebody else's signature all become refusals.
     #[test]
     fn a_relayed_approval_is_believed_only_with_a_verifying_signature() {
         let wallet = catalyrst_crypto::Wallet::from_hex(

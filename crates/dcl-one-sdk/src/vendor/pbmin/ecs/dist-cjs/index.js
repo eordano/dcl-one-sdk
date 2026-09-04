@@ -26,7 +26,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NetworkParent = exports.NetworkEntity = exports.SyncComponents = exports.ParticleSystem = exports.TriggerArea = exports.LightSource = exports.InputModifier = exports.VirtualCamera = exports.Tween = exports.Tags = exports.Name = exports.MeshCollider = exports.MeshRenderer = exports.Material = exports.AudioStream = exports.AudioAnalysis = exports.AudioSource = exports.Animator = exports.Transform = exports.components = exports.cyclicParentingChecker = void 0;
+exports.NetworkParent = exports.NetworkEntity = exports.SyncComponents = exports.TouchScreenControls = exports.ParticleSystem = exports.TriggerArea = exports.LightSource = exports.InputModifier = exports.VirtualCamera = exports.Tween = exports.Tags = exports.Name = exports.MeshCollider = exports.MeshRenderer = exports.Material = exports.AudioStream = exports.AudioAnalysis = exports.AudioSource = exports.Animator = exports.Transform = exports.components = exports.cyclicParentingChecker = void 0;
 // The order of the following imports matters. Please do not auto-sort
 __exportStar(require("./engine"), exports);
 __exportStar(require("./schemas"), exports);
@@ -39,6 +39,7 @@ Object.defineProperty(exports, "cyclicParentingChecker", { enumerable: true, get
 __exportStar(require("./systems/events"), exports);
 __exportStar(require("./systems/raycast"), exports);
 __exportStar(require("./systems/videoEvents"), exports);
+__exportStar(require("./systems/audioEvents"), exports);
 __exportStar(require("./systems/assetLoad"), exports);
 __exportStar(require("./systems/async-task"), exports);
 __exportStar(require("./systems/tween"), exports);
@@ -68,6 +69,8 @@ exports.LightSource = components.LightSource(initialization_1.engine);
 exports.TriggerArea = components.TriggerArea(initialization_1.engine);
 exports.ParticleSystem = 
 /* @__PURE__*/ components.ParticleSystem(initialization_1.engine);
+exports.TouchScreenControls = 
+/* @__PURE__*/ components.TouchScreenControls(initialization_1.engine);
 /**
  * @alpha
  * This is going to be used for sync components through a server.

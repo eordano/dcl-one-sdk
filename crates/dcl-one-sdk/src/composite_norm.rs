@@ -1,186 +1,35 @@
+use crate::jsjson::{self, array_index, ordered_entries, JsValue};
 use anyhow::{bail, Result};
 use base64::Engine;
-use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
 use std::collections::{BTreeMap, HashSet};
-use std::fmt;
 use std::sync::OnceLock;
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Json {
-    Null,
-    Bool(bool),
-    Num(f64),
-    Str(String),
-    Arr(Vec<Json>),
-    Obj(Vec<(String, Json)>),
+fn get_set<'a>(value: &'a JsValue, key: &str) -> Option<&'a JsValue> {
+    value.get(key).filter(|v| !matches!(v, JsValue::Null))
 }
 
-impl Json {
-    fn get(&self, key: &str) -> Option<&Json> {
-        match self {
-            Json::Obj(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
-    fn get_set(&self, key: &str) -> Option<&Json> {
-        self.get(key).filter(|v| !matches!(v, Json::Null))
-    }
-
-    fn is_truthy(&self) -> bool {
-        match self {
-            Json::Null => false,
-            Json::Bool(b) => *b,
-            Json::Num(n) => *n != 0.0 && !n.is_nan(),
-            Json::Str(s) => !s.is_empty(),
-            Json::Arr(_) | Json::Obj(_) => true,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Json {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct JsonVisitor;
-
-        impl<'de> Visitor<'de> for JsonVisitor {
-            type Value = Json;
-
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("any JSON value")
-            }
-
-            fn visit_bool<E: DeError>(self, v: bool) -> Result<Json, E> {
-                Ok(Json::Bool(v))
-            }
-
-            fn visit_i64<E: DeError>(self, v: i64) -> Result<Json, E> {
-                Ok(Json::Num(v as f64))
-            }
-
-            fn visit_u64<E: DeError>(self, v: u64) -> Result<Json, E> {
-                Ok(Json::Num(v as f64))
-            }
-
-            fn visit_f64<E: DeError>(self, v: f64) -> Result<Json, E> {
-                Ok(Json::Num(v))
-            }
-
-            fn visit_str<E: DeError>(self, v: &str) -> Result<Json, E> {
-                Ok(Json::Str(v.to_owned()))
-            }
-
-            fn visit_string<E: DeError>(self, v: String) -> Result<Json, E> {
-                Ok(Json::Str(v))
-            }
-
-            fn visit_unit<E: DeError>(self) -> Result<Json, E> {
-                Ok(Json::Null)
-            }
-
-            fn visit_none<E: DeError>(self) -> Result<Json, E> {
-                Ok(Json::Null)
-            }
-
-            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Json, D2::Error> {
-                Json::deserialize(d)
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Json, A::Error> {
-                let mut items = Vec::new();
-                while let Some(v) = seq.next_element()? {
-                    items.push(v);
-                }
-                Ok(Json::Arr(items))
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Json, A::Error> {
-                let mut entries: Vec<(String, Json)> = Vec::new();
-                while let Some((k, v)) = map.next_entry::<String, Json>()? {
-                    match entries.iter_mut().find(|(ek, _)| *ek == k) {
-                        Some(slot) => slot.1 = v,
-                        None => entries.push((k, v)),
-                    }
-                }
-                if let [(k, Json::Str(s))] = entries.as_slice() {
-                    if k == "$serde_json::private::Number" {
-                        if let Ok(n) = s.parse::<f64>() {
-                            return Ok(Json::Num(n));
-                        }
-                    }
-                }
-                Ok(Json::Obj(entries))
-            }
-        }
-
-        deserializer.deserialize_any(JsonVisitor)
-    }
-}
-
-fn ordered_entries(entries: &[(String, Json)]) -> Vec<&(String, Json)> {
-    let mut indexed: Vec<(u64, &(String, Json))> = Vec::new();
-    let mut rest: Vec<&(String, Json)> = Vec::new();
-    for entry in entries {
-        match array_index(&entry.0) {
-            Some(n) => indexed.push((n, entry)),
-            None => rest.push(entry),
-        }
-    }
-    indexed.sort_by_key(|(n, _)| *n);
-    indexed.into_iter().map(|(_, e)| e).chain(rest).collect()
-}
-
-pub fn write_json(value: &Json, out: &mut String) {
+fn truthy(value: &JsValue) -> bool {
     match value {
-        Json::Null => out.push_str("null"),
-        Json::Bool(true) => out.push_str("true"),
-        Json::Bool(false) => out.push_str("false"),
-        Json::Num(n) => out.push_str(&js_number_string(*n)),
-        Json::Str(s) => write_json_string(s, out),
-        Json::Arr(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_json(item, out);
-            }
-            out.push(']');
-        }
-        Json::Obj(entries) => {
-            out.push('{');
-            for (i, entry) in ordered_entries(entries).into_iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_json_string(&entry.0, out);
-                out.push(':');
-                write_json(&entry.1, out);
-            }
-            out.push('}');
-        }
+        JsValue::Null => false,
+        JsValue::Bool(b) => *b,
+        JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
+        JsValue::String(s) => !s.is_empty(),
+        JsValue::Array(_) | JsValue::Object(_) => true,
     }
 }
 
-fn write_json_string(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                use fmt::Write;
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+fn obj(entries: Vec<(&str, JsValue)>) -> JsValue {
+    JsValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect(),
+    )
+}
+
+/// `JSON.stringify` with full JS number formatting (`NaN`, `1e+21`, ...).
+pub fn write_json(value: &JsValue, out: &mut String) {
+    jsjson::write_with(value, out, &|n| Ok(js_number_string(n))).expect("infallible");
 }
 
 fn js_number_string(x: f64) -> String {
@@ -204,32 +53,32 @@ fn js_number_string(x: f64) -> String {
     }
 }
 
-fn js_string(value: &Json) -> String {
+fn js_string(value: &JsValue) -> String {
     match value {
-        Json::Null => "null".into(),
-        Json::Bool(b) => b.to_string(),
-        Json::Num(n) => js_number_string(*n),
-        Json::Str(s) => s.clone(),
-        Json::Arr(items) => items
+        JsValue::Null => "null".into(),
+        JsValue::Bool(b) => b.to_string(),
+        JsValue::Number(n) => js_number_string(*n),
+        JsValue::String(s) => s.clone(),
+        JsValue::Array(items) => items
             .iter()
             .map(|item| match item {
-                Json::Null => String::new(),
+                JsValue::Null => String::new(),
                 other => js_string(other),
             })
             .collect::<Vec<_>>()
             .join(","),
-        Json::Obj(_) => "[object Object]".into(),
+        JsValue::Object(_) => "[object Object]".into(),
     }
 }
 
-fn js_number(value: &Json) -> f64 {
+fn js_number(value: &JsValue) -> f64 {
     match value {
-        Json::Null => 0.0,
-        Json::Bool(b) => f64::from(u8::from(*b)),
-        Json::Num(n) => *n,
-        Json::Str(s) => js_parse_number(s),
-        Json::Arr(_) => js_parse_number(&js_string(value)),
-        Json::Obj(_) => f64::NAN,
+        JsValue::Null => 0.0,
+        JsValue::Bool(b) => f64::from(u8::from(*b)),
+        JsValue::Number(n) => *n,
+        JsValue::String(s) => js_parse_number(s),
+        JsValue::Array(_) => js_parse_number(&js_string(value)),
+        JsValue::Object(_) => f64::NAN,
     }
 }
 
@@ -243,14 +92,13 @@ fn js_parse_number(s: &str) -> f64 {
         "-Infinity" => return f64::NEG_INFINITY,
         _ => {}
     }
-    if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        return js_parse_radix(rest, 16);
-    }
-    if let Some(rest) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
-        return js_parse_radix(rest, 8);
-    }
-    if let Some(rest) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
-        return js_parse_radix(rest, 2);
+    for (prefix, radix) in [("0x", 16), ("0o", 8), ("0b", 2)] {
+        if let Some(rest) = t
+            .strip_prefix(prefix)
+            .or_else(|| t.strip_prefix(prefix.to_ascii_uppercase().as_str()))
+        {
+            return js_parse_radix(rest, radix);
+        }
     }
     if is_decimal_literal(t) {
         t.parse::<f64>().unwrap_or(f64::NAN)
@@ -324,6 +172,8 @@ fn js_math_round(x: f64) -> f64 {
     }
 }
 
+/// Re-encode as `atob`/`btoa` would: url-safe alphabet accepted, whitespace
+/// skipped, decoding stops at the first foreign character.
 fn canonical_base64(input: &str) -> String {
     let mut sextets: Vec<u8> = Vec::with_capacity(input.len());
     for c in input.chars() {
@@ -353,129 +203,90 @@ fn canonical_base64(input: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn array_index(key: &str) -> Option<u64> {
-    if key == "0" {
-        return Some(0);
-    }
-    let bytes = key.as_bytes();
-    if bytes.is_empty() || bytes.len() > 10 || bytes[0] == b'0' {
-        return None;
-    }
-    if !bytes.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let n: u64 = key.parse().ok()?;
-    (n <= 4_294_967_294).then_some(n)
-}
-
-fn normalize_data_entry(value: &Json) -> Result<Json> {
-    if matches!(value, Json::Null) {
+fn normalize_data_entry(value: &JsValue) -> Result<JsValue> {
+    if matches!(value, JsValue::Null) {
         bail!("data entry is null");
     }
-    if let Some(json) = value.get_set("json") {
-        return Ok(Json::Obj(vec![("json".to_owned(), json.clone())]));
+    if let Some(json) = get_set(value, "json") {
+        return Ok(obj(vec![("json", json.clone())]));
     }
-    if let Some(binary) = value.get_set("binary") {
-        let Json::Str(b64) = binary else {
+    if let Some(binary) = get_set(value, "binary") {
+        let JsValue::String(b64) = binary else {
             bail!("data entry binary is not a base64 string");
         };
-        return Ok(Json::Obj(vec![(
-            "binary".to_owned(),
-            Json::Str(canonical_base64(b64)),
+        return Ok(obj(vec![(
+            "binary",
+            JsValue::String(canonical_base64(b64)),
         )]));
     }
-    Ok(Json::Obj(Vec::new()))
+    Ok(obj(Vec::new()))
 }
 
-fn normalize_data(pairs: &[(String, &Json)]) -> Result<Json> {
-    let mut indexed: Vec<(u64, usize)> = Vec::new();
-    let mut plain: Vec<usize> = Vec::new();
-    for (pos, (key, _)) in pairs.iter().enumerate() {
-        match array_index(key) {
-            Some(n) => indexed.push((n, pos)),
-            None => plain.push(pos),
-        }
-    }
-    indexed.sort_by_key(|(n, _)| *n);
-    let mut out_indexed: BTreeMap<u64, Json> = BTreeMap::new();
-    let mut out_plain: Vec<(String, Json)> = Vec::new();
-    for pos in indexed.into_iter().map(|(_, p)| p).chain(plain) {
-        let (key, value) = &pairs[pos];
+/// Entity keys are re-spelled through `Number` → `String`, so `"512"`, `"5.12e2"`
+/// and `" 512 "` all land on the index 512; non-index survivors keep insertion order.
+fn normalize_data(pairs: &[(String, &JsValue)]) -> Result<JsValue> {
+    let mut indexed: BTreeMap<u32, JsValue> = BTreeMap::new();
+    let mut plain: Vec<(String, JsValue)> = Vec::new();
+    for (key, value) in ordered_entries(pairs) {
         let entry = normalize_data_entry(value)?;
         let out_key = js_number_string(js_parse_number(key));
         match array_index(&out_key) {
             Some(n) => {
-                out_indexed.insert(n, entry);
+                indexed.insert(n, entry);
             }
-            None => match out_plain.iter_mut().find(|(k, _)| *k == out_key) {
-                Some(slot) => slot.1 = entry,
-                None => out_plain.push((out_key, entry)),
-            },
+            None => jsjson::set(&mut plain, out_key, entry),
         }
     }
-    let mut entries: Vec<(String, Json)> = out_indexed
+    let mut entries: Vec<(String, JsValue)> = indexed
         .into_iter()
         .map(|(n, e)| (n.to_string(), e))
         .collect();
-    entries.extend(out_plain);
-    Ok(Json::Obj(entries))
+    entries.extend(plain);
+    Ok(JsValue::Object(entries))
 }
 
-fn normalize_component(component: &Json) -> Result<Json> {
-    if matches!(component, Json::Null) {
+fn normalize_component(component: &JsValue) -> Result<JsValue> {
+    if matches!(component, JsValue::Null) {
         bail!("component is null");
     }
-    let name = component
-        .get_set("name")
-        .map_or_else(String::new, js_string);
-    let json_schema = component.get_set("jsonSchema").cloned();
-    let data = match component.get("data") {
-        Some(Json::Obj(obj_entries)) => {
-            let pairs: Vec<(String, &Json)> =
-                obj_entries.iter().map(|(k, v)| (k.clone(), v)).collect();
-            normalize_data(&pairs)?
-        }
-        Some(Json::Arr(items)) => {
-            let pairs: Vec<(String, &Json)> = items
-                .iter()
-                .enumerate()
-                .map(|(i, v)| (i.to_string(), v))
-                .collect();
-            normalize_data(&pairs)?
-        }
-        _ => Json::Obj(Vec::new()),
-    };
-    let mut entries = vec![("name".to_owned(), Json::Str(name))];
-    if let Some(schema) = json_schema {
-        entries.push(("jsonSchema".to_owned(), schema));
-    }
-    entries.push(("data".to_owned(), data));
-    Ok(Json::Obj(entries))
-}
-
-fn normalize_definition(root: &Json) -> Result<Json> {
-    if matches!(root, Json::Null) {
-        bail!("composite root is null");
-    }
-    let version = js_math_round(root.get_set("version").map_or(0.0, js_number));
-    let version_value = if version.is_finite() {
-        Json::Num(version)
-    } else {
-        Json::Null
-    };
-    let components = match root.get("components") {
-        Some(Json::Arr(items)) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(normalize_component(item)?);
-            }
-            out
-        }
+    let name = get_set(component, "name").map_or_else(String::new, js_string);
+    let pairs: Vec<(String, &JsValue)> = match component.get("data") {
+        Some(JsValue::Object(entries)) => entries.iter().map(|(k, v)| (k.clone(), v)).collect(),
+        Some(JsValue::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i.to_string(), v))
+            .collect(),
         _ => Vec::new(),
     };
-    Ok(Json::Obj(vec![
-        ("version".to_owned(), version_value),
-        ("components".to_owned(), Json::Arr(components)),
+    let mut entries = vec![("name", JsValue::String(name))];
+    if let Some(schema) = get_set(component, "jsonSchema") {
+        entries.push(("jsonSchema", schema.clone()));
+    }
+    entries.push(("data", normalize_data(&pairs)?));
+    Ok(obj(entries))
+}
+
+fn normalize_definition(root: &JsValue) -> Result<JsValue> {
+    if matches!(root, JsValue::Null) {
+        bail!("composite root is null");
+    }
+    let version = js_math_round(get_set(root, "version").map_or(0.0, js_number));
+    let version_value = if version.is_finite() {
+        JsValue::Number(version)
+    } else {
+        JsValue::Null
+    };
+    let components = match root.get("components") {
+        Some(JsValue::Array(items)) => items
+            .iter()
+            .map(normalize_component)
+            .collect::<Result<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
+    Ok(obj(vec![
+        ("version", version_value),
+        ("components", JsValue::Array(components)),
     ]))
 }
 
@@ -496,6 +307,8 @@ fn static_core_table() -> &'static HashSet<String> {
     })
 }
 
+/// Normalizes composites the way `@dcl/ecs` `Composite.toJson` does, tracking
+/// which component names earlier composites have already defined.
 pub struct CompositeNormalizer {
     defined: HashSet<String>,
 }
@@ -521,20 +334,19 @@ impl CompositeNormalizer {
     }
 
     pub fn normalize(&mut self, raw: &str) -> Result<String> {
-        let parsed: Json = serde_json::from_str(raw)?;
-        let normalized = normalize_definition(&parsed)?;
+        let normalized = normalize_definition(&jsjson::parse(raw)?)?;
         self.check_instanceable(&normalized)?;
         let mut out = String::new();
         write_json(&normalized, &mut out);
         Ok(out)
     }
 
-    fn check_instanceable(&mut self, normalized: &Json) -> Result<()> {
-        let Some(Json::Arr(components)) = normalized.get("components") else {
+    fn check_instanceable(&mut self, normalized: &JsValue) -> Result<()> {
+        let Some(JsValue::Array(components)) = normalized.get("components") else {
             return Ok(());
         };
         for component in components {
-            let Some(Json::Str(name)) = component.get("name") else {
+            let Some(JsValue::String(name)) = component.get("name") else {
                 continue;
             };
             if self.defined.contains(name) {
@@ -547,7 +359,7 @@ impl CompositeNormalizer {
                 }
                 bail!("the core component {name} was not found");
             }
-            if component.get("jsonSchema").is_some_and(Json::is_truthy) {
+            if component.get("jsonSchema").is_some_and(truthy) {
                 self.defined.insert(name.clone());
                 continue;
             }
@@ -562,10 +374,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_table_tracks_ecs_7_26_0() {
+    fn schema_table_tracks_ecs_7_27_0() {
         let raw = include_str!("../docs/composite-component-schemas.json");
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
-        assert_eq!(parsed["ecsVersion"], serde_json::json!("7.26.0"));
+        assert_eq!(parsed["ecsVersion"], serde_json::json!("7.27.0"));
         let table = static_core_table();
         for name in [
             "core::ExplorerUiEventsResult",
@@ -579,15 +391,14 @@ mod tests {
 
     fn edge_cases() -> Vec<(String, String)> {
         let raw = include_str!("../docs/composite-tojson-edge-cases.json");
-        let parsed: Json = serde_json::from_str(raw).expect("edge cases parse");
-        let Json::Arr(cases) = parsed else {
+        let JsValue::Array(cases) = jsjson::parse(raw).expect("edge cases parse") else {
             panic!("edge cases must be an array");
         };
         cases
             .iter()
             .map(|case| {
                 let input = case.get("input").expect("input");
-                let Some(Json::Str(expected)) = case.get("output") else {
+                let Some(JsValue::String(expected)) = case.get("output") else {
                     panic!("output must be a string");
                 };
                 let mut input_text = String::new();
@@ -597,27 +408,27 @@ mod tests {
             .collect()
     }
 
+    fn normalize_text(input: &str) -> String {
+        let parsed = jsjson::parse(input).expect("parse");
+        let normalized = normalize_definition(&parsed).expect("normalize");
+        let mut out = String::new();
+        write_json(&normalized, &mut out);
+        out
+    }
+
     #[test]
     fn edge_cases_match_upstream() {
         let cases = edge_cases();
         assert!(cases.len() >= 20);
         for (input, expected) in cases {
-            let parsed: Json = serde_json::from_str(&input).expect("parse");
-            let normalized = normalize_definition(&parsed).expect("normalize");
-            let mut out = String::new();
-            write_json(&normalized, &mut out);
-            assert_eq!(out, expected, "input: {input}");
+            assert_eq!(normalize_text(&input), expected, "input: {input}");
         }
     }
 
     #[test]
     fn normalization_is_idempotent() {
         for (_, expected) in edge_cases() {
-            let parsed: Json = serde_json::from_str(&expected).expect("parse");
-            let normalized = normalize_definition(&parsed).expect("normalize");
-            let mut out = String::new();
-            write_json(&normalized, &mut out);
-            assert_eq!(out, expected);
+            assert_eq!(normalize_text(&expected), expected);
         }
     }
 

@@ -102,7 +102,7 @@ function createPointerEventsSystem(engine, inputSystem) {
         }
         event.delete(type);
     }
-    engine.addSystem(function EventSystem() {
+    engine.addSystem(function PointerEventSystem() {
         for (const [entity, event] of eventsMap) {
             if (engine.getEntityState(entity) === entity_1.EntityState.Removed) {
                 eventsMap.delete(entity);

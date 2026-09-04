@@ -243,7 +243,10 @@ impl IntoResponse for ApiError {
                 tracing::error!(error = %e, "sqlx error");
                 (500, "database error".to_string())
             }
-            ApiError::Internal(m) => (500, m),
+            ApiError::Internal(m) => {
+                tracing::error!(error = %m, "internal error");
+                (500, "internal error".to_string())
+            }
         };
         let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status, Json(ApiErrorBody::new(message))).into_response()

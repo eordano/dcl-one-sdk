@@ -5,11 +5,11 @@ use dcl_one_sdk::{
 };
 use std::path::PathBuf;
 
-/// Lowest MCP port the Explorer will actually serve on: below this it ignores
-/// the deep link's `mcp-port` and falls back to its own default, which would
-/// leave the scene-log poller waiting on a port nobody opened. Rejecting the
-/// value here keeps the two ends from disagreeing silently.
+/// Below this the Explorer ignores the deep link's `mcp-port` and serves on its
+/// own default, leaving the scene-log poller waiting on a port nobody opened.
 const MIN_MCP_PORT: u16 = 1024;
+
+const NO_INSTALL_NOTE: &str = "--skip-install has no effect (dcl-one-sdk never installs packages)";
 
 /// The port both ends use when `--mcp-port` is absent.
 fn resolved_mcp_port(mcp_port: Option<u16>) -> u16 {
@@ -291,6 +291,11 @@ enum Command {
         )]
         replace_world_scenes: bool,
         #[arg(
+            long,
+            help = "Ask the worlds server whether the signing wallet may publish before uploading, so a refusal names the owner and the grant command. Off by default: that pre-flight GET gets the upload challenged behind a Cloudflare-fronted worlds server, and the server refuses an unpermitted upload itself"
+        )]
+        check_permissions: bool,
+        #[arg(
             short = 'y',
             long,
             help = "Answer prompts yes, including consent to publish to the public network"
@@ -338,9 +343,8 @@ enum Command {
         #[command(subcommand)]
         command: WorldCommand,
     },
-    /// Generate main.crdt from a scene's composites into an arbitrary file.
-    /// Hidden: it exists so the native generator's bytes can be diffed against a
-    /// node data-layer dump without running a build.
+    /// Generate main.crdt from a scene's composites into an arbitrary file, so
+    /// the native generator's bytes can be diffed against a node data-layer dump.
     #[command(hide = true)]
     CrdtGen {
         #[arg(long, default_value = ".")]
@@ -348,11 +352,10 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Build the prebuilt SDK runtime chunks that ship in the vendored blob.
-    /// Hidden: a step of `scripts/build-base-blob.py`, so `--dir` must be a
-    /// throwaway scene whose `node_modules` is the full blob install tree
-    /// (including `@dcl/asset-packs` and `@dcl/sdk-commands`, which the blob
-    /// itself does not ship).
+    /// Build the prebuilt SDK runtime chunks for the vendored blob: a step of
+    /// `scripts/build-base-blob.py`, so `--dir` must be a throwaway scene whose
+    /// `node_modules` is the full install tree (including `@dcl/asset-packs`
+    /// and `@dcl/sdk-commands`, which the blob itself does not ship).
     #[command(hide = true)]
     VendorChunks {
         #[arg(long, default_value = ".")]
@@ -454,12 +457,19 @@ struct SignedWriteArgs {
 }
 
 impl SignedWriteArgs {
-    fn browser_options(&self) -> world::BrowserOptions {
-        world::BrowserOptions {
-            port: self.port,
-            no_browser: self.no_browser,
-            ci: self.ci,
-        }
+    async fn run(&self, name: &str, action: world::WorldAction) -> Result<()> {
+        world::run_action(
+            name,
+            action,
+            self.target_content.as_deref(),
+            self.sign_key.as_deref(),
+            world::BrowserOptions {
+                port: self.port,
+                no_browser: self.no_browser,
+                ci: self.ci,
+            },
+        )
+        .await
     }
 }
 
@@ -566,7 +576,7 @@ async fn run(command: Command) -> Result<()> {
             skip_type_check,
         } => {
             if skip_install {
-                ux::note("--skip-install has no effect (dcl-one-sdk never installs packages)");
+                ux::note(NO_INSTALL_NOTE);
             }
             let opts = build::BuildOptions {
                 dir,
@@ -637,20 +647,16 @@ async fn run(command: Command) -> Result<()> {
             } else {
                 tunnel_token
             };
-            if skip_install {
-                ux::note("--skip-install has no effect (dcl-one-sdk never installs packages)");
-            }
-            if no_browser {
-                ux::note("--no-browser has no effect (dcl-one-sdk never opens a browser)");
-            }
-            if ci {
-                ux::note("--ci has no effect yet");
-            }
-            if multi_instance {
-                ux::note("--multi-instance has no effect (the join block always prints a 2nd-instance deep link)");
-            }
-            if no_client {
-                ux::note("--no-client has no effect (dcl-one-sdk never launches a client)");
+            for (given, note) in [
+                (skip_install, NO_INSTALL_NOTE),
+                (no_browser, "--no-browser has no effect (dcl-one-sdk never opens a browser)"),
+                (ci, "--ci has no effect yet"),
+                (multi_instance, "--multi-instance has no effect (the join block always prints a 2nd-instance deep link)"),
+                (no_client, "--no-client has no effect (dcl-one-sdk never launches a client)"),
+            ] {
+                if given {
+                    ux::note(note);
+                }
             }
             start::start(start::StartOptions {
                 dir,
@@ -692,32 +698,32 @@ async fn run(command: Command) -> Result<()> {
             timestamp,
             entity_out,
             replace_world_scenes,
+            check_permissions,
             yes,
             no_browser,
             ci,
             port,
-        } => {
-            deploy::deploy(&deploy::DeployOptions {
-                dir,
-                target,
-                target_content,
-                sign_key,
-                skip_build,
-                dry_run,
-                timestamp,
-                entity_out,
-                // Additive is the default; the flag opts into replacing all.
-                multi_scene: !replace_world_scenes,
-                yes,
-                no_browser,
-                ci,
-                port,
-                quiet: false,
-                host_signer: None,
-                identity: None,
-            })
-            .await
-        }
+        } => deploy::deploy(&deploy::DeployOptions {
+            dir,
+            target,
+            target_content,
+            sign_key,
+            skip_build,
+            dry_run,
+            timestamp,
+            entity_out,
+            multi_scene: !replace_world_scenes,
+            check_permissions,
+            yes,
+            no_browser,
+            ci,
+            port,
+            quiet: false,
+            host_signer: None,
+            identity: None,
+        })
+        .await
+        .map(|_| ()),
         Command::Unpublish {
             parcel,
             target,
@@ -759,70 +765,54 @@ async fn run_world(command: WorldCommand) -> Result<()> {
                 categories,
                 thumbnail,
             } => {
-                world::run_action(
-                    &name,
-                    world::WorldAction::SettingsSet(world::SettingsUpdate {
-                        title,
-                        description,
-                        content_rating,
-                        spawn_coordinates,
-                        skybox_time,
-                        single_player,
-                        show_in_places,
-                        categories,
-                        thumbnail,
-                    }),
-                    signed.target_content.as_deref(),
-                    signed.sign_key.as_deref(),
-                    signed.browser_options(),
-                )
-                .await
+                let update = world::SettingsUpdate {
+                    title,
+                    description,
+                    content_rating,
+                    spawn_coordinates,
+                    skybox_time,
+                    single_player,
+                    show_in_places,
+                    categories,
+                    thumbnail,
+                };
+                signed
+                    .run(&name, world::WorldAction::SettingsSet(update))
+                    .await
             }
         },
-        WorldCommand::Permissions { command } => match command {
-            WorldPermissionsCommand::List {
-                name,
-                target_content,
-            } => world::permissions_list(&name, target_content.as_deref()).await,
-            WorldPermissionsCommand::Grant {
-                name,
-                permission,
-                address,
-                signed,
-            } => {
-                world::run_action(
-                    &name,
-                    world::WorldAction::Permission {
-                        permission,
-                        address,
-                        revoke: false,
-                    },
-                    signed.target_content.as_deref(),
-                    signed.sign_key.as_deref(),
-                    signed.browser_options(),
-                )
-                .await
+        WorldCommand::Permissions { command } => {
+            let revoke = matches!(command, WorldPermissionsCommand::Revoke { .. });
+            match command {
+                WorldPermissionsCommand::List {
+                    name,
+                    target_content,
+                } => world::permissions_list(&name, target_content.as_deref()).await,
+                WorldPermissionsCommand::Grant {
+                    name,
+                    permission,
+                    address,
+                    signed,
+                }
+                | WorldPermissionsCommand::Revoke {
+                    name,
+                    permission,
+                    address,
+                    signed,
+                } => {
+                    signed
+                        .run(
+                            &name,
+                            world::WorldAction::Permission {
+                                permission,
+                                address,
+                                revoke,
+                            },
+                        )
+                        .await
+                }
             }
-            WorldPermissionsCommand::Revoke {
-                name,
-                permission,
-                address,
-                signed,
-            } => {
-                world::run_action(
-                    &name,
-                    world::WorldAction::Permission {
-                        permission,
-                        address,
-                        revoke: true,
-                    },
-                    signed.target_content.as_deref(),
-                    signed.sign_key.as_deref(),
-                    signed.browser_options(),
-                )
-                .await
-            }
-        },
+        }
     }
 }
 
@@ -843,7 +833,7 @@ async fn watch_workspace(ws: &workspace::Workspace, opts: &build::BuildOptions) 
             ux::note("type check skipped (--skip-type-check)");
         } else {
             match build::type_check(session.project(), build::Reloaded::Yes).await {
-                Ok(()) => {
+                Ok(_) => {
                     tracing::info!("type checking completed without errors");
                     steps.done("Type check passed");
                 }
@@ -872,10 +862,14 @@ mod tests {
     use super::*;
     use clap::error::ErrorKind;
 
-    fn parse(args: &[&str]) -> Command {
+    fn try_start(args: &[&str]) -> Result<Cli, clap::Error> {
         let mut argv = vec!["dcl-one-sdk", "start"];
         argv.extend_from_slice(args);
         Cli::try_parse_from(argv)
+    }
+
+    fn parse(args: &[&str]) -> Command {
+        try_start(args)
             .unwrap_or_else(|e| panic!("expected `start {args:?}` to parse: {e}"))
             .command
     }
@@ -894,9 +888,7 @@ mod tests {
     }
 
     fn start_err(args: &[&str]) -> clap::Error {
-        let mut argv = vec!["dcl-one-sdk", "start"];
-        argv.extend_from_slice(args);
-        match Cli::try_parse_from(argv) {
+        match try_start(args) {
             Ok(_) => panic!("expected `start {args:?}` to be rejected"),
             Err(e) => e,
         }
@@ -935,9 +927,6 @@ mod tests {
         );
     }
 
-    /// The Explorer clamps anything below 1024 to its own default and serves
-    /// there, while the scene-log poller would keep polling the port we asked
-    /// for: reject the value instead of letting the two ends disagree.
     #[test]
     fn mcp_port_rejects_values_the_explorer_would_not_serve() {
         for bad in ["0", "1", "1023", "70000", "abc"] {
@@ -948,7 +937,7 @@ mod tests {
                 "--mcp-port {bad} should be rejected"
             );
         }
-        assert!(Cli::try_parse_from(["dcl-one-sdk", "start", "--mcp-port", "-1"]).is_err());
+        assert!(try_start(&["--mcp-port", "-1"]).is_err());
         let msg = start_err(&["--mcp-port", "0"]).to_string();
         assert!(
             msg.contains("--mcp-port") && msg.contains("1024") && msg.contains("65535"),

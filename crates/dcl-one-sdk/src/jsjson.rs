@@ -26,6 +26,7 @@ impl JsValue {
     }
 }
 
+/// Assign like a JS object: a repeated key keeps its first position, last value.
 pub fn set(obj: &mut Vec<(String, JsValue)>, key: String, value: JsValue) {
     if let Some(entry) = obj.iter_mut().find(|(k, _)| *k == key) {
         entry.1 = value;
@@ -173,6 +174,26 @@ impl Parser<'_> {
         Ok(v)
     }
 
+    fn unicode_escape(&mut self) -> Result<char> {
+        let u = self.hex4()?;
+        if (0xD800..0xDC00).contains(&u) {
+            if self.peek() != Some(b'\\') || self.b.get(self.i + 1) != Some(&b'u') {
+                bail!("lone surrogate in string (unsupported)");
+            }
+            self.i += 2;
+            let lo = self.hex4()?;
+            if !(0xDC00..0xE000).contains(&lo) {
+                bail!("lone surrogate in string (unsupported)");
+            }
+            let cp = 0x10000 + (((u as u32) - 0xD800) << 10) + ((lo as u32) - 0xDC00);
+            return Ok(char::from_u32(cp).expect("valid supplementary codepoint"));
+        }
+        if (0xDC00..0xE000).contains(&u) {
+            bail!("lone surrogate in string (unsupported)");
+        }
+        Ok(char::from_u32(u as u32).expect("valid BMP codepoint"))
+    }
+
     fn string(&mut self) -> Result<String> {
         self.i += 1;
         let mut out = String::new();
@@ -191,42 +212,18 @@ impl Parser<'_> {
                         bail!("unterminated escape");
                     };
                     self.i += 1;
-                    match e {
-                        b'"' => out.push('"'),
-                        b'\\' => out.push('\\'),
-                        b'/' => out.push('/'),
-                        b'b' => out.push('\u{8}'),
-                        b'f' => out.push('\u{c}'),
-                        b'n' => out.push('\n'),
-                        b'r' => out.push('\r'),
-                        b't' => out.push('\t'),
-                        b'u' => {
-                            let u = self.hex4()?;
-                            if (0xD800..0xDC00).contains(&u) {
-                                if self.peek() != Some(b'\\')
-                                    || self.b.get(self.i + 1) != Some(&b'u')
-                                {
-                                    bail!("lone surrogate in string (unsupported)");
-                                }
-                                self.i += 2;
-                                let lo = self.hex4()?;
-                                if !(0xDC00..0xE000).contains(&lo) {
-                                    bail!("lone surrogate in string (unsupported)");
-                                }
-                                let cp = 0x10000
-                                    + (((u as u32) - 0xD800) << 10)
-                                    + ((lo as u32) - 0xDC00);
-                                out.push(
-                                    char::from_u32(cp).expect("valid supplementary codepoint"),
-                                );
-                            } else if (0xDC00..0xE000).contains(&u) {
-                                bail!("lone surrogate in string (unsupported)");
-                            } else {
-                                out.push(char::from_u32(u as u32).expect("valid BMP codepoint"));
-                            }
-                        }
+                    out.push(match e {
+                        b'"' => '"',
+                        b'\\' => '\\',
+                        b'/' => '/',
+                        b'b' => '\u{8}',
+                        b'f' => '\u{c}',
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        b'u' => self.unicode_escape()?,
                         _ => bail!("invalid escape at byte {}", self.i),
-                    }
+                    });
                 }
                 0x00..=0x1f => bail!("raw control character in string at byte {}", self.i),
                 _ => {
@@ -238,6 +235,15 @@ impl Parser<'_> {
         }
     }
 
+    /// Consume a digit run; false when there was none.
+    fn digits(&mut self) -> bool {
+        let start = self.i;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.i += 1;
+        }
+        self.i > start
+    }
+
     fn number(&mut self) -> Result<JsValue> {
         let start = self.i;
         if self.peek() == Some(b'-') {
@@ -246,19 +252,14 @@ impl Parser<'_> {
         match self.peek() {
             Some(b'0') => self.i += 1,
             Some(b'1'..=b'9') => {
-                while matches!(self.peek(), Some(b'0'..=b'9')) {
-                    self.i += 1;
-                }
+                self.digits();
             }
             _ => bail!("invalid number at byte {}", self.i),
         }
         if self.peek() == Some(b'.') {
             self.i += 1;
-            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+            if !self.digits() {
                 bail!("invalid number at byte {}", self.i);
-            }
-            while matches!(self.peek(), Some(b'0'..=b'9')) {
-                self.i += 1;
             }
         }
         if matches!(self.peek(), Some(b'e' | b'E')) {
@@ -266,11 +267,8 @@ impl Parser<'_> {
             if matches!(self.peek(), Some(b'+' | b'-')) {
                 self.i += 1;
             }
-            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+            if !self.digits() {
                 bail!("invalid number at byte {}", self.i);
-            }
-            while matches!(self.peek(), Some(b'0'..=b'9')) {
-                self.i += 1;
             }
         }
         let text = &self.s[start..self.i];
@@ -280,16 +278,21 @@ impl Parser<'_> {
 
 pub fn stringify(v: &JsValue) -> Result<String> {
     let mut out = String::new();
-    write_value(v, &mut out)?;
+    write_with(v, &mut out, &format_number)?;
     Ok(out)
 }
 
-fn write_value(v: &JsValue, out: &mut String) -> Result<()> {
+/// `JSON.stringify` layout (no whitespace, `for...in` key order) with the
+/// number rendering supplied by `num`.
+pub(crate) fn write_with(
+    v: &JsValue,
+    out: &mut String,
+    num: &dyn Fn(f64) -> Result<String>,
+) -> Result<()> {
     match v {
         JsValue::Null => out.push_str("null"),
-        JsValue::Bool(true) => out.push_str("true"),
-        JsValue::Bool(false) => out.push_str("false"),
-        JsValue::Number(n) => out.push_str(&format_number(*n)?),
+        JsValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        JsValue::Number(n) => out.push_str(&num(*n)?),
         JsValue::String(s) => write_string(s, out),
         JsValue::Array(items) => {
             out.push('[');
@@ -297,21 +300,19 @@ fn write_value(v: &JsValue, out: &mut String) -> Result<()> {
                 if idx > 0 {
                     out.push(',');
                 }
-                write_value(item, out)?;
+                write_with(item, out, num)?;
             }
             out.push(']');
         }
         JsValue::Object(entries) => {
             out.push('{');
-            let mut first = true;
-            for (k, val) in ordered_entries(entries) {
-                if !first {
+            for (idx, (k, val)) in ordered_entries(entries).into_iter().enumerate() {
+                if idx > 0 {
                     out.push(',');
                 }
-                first = false;
                 write_string(k, out);
                 out.push(':');
-                write_value(val, out)?;
+                write_with(val, out, num)?;
             }
             out.push('}');
         }
@@ -319,7 +320,9 @@ fn write_value(v: &JsValue, out: &mut String) -> Result<()> {
     Ok(())
 }
 
-fn array_index(k: &str) -> Option<u32> {
+/// The canonical array index a key spells, if any (`"0"`..`"4294967294"`,
+/// no leading zero, no sign).
+pub(crate) fn array_index(k: &str) -> Option<u32> {
     if k.is_empty() || k.len() > 10 || !k.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -330,21 +333,18 @@ fn array_index(k: &str) -> Option<u32> {
     (n < u32::MAX as u64).then_some(n as u32)
 }
 
-fn ordered_entries(entries: &[(String, JsValue)]) -> Vec<(&String, &JsValue)> {
-    let mut indexed: Vec<(u32, &String, &JsValue)> = Vec::new();
-    let mut rest: Vec<(&String, &JsValue)> = Vec::new();
-    for (k, v) in entries {
-        match array_index(k) {
-            Some(n) => indexed.push((n, k, v)),
-            None => rest.push((k, v)),
+/// `for...in` order: array indices ascending, then the rest in insertion order.
+pub(crate) fn ordered_entries<T>(entries: &[(String, T)]) -> Vec<&(String, T)> {
+    let mut indexed: Vec<(u32, &(String, T))> = Vec::new();
+    let mut rest: Vec<&(String, T)> = Vec::new();
+    for entry in entries {
+        match array_index(&entry.0) {
+            Some(n) => indexed.push((n, entry)),
+            None => rest.push(entry),
         }
     }
-    indexed.sort_by_key(|(n, _, _)| *n);
-    indexed
-        .into_iter()
-        .map(|(_, k, v)| (k, v))
-        .chain(rest)
-        .collect()
+    indexed.sort_by_key(|(n, _)| *n);
+    indexed.into_iter().map(|(_, e)| e).chain(rest).collect()
 }
 
 fn format_number(v: f64) -> Result<String> {
@@ -363,7 +363,7 @@ fn format_number(v: f64) -> Result<String> {
     Ok(format!("{v}"))
 }
 
-fn write_string(s: &str, out: &mut String) {
+pub(crate) fn write_string(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {

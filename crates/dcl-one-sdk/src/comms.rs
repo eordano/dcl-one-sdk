@@ -12,7 +12,7 @@ use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::RngExt;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -35,12 +35,20 @@ pub struct CommsState {
     registry: Mutex<Registry>,
 }
 
+impl CommsState {
+    fn reg(&self) -> MutexGuard<'_, Registry> {
+        self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[derive(Default)]
 struct Registry {
     counter: u32,
-    rooms: HashMap<String, HashMap<u32, Peer>>,
+    rooms: HashMap<String, Room>,
     addresses: HashMap<String, (String, u32)>,
 }
+
+type Room = HashMap<u32, Peer>;
 
 struct Peer {
     address: String,
@@ -77,6 +85,14 @@ fn craft(message: ws_packet::Message) -> Vec<u8> {
     buf
 }
 
+fn send_all(room: &Room, except: Option<u32>, bytes: &[u8]) {
+    for (alias, peer) in room {
+        if Some(*alias) != except {
+            let _ = peer.tx.send(PeerFrame::Packet(bytes.to_vec()));
+        }
+    }
+}
+
 async fn recv_packet(socket: &mut WebSocket, timeout_error: &str) -> Result<WsPacket> {
     let recv = async {
         loop {
@@ -106,12 +122,7 @@ async fn handshake(socket: &mut WebSocket, st: &CommsState) -> Result<String> {
     }
     let address = ident.address.to_lowercase();
     let challenge_to_sign = format!("dcl-{:x}", rand::rng().random::<u128>());
-    let already_connected = st
-        .registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .addresses
-        .contains_key(&address);
+    let already_connected = st.reg().addresses.contains_key(&address);
     tracing::debug!(
         challenge_to_sign,
         address,
@@ -139,40 +150,39 @@ async fn handshake(socket: &mut WebSocket, st: &CommsState) -> Result<String> {
     Ok(address)
 }
 
+/// Removes `alias` from its room, dropping the room when it empties and telling
+/// the rest of the room otherwise.
+fn drop_peer(reg: &mut Registry, room_id: &str, alias: u32) -> Option<Peer> {
+    let room = reg.rooms.get_mut(room_id)?;
+    let peer = room.remove(&alias)?;
+    if room.is_empty() {
+        reg.rooms.remove(room_id);
+    } else {
+        let leave = craft(ws_packet::Message::PeerLeaveMessage(WsPeerLeave { alias }));
+        send_all(room, None, &leave);
+    }
+    Some(peer)
+}
+
 fn join_room(
     st: &CommsState,
     room_id: &str,
     address: &str,
     tx: mpsc::UnboundedSender<PeerFrame>,
 ) -> (u32, Vec<u8>) {
-    let mut reg = st
-        .registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = st.reg();
     reg.counter += 1;
     let alias = reg.counter;
     if let Some((old_room, old_alias)) = reg.addresses.remove(address) {
-        if let Some(room) = reg.rooms.get_mut(&old_room) {
-            if let Some(old_peer) = room.remove(&old_alias) {
-                tracing::info!(room = %old_room, address, alias = old_alias, "mini-comms kicking previous session");
-                let _ = old_peer
-                    .tx
-                    .send(PeerFrame::Kick(craft(ws_packet::Message::PeerKicked(
-                        WsKicked {
-                            reason: "Already logged in".to_string(),
-                        },
-                    ))));
-            }
-            if room.is_empty() {
-                reg.rooms.remove(&old_room);
-            } else {
-                let leave = craft(ws_packet::Message::PeerLeaveMessage(WsPeerLeave {
-                    alias: old_alias,
-                }));
-                for peer in reg.rooms[&old_room].values() {
-                    let _ = peer.tx.send(PeerFrame::Packet(leave.clone()));
-                }
-            }
+        if let Some(old_peer) = drop_peer(&mut reg, &old_room, old_alias) {
+            tracing::info!(room = %old_room, address, alias = old_alias, "mini-comms kicking previous session");
+            let _ = old_peer
+                .tx
+                .send(PeerFrame::Kick(craft(ws_packet::Message::PeerKicked(
+                    WsKicked {
+                        reason: "Already logged in".to_string(),
+                    },
+                ))));
         }
     }
     let room = reg.rooms.entry(room_id.to_string()).or_default();
@@ -185,9 +195,7 @@ fn join_room(
         alias,
         address: address.to_string(),
     }));
-    for peer in room.values() {
-        let _ = peer.tx.send(PeerFrame::Packet(join.clone()));
-    }
+    send_all(room, None, &join);
     room.insert(
         alias,
         Peer {
@@ -205,10 +213,7 @@ fn join_room(
 }
 
 fn broadcast_update(st: &CommsState, room_id: &str, from_alias: u32, update: WsPeerUpdate) {
-    let reg = st
-        .registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = st.reg();
     let Some(room) = reg.rooms.get(room_id) else {
         return;
     };
@@ -217,40 +222,20 @@ fn broadcast_update(st: &CommsState, room_id: &str, from_alias: u32, update: WsP
         body: update.body,
         unreliable: update.unreliable,
     }));
-    for (peer_alias, peer) in room {
-        if *peer_alias == from_alias {
-            continue;
-        }
-        let _ = peer.tx.send(PeerFrame::Packet(bytes.clone()));
-    }
+    send_all(room, Some(from_alias), &bytes);
 }
 
 fn leave_room(st: &CommsState, room_id: &str, alias: u32, address: &str) {
-    let mut reg = st
-        .registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(room) = reg.rooms.get_mut(room_id) else {
-        return;
-    };
-    if room.remove(&alias).is_none() {
+    let mut reg = st.reg();
+    if drop_peer(&mut reg, room_id, alias).is_none() {
         return;
     }
-    let now_empty = room.is_empty();
     if reg
         .addresses
         .get(address)
         .is_some_and(|(r, a)| r == room_id && *a == alias)
     {
         reg.addresses.remove(address);
-    }
-    if now_empty {
-        reg.rooms.remove(room_id);
-    } else {
-        let leave = craft(ws_packet::Message::PeerLeaveMessage(WsPeerLeave { alias }));
-        for peer in reg.rooms[room_id].values() {
-            let _ = peer.tx.send(PeerFrame::Packet(leave.clone()));
-        }
     }
 }
 
@@ -271,28 +256,14 @@ async fn deliver(sink: &mut SplitSink<WebSocket, Message>, frame: Option<PeerFra
     }
 }
 
-/* ---------- host side-door (multiplayer-server-design.md, M1) ----------
-The scene host is just another room peer, but it is OUR process: it joins
-through this JSON door instead of the protobuf handshake, and the relay
-transcodes both ways. Sender addresses on inbound updates are stamped by
-the relay from the room registry -- the host trusts ctx.from because this
-process verified the signed challenge, not because a client said so.
-
-Loopback-only: the host runs beside the preview. A stranger on the LAN
-gets a 403 here where a wallet-signed handshake meets them on the peer
-door. Frames, host -> relay:
-  {"type":"update","body":"<base64>","unreliable":bool,"to":["0x..",..]?}
-relay -> host:
-  {"type":"welcome","alias":n,"peers":{"<alias>":"0x..",..}}
-  {"type":"join","alias":n,"address":"0x.."}
-  {"type":"leave","alias":n,"address":"0x.."}
-  {"type":"update","from":n,"fromAddress":"0x..","body":"<base64>"}   */
-
-/// The address the host peer joins under: the zero address is valid to every
-/// eth-address check yet mintable by no wallet, so a real client can never
-/// collide with (or spoof) the host slot through the signed door.
+/// The host peer's address: valid to every eth-address check yet mintable by
+/// no wallet, so no client can collide with or spoof the host slot.
 const HOST_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
+/// JSON side door for the scene host (multiplayer-server-design.md, M1). The
+/// host is our own process beside the preview, so it skips the signed
+/// handshake and is loopback-only; the relay transcodes protobuf both ways and
+/// stamps `fromAddress` from the registry, which is why the host may trust it.
 async fn host_upgrade(
     ws: WebSocketUpgrade,
     Path(room_id): Path<String>,
@@ -325,10 +296,7 @@ fn host_json(st: &CommsState, room_id: &str, packet: &[u8]) -> Option<String> {
     use base64::Engine as _;
     let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let decoded = WsPacket::decode(packet).ok()?;
-    let reg = st
-        .registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = st.reg();
     let addr_of = |alias: u32| -> String {
         reg.rooms
             .get(room_id)
@@ -359,10 +327,7 @@ fn host_json(st: &CommsState, room_id: &str, packet: &[u8]) -> Option<String> {
 }
 
 fn send_update_to(st: &CommsState, room_id: &str, from_alias: u32, to: &[String], bytes: &[u8]) {
-    let reg = st
-        .registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = st.reg();
     let Some(room) = reg.rooms.get(room_id) else {
         return;
     };

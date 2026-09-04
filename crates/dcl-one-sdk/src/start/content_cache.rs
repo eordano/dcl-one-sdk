@@ -1,19 +1,19 @@
 //! Disk LRU for upstream-fetched content under `<scene>/.dcl-cache/contents`.
 //!
-//! Everything that lands here is content-addressed (profile snapshots,
-//! wearable GLBs and textures fetched through the `/content/contents`
-//! catalyst fallback), so entries never go stale — the cache only bounds how
-//! many are kept, evicting least-recently-used on insert. Recency is file
-//! mtime, bumped on every hit; a `<hash>.ct` sidecar preserves the upstream
-//! content type. The dot-dir is invisible to the watcher and to deploys.
+//! Everything here is content-addressed (profile snapshots, wearable GLBs and
+//! textures fetched through the `/content/contents` catalyst fallback), so
+//! entries never go stale — the cache only bounds how many are kept, evicting
+//! least-recently-used on insert. Recency is file mtime, bumped on every hit;
+//! a `<hash>.ct` sidecar preserves the upstream content type. The dot-dir is
+//! invisible to the watcher and to deploys.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub const MAX_ENTRIES_ENV: &str = "DCL_ONE_SDK_CONTENT_CACHE_MAX";
+const MAX_ENTRIES_ENV: &str = "DCL_ONE_SDK_CONTENT_CACHE_MAX";
 const DEFAULT_MAX_ENTRIES: usize = 5000;
 
-pub fn max_entries() -> usize {
+fn max_entries() -> usize {
     match std::env::var(MAX_ENTRIES_ENV) {
         Ok(v) if !v.trim().is_empty() => v.trim().parse().unwrap_or(DEFAULT_MAX_ENTRIES),
         _ => DEFAULT_MAX_ENTRIES,
@@ -109,25 +109,8 @@ fn evict(dir: &Path, cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::start::testkit::Tmp;
     use std::time::Duration;
-
-    struct Tmp(PathBuf);
-    impl Tmp {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "dcl-one-sdk-content-cache-{tag}-{}-{:x}",
-                std::process::id(),
-                rand::random::<u64>()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            Tmp(dir)
-        }
-    }
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn hash_validation_refuses_traversal_and_local_hashes() {

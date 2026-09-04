@@ -91,16 +91,14 @@ pub async fn pack(opts: &PackOptions) -> Result<()> {
             .into());
         }
     }
-    let read = crate::scene::parallel_map(&rel_paths, |rel| -> Result<_> {
+    let files: Vec<(String, Vec<u8>)> = crate::scene::parallel_map(&rel_paths, |rel| {
         let p = root.join(rel);
         let bytes =
             std::fs::read(&p).with_context(|| format!("reading content file {}", p.display()))?;
         Ok((rel.clone(), bytes))
-    });
-    let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(read.len());
-    for entry in read {
-        files.push(entry?);
-    }
+    })
+    .into_iter()
+    .collect::<Result<_>>()?;
     let total: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
     if files.is_empty() {
         return Err(UserError::new(
@@ -183,19 +181,22 @@ pub fn validate_wearable(root: &Path) -> Result<()> {
     validate_wearable_value(&v, root)
 }
 
+fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
+    v.get(key).and_then(|s| s.as_str()).unwrap_or_default()
+}
+
 pub fn validate_wearable_value(v: &Value, root: &Path) -> Result<()> {
-    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or_default();
-    if name.is_empty() {
+    if str_field(v, "name").is_empty() {
         return Err(field_error(
             "wearable.json needs a non-empty \"name\"",
             "add \"name\": \"My Wearable\"",
         ));
     }
-    let rarity = v.get("rarity").and_then(|r| r.as_str()).unwrap_or_default();
+    let rarity = str_field(v, "rarity");
     if !RARITIES.contains(&rarity) {
         return Err(field_error(
-            &format!("wearable.json \"rarity\" is \"{rarity}\", which is not a rarity"),
-            &format!("use one of: {}", RARITIES.join(", ")),
+            format!("wearable.json \"rarity\" is \"{rarity}\", which is not a rarity"),
+            format!("use one of: {}", RARITIES.join(", ")),
         ));
     }
     let Some(data) = v.get("data") else {
@@ -204,16 +205,13 @@ pub fn validate_wearable_value(v: &Value, root: &Path) -> Result<()> {
             "add \"data\": { \"category\": ..., \"representations\": [...] }",
         ));
     };
-    let category = data
-        .get("category")
-        .and_then(|c| c.as_str())
-        .unwrap_or_default();
+    let category = str_field(data, "category");
     if !CATEGORIES.contains(&category) {
         return Err(field_error(
-            &format!(
+            format!(
                 "wearable.json data.category is \"{category}\", which is not a wearable category"
             ),
-            &format!("use one of: {}", CATEGORIES.join(", ")),
+            format!("use one of: {}", CATEGORIES.join(", ")),
         ));
     }
     let reps = data
@@ -235,17 +233,14 @@ pub fn validate_wearable_value(v: &Value, root: &Path) -> Result<()> {
             .unwrap_or(0);
         if body_shapes == 0 {
             return Err(field_error(
-                &format!("representation {i} has no bodyShapes"),
+                format!("representation {i} has no bodyShapes"),
                 "list at least one body shape URN (BaseMale / BaseFemale)",
             ));
         }
-        let main_file = rep
-            .get("mainFile")
-            .and_then(|m| m.as_str())
-            .unwrap_or_default();
+        let main_file = str_field(rep, "mainFile");
         if main_file.is_empty() {
             return Err(field_error(
-                &format!("representation {i} has no mainFile"),
+                format!("representation {i} has no mainFile"),
                 "set mainFile to the wearable model, e.g. \"model.glb\"",
             ));
         }
@@ -260,13 +255,13 @@ pub fn validate_wearable_value(v: &Value, root: &Path) -> Result<()> {
             .unwrap_or_default();
         if contents.is_empty() {
             return Err(field_error(
-                &format!("representation {i} has no contents"),
+                format!("representation {i} has no contents"),
                 "list every file the representation ships, including mainFile",
             ));
         }
         if !contents.iter().any(|c| c == main_file) {
             return Err(field_error(
-                &format!("representation {i}: mainFile \"{main_file}\" is not listed in contents"),
+                format!("representation {i}: mainFile \"{main_file}\" is not listed in contents"),
                 "add the mainFile to the contents array",
             ));
         }
@@ -284,40 +279,15 @@ pub fn validate_wearable_value(v: &Value, root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn field_error(what: &str, step: &str) -> anyhow::Error {
-    UserError::new(what.to_string(), TrySteps::one(step.to_string())).into()
+fn field_error(what: impl Into<String>, step: impl Into<String>) -> anyhow::Error {
+    UserError::new(what, TrySteps::one(step)).into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::test_tree::TempTree;
     use serde_json::json;
-
-    struct TempTree(PathBuf);
-
-    impl TempTree {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "dcl-one-sdk-pack-test-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            TempTree(dir)
-        }
-
-        fn write(&self, rel: &str, contents: &[u8]) {
-            let p = self.0.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, contents).unwrap();
-        }
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn valid_wearable() -> Value {
         json!({
@@ -415,30 +385,23 @@ mod tests {
     #[test]
     fn wearable_validation_names_the_broken_field() {
         let t = wearable_fixture("broken");
+        let broken = |edit: fn(&mut Value)| {
+            let mut bad = valid_wearable();
+            edit(&mut bad);
+            validate_wearable_value(&bad, &t.0).unwrap_err().to_string()
+        };
 
-        let mut bad = valid_wearable();
-        bad["rarity"] = json!("shiny");
-        let err = validate_wearable_value(&bad, &t.0).unwrap_err();
-        assert!(err.to_string().contains("shiny"));
-
-        let mut bad = valid_wearable();
-        bad["data"]["category"] = json!("sunglasses");
-        let err = validate_wearable_value(&bad, &t.0).unwrap_err();
-        assert!(err.to_string().contains("sunglasses"));
-
-        let mut bad = valid_wearable();
-        bad["data"]["representations"] = json!([]);
-        assert!(validate_wearable_value(&bad, &t.0).is_err());
-
-        let mut bad = valid_wearable();
-        bad["data"]["representations"][0]["contents"] = json!(["missing.glb"]);
-        let err = validate_wearable_value(&bad, &t.0).unwrap_err();
-        assert!(err.to_string().contains("mainFile"));
-
-        let mut bad = valid_wearable();
-        bad["data"]["representations"][0]["mainFile"] = json!("missing.glb");
-        bad["data"]["representations"][0]["contents"] = json!(["missing.glb"]);
-        let err = validate_wearable_value(&bad, &t.0).unwrap_err();
-        assert!(err.to_string().contains("missing.glb"));
+        assert!(broken(|w| w["rarity"] = json!("shiny")).contains("shiny"));
+        assert!(broken(|w| w["data"]["category"] = json!("sunglasses")).contains("sunglasses"));
+        broken(|w| w["data"]["representations"] = json!([]));
+        assert!(broken(|w| {
+            w["data"]["representations"][0]["contents"] = json!(["missing.glb"]);
+        })
+        .contains("mainFile"));
+        assert!(broken(|w| {
+            w["data"]["representations"][0]["mainFile"] = json!("missing.glb");
+            w["data"]["representations"][0]["contents"] = json!(["missing.glb"]);
+        })
+        .contains("missing.glb"));
     }
 }

@@ -48,8 +48,12 @@ function createTimers(targetEngine) {
                 timers.delete(timerId);
             }
             armContext = { accruedMs: elapsedMs - residualMs };
-            timerData.callback();
-            armContext = null;
+            try {
+                timerData.callback();
+            }
+            finally {
+                armContext = null;
+            }
         }
     }
     targetEngine.addSystem(system, Number.MAX_SAFE_INTEGER, '@dcl/ecs/timers');

@@ -9,7 +9,7 @@ const minimal_1 = __importDefault(require("protobufjs/minimal"));
 const camera_transition_gen_1 = require("./common/camera_transition.gen");
 const protobufPackageSarasa = "decentraland.sdk.components";
 function createBasePBVirtualCamera() {
-    return { defaultTransition: undefined, lookAtEntity: undefined };
+    return { defaultTransition: undefined, lookAtEntity: undefined, fov: undefined };
 }
 /**
  * @public
@@ -22,6 +22,9 @@ var PBVirtualCamera;
         }
         if (message.lookAtEntity !== undefined) {
             writer.uint32(16).uint32(message.lookAtEntity);
+        }
+        if (message.fov !== undefined) {
+            writer.uint32(29).float(message.fov);
         }
         return writer;
     }
@@ -44,6 +47,12 @@ var PBVirtualCamera;
                         break;
                     }
                     message.lookAtEntity = reader.uint32();
+                    continue;
+                case 3:
+                    if (tag !== 29) {
+                        break;
+                    }
+                    message.fov = reader.float();
                     continue;
             }
             if ((tag & 7) === 4 || tag === 0) {

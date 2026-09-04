@@ -4,6 +4,7 @@ export { ColorRange } from './pb/decentraland/common/colors.gen';
 export * from './pb/decentraland/sdk/components/common/avatar_mask.gen';
 export * from './pb/decentraland/sdk/components/common/camera_transition.gen';
 export * from './pb/decentraland/sdk/components/common/camera_type.gen';
+export * from './pb/decentraland/sdk/components/common/explorer_ui.gen';
 export * from './pb/decentraland/sdk/components/common/input_action.gen';
 export * from './pb/decentraland/sdk/components/common/loading_state.gen';
 export * from './pb/decentraland/sdk/components/common/media_state.gen';

@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-preview-tunnel"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 description = "Self-hosted preview tunnel for dcl-one-sdk: agents dial out one WebSocket trunk, the service allocates public /t/<id> routes and multiplexes inbound HTTP + WebSocket traffic back over the trunk. Port 5167."
 
@@ -16,7 +16,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 catalyrst-envcfg = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 rand = "0.10"
 

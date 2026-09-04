@@ -1,26 +1,15 @@
-//! `get-context-files` — the AI context a scene hands to an agent.
-//!
-//! Two halves, and they are not equally reliable:
-//!
-//! * the **embedded** half. `src/skills.rs` writes `.claude/skills/` straight
-//!   out of the binary: no network, no npm, nothing outside this process can
-//!   make it fail.
-//! * the **downloaded** half. Decentraland's official `ai-sdk-context` corpus,
-//!   pulled from the GitHub contents API into `dclcontext/`. Only upstream has
-//!   it, so this half needs the network.
-//!
-//! The embedded half runs first, and a failure of the second one no longer
-//! fails the command: a machine with no GitHub still ends up with a working
-//! scene skill plus a note naming what it did not get. Hard-failing the whole
-//! command on an unreachable registry is the npm behaviour this crate exists
-//! to replace, and it would have made the offline half unreachable exactly
-//! when it matters most. `--offline` skips the request outright.
-//!
-//! `dclcontext/` is no longer wiped before the request either — a listing
-//! failure used to leave an empty directory where a good corpus had been.
+//! `get-context-files` — the AI context a scene hands to an agent, in two
+//! halves: the embedded skills `src/skills.rs` writes straight out of the
+//! binary, then Decentraland's `ai-sdk-context` corpus pulled from the GitHub
+//! contents API into `dclcontext/`. A download failure does not fail the
+//! command (hard-failing on an unreachable registry is the npm behaviour this
+//! crate replaces), and `dclcontext/` is only wiped once the listing is in
+//! hand, so a failed run never leaves an empty directory where a good corpus
+//! had been. `--offline` skips the request outright.
 
 use crate::ux::{self, TrySteps, UserError};
 use anyhow::Result;
+use serde_json::Value;
 use std::path::Path;
 
 pub const DEFAULT_API: &str =
@@ -159,32 +148,25 @@ fn project_kind(root: &Path) -> Option<&'static str> {
     None
 }
 
+fn str_of<'a>(item: &'a Value, key: &str) -> Option<&'a str> {
+    item.get(key).and_then(|v| v.as_str())
+}
+
 async fn list_files(client: &reqwest::Client, api_base: &str) -> Result<Vec<RemoteFile>> {
     let mut queue = vec![api_base.to_string()];
     let mut out = Vec::new();
     while let Some(url) = queue.pop() {
         let items = fetch_listing(client, &url).await?;
         for item in items.as_array().map(|a| a.as_slice()).unwrap_or_default() {
-            let kind = item
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let name = item
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let path = item
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(name)
-                .to_string();
-            match kind {
+            let name = str_of(item, "name").unwrap_or_default();
+            let path = str_of(item, "path").unwrap_or(name).to_string();
+            match str_of(item, "type").unwrap_or_default() {
                 "file" => {
                     if !is_safe_basename(name) {
                         ux::note(format!("skipping context file with an unsafe name: {path}"));
                         continue;
                     }
-                    if let Some(dl) = item.get("download_url").and_then(|v| v.as_str()) {
+                    if let Some(dl) = str_of(item, "download_url") {
                         out.push(RemoteFile {
                             name: name.to_string(),
                             path,
@@ -193,7 +175,7 @@ async fn list_files(client: &reqwest::Client, api_base: &str) -> Result<Vec<Remo
                     }
                 }
                 "dir" => {
-                    if let Some(sub) = item.get("url").and_then(|v| v.as_str()) {
+                    if let Some(sub) = str_of(item, "url") {
                         queue.push(sub.to_string());
                     }
                 }
@@ -205,7 +187,7 @@ async fn list_files(client: &reqwest::Client, api_base: &str) -> Result<Vec<Remo
     Ok(out)
 }
 
-async fn fetch_listing(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
+async fn fetch_listing(client: &reqwest::Client, url: &str) -> Result<Value> {
     let listing_error = |why: String| {
         UserError::new(
             "could not list the AI context files",
@@ -243,6 +225,11 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::test_tree::TempTree;
+    use std::path::PathBuf;
+
+    /// Refuses instantly, so no timeout and no risk of hitting the real GitHub.
+    const DEAD_API: &str = "http://127.0.0.1:1/contents";
 
     #[test]
     fn safe_basename_rejects_traversal_and_separators() {
@@ -257,62 +244,37 @@ mod tests {
         assert!(!is_safe_basename("/abs.md"));
     }
 
-    struct TempScene(std::path::PathBuf);
-
-    impl TempScene {
-        /// A directory `project_kind()` accepts: package.json + scene.json.
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "dcl-one-sdk-context-test-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("package.json"), b"{}").unwrap();
-            std::fs::write(dir.join("scene.json"), b"{}").unwrap();
-            TempScene(dir)
-        }
-
-        fn skill_md(&self) -> std::path::PathBuf {
-            self.0
-                .join(crate::skills::SKILLS_DIR)
-                .join(crate::skills::EMBEDDED[0].name)
-                .join("SKILL.md")
-        }
+    fn scene(tag: &str) -> TempTree {
+        let t = TempTree::new(tag);
+        t.write("package.json", b"{}");
+        t.write("scene.json", b"{}");
+        t
     }
 
-    impl Drop for TempScene {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    fn skill_md(scene: &TempTree) -> PathBuf {
+        scene
+            .0
+            .join(crate::skills::SKILLS_DIR)
+            .join(crate::skills::EMBEDDED[0].name)
+            .join("SKILL.md")
     }
 
-    /// The point of the whole change: no network, still a skill in the scene,
-    /// still exit 0. `127.0.0.1:1` refuses instantly, so this needs no timeout
-    /// and cannot accidentally hit the real GitHub.
     #[tokio::test]
     async fn download_failure_still_installs_the_skill_and_succeeds() {
-        let scene = TempScene::new("nonet");
-        get_context_files(&scene.0, "http://127.0.0.1:1/contents", false)
-            .await
-            .unwrap();
-        assert!(scene.skill_md().is_file());
+        let scene = scene("nonet");
+        get_context_files(&scene.0, DEAD_API, false).await.unwrap();
+        assert!(skill_md(&scene).is_file());
         assert!(
             !scene.0.join("dclcontext").exists(),
             "a failed listing must not leave an empty dclcontext/"
         );
     }
 
-    /// A good `dclcontext/` survives a failed run — the removal now happens
-    /// only once the listing is in hand.
     #[tokio::test]
     async fn download_failure_does_not_wipe_an_existing_dclcontext() {
-        let scene = TempScene::new("keep");
-        std::fs::create_dir_all(scene.0.join("dclcontext")).unwrap();
-        std::fs::write(scene.0.join("dclcontext/old.md"), b"corpus").unwrap();
-        get_context_files(&scene.0, "http://127.0.0.1:1/contents", false)
-            .await
-            .unwrap();
+        let scene = scene("keep");
+        scene.write("dclcontext/old.md", b"corpus");
+        get_context_files(&scene.0, DEAD_API, false).await.unwrap();
         assert_eq!(
             std::fs::read(scene.0.join("dclcontext/old.md")).unwrap(),
             b"corpus"
@@ -321,28 +283,19 @@ mod tests {
 
     #[tokio::test]
     async fn offline_writes_the_skill_and_never_dials_out() {
-        let scene = TempScene::new("offline");
+        let scene = scene("offline");
         get_context_files(&scene.0, "http://198.51.100.1/contents", true)
             .await
             .unwrap();
-        assert!(scene.skill_md().is_file());
+        assert!(skill_md(&scene).is_file());
     }
 
-    /// Outside a project nothing is written at all — including the skill. The
-    /// command is scene-scoped; a `.claude/skills/` dropped in a random cwd is
-    /// litter, not help.
+    /// The command is scene-scoped: a `.claude/skills/` dropped in a random cwd
+    /// is litter, not help.
     #[tokio::test]
     async fn non_project_directory_writes_nothing() {
-        let dir = std::env::temp_dir().join(format!(
-            "dcl-one-sdk-context-test-bare-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        get_context_files(&dir, "http://127.0.0.1:1/contents", false)
-            .await
-            .unwrap();
-        assert!(!dir.join(".claude").exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TempTree::new("bare");
+        get_context_files(&dir.0, DEAD_API, false).await.unwrap();
+        assert!(!dir.0.join(".claude").exists());
     }
 }

@@ -4,13 +4,14 @@
  * init and it'll be changing.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.executeTask = exports.Physics = exports.createTimers = exports.timers = exports.triggerAreaEventsSystem = exports.tweenSystem = exports.assetLoadLoadingStateSystem = exports.videoEventsSystem = exports.raycastSystem = exports.pointerEventsSystem = exports.inputSystem = exports.engine = void 0;
+exports.executeTask = exports.Physics = exports.createTimers = exports.timers = exports.triggerAreaEventsSystem = exports.tweenSystem = exports.assetLoadLoadingStateSystem = exports.audioEventsSystem = exports.videoEventsSystem = exports.raycastSystem = exports.pointerEventsSystem = exports.inputSystem = exports.engine = void 0;
 const engine_1 = require("../../engine");
 const async_task_1 = require("../../systems/async-task");
 const events_1 = require("../../systems/events");
 const input_1 = require("./../../engine/input");
 const raycast_1 = require("../../systems/raycast");
 const videoEvents_1 = require("../../systems/videoEvents");
+const audioEvents_1 = require("../../systems/audioEvents");
 const assetLoad_1 = require("../../systems/assetLoad");
 const tween_1 = require("../../systems/tween");
 const pointer_event_collider_checker_1 = require("../../systems/pointer-event-collider-checker");
@@ -56,6 +57,11 @@ exports.raycastSystem = (0, raycast_1.createRaycastSystem)(exports.engine);
  * Register callback functions to a particular entity on video events.
  */
 exports.videoEventsSystem = (0, videoEvents_1.createVideoEventsSystem)(exports.engine);
+/**
+ * @public
+ * Register callback functions to a particular entity on audio events.
+ */
+exports.audioEventsSystem = (0, audioEvents_1.createAudioEventsSystem)(exports.engine);
 /**
  * @public
  * Register callback functions to a particular entity on asset pre-load events.

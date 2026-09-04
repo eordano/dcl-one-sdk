@@ -355,12 +355,13 @@ function reconcilePresence() {
   if (!reg) return
   let engine, PlayerIdentityData
   try {
-    engine = reg['@dcl/sdk/ecs'].engine
-    PlayerIdentityData = reg['@dcl/sdk/ecs'].components.PlayerIdentityData
+    const ecs = reg['@dcl/sdk/ecs']
+    engine = ecs.engine
+    PlayerIdentityData = ecs.PlayerIdentityData || ecs.components.PlayerIdentityData(engine)
   } catch {
     return
   }
-  if (!engine || !PlayerIdentityData) return
+  if (!engine || !PlayerIdentityData || typeof PlayerIdentityData.create !== 'function') return
   const want = new Set(peers.values())
   for (const [addr, ent] of presenceEntities)
     if (!want.has(addr)) {

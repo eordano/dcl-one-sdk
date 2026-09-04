@@ -6,6 +6,7 @@ import { CameraTransition } from "./common/camera_transition.gen";
  * an 'instant' transition (like using speed/time = 0)
  * * The lookAtEntity defines to which entity the Camera has to look at constantly (independent from
  * the holding entity transform).
+ * * The fov defines the Field of View of the virtual camera
  */
 /**
  * @public
@@ -13,6 +14,8 @@ import { CameraTransition } from "./common/camera_transition.gen";
 export interface PBVirtualCamera {
     defaultTransition?: CameraTransition | undefined;
     lookAtEntity?: number | undefined;
+    /** default: 60 */
+    fov?: number | undefined;
 }
 /**
  * @public

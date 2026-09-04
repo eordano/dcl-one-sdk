@@ -26,27 +26,28 @@ pub async fn bundle(_project: &Project, _opts: &EsbuildOptions) -> Result<()> {
     .into())
 }
 
+/// `@dcl/sdk` is required; the rest alias to whichever of two install
+/// locations exists, if either does.
 pub fn resolve_aliases(project: &Project) -> Result<Vec<(String, PathBuf)>> {
-    let mut aliases = Vec::new();
-    let sdk = project.require_node_module("@dcl/sdk")?;
-    aliases.push(("@dcl/sdk".to_string(), sdk));
-    if let Some(ecs) = project
-        .node_module("@dcl/sdk/node_modules/@dcl/ecs")
-        .or_else(|| project.node_module("@dcl/ecs"))
-    {
-        aliases.push(("@dcl/ecs".to_string(), ecs));
-    }
-    if let Some(react) = project
-        .node_module("react")
-        .or_else(|| project.node_module("@dcl/react-ecs/node_modules/react"))
-    {
-        aliases.push(("react".to_string(), react));
-    }
-    if let Some(ap) = project
-        .node_module("@dcl/asset-packs")
-        .or_else(|| project.node_module("@dcl/inspector/node_modules/@dcl/asset-packs"))
-    {
-        aliases.push(("@dcl/asset-packs".to_string(), ap));
+    let mut aliases = vec![(
+        "@dcl/sdk".to_string(),
+        project.require_node_module("@dcl/sdk")?,
+    )];
+    for (name, first, second) in [
+        ("@dcl/ecs", "@dcl/sdk/node_modules/@dcl/ecs", "@dcl/ecs"),
+        ("react", "react", "@dcl/react-ecs/node_modules/react"),
+        (
+            "@dcl/asset-packs",
+            "@dcl/asset-packs",
+            "@dcl/inspector/node_modules/@dcl/asset-packs",
+        ),
+    ] {
+        if let Some(path) = project
+            .node_module(first)
+            .or_else(|| project.node_module(second))
+        {
+            aliases.push((name.to_string(), path));
+        }
     }
     Ok(aliases)
 }

@@ -8,7 +8,7 @@
 use super::SourceContext;
 use crate::scene::Project;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(700);
@@ -22,20 +22,23 @@ const LIMIT: u32 = 100;
 /// Below any real sequence number, so the next poll asks for the whole buffer.
 const REPLAY_FROM_START: i64 = -1;
 
+/// The `at` lines of an `Error` that unwound, which arrive ahead of the host's
+/// `stackTrace:`; a logged string has none before it.
+const OWN_STACK: &str = "\n    at ";
+
 /// What one poll's outcome means for the cursor.
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
-    /// First contact. Note where the buffer is and report nothing: a session
-    /// starting mid-run must not replay the client's whole history.
+    /// First contact: note where the buffer is and report nothing, so a
+    /// session starting mid-run does not replay the client's whole history.
     Anchor(i64),
-    /// The buffer went backwards, so this is a new client. Replay it whole,
-    /// and forget what was printed for the old one.
+    /// The buffer went backwards, so this is a new client: replay it whole and
+    /// forget what was printed for the old one.
     Restart,
-    /// Report what arrived and move on.
     Advance(i64),
     /// The poll failed. Change nothing: a client too busy to answer is exactly
     /// the one about to restart, and only a kept cursor can then see `latest`
-    /// go backwards. Forgetting it would silently anchor past the errors.
+    /// go backwards.
     Hold,
 }
 
@@ -82,13 +85,11 @@ impl Reader {
 
     async fn run(&mut self) {
         loop {
-            let (latest, entries) = match self.poll().await {
+            let polled = self.poll().await;
+            let delay = if polled.is_ok() { POLL } else { RETRY };
+            let (latest, entries) = match polled {
                 Ok((latest, entries)) => (Ok(latest), entries),
                 Err(()) => (Err(()), Vec::new()),
-            };
-            let delay = match latest.is_ok() {
-                true => POLL,
-                false => RETRY,
             };
             self.apply(step(self.cursor, latest), entries);
             tokio::time::sleep(delay).await;
@@ -208,15 +209,13 @@ struct Entry {
     body: String,
 }
 
-/// What the client actually recorded. The scene log carries both, under the
-/// same `SceneError:` prefix, and they are not the same event: a throw nobody
-/// caught is a broken scene, while a `console.error` is the scene talking.
-///
-/// The client's own WebSocket shim is the case that forced this apart — it
-/// `console.error`s and THEN throws (`WebSocketApi.js:152-154`), so a scene
-/// that correctly wraps `close()` in try/catch still gets the text logged.
-/// Printing that as an uncaught error blames the line that handled it, which
-/// is worse than saying nothing.
+/// What the client recorded. Both arrive under the same `SceneError:` prefix
+/// and are not the same event: a throw nobody caught is a broken scene, a
+/// `console.error` is the scene talking. The client's own WebSocket shim
+/// forced this apart — it `console.error`s and THEN throws
+/// (`WebSocketApi.js:152-154`), so a scene that correctly wraps `close()` in
+/// try/catch still gets the text logged; printing that as an uncaught error
+/// blames the line that handled it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// The message arrived with the error's own stack, so an `Error` unwound.
@@ -226,20 +225,27 @@ pub enum Origin {
 }
 
 impl Entry {
+    /// The text before the host's `stackTrace:`, and the trace after it.
+    fn split(&self) -> (&str, Option<&str>) {
+        match self.body.split_once(" stackTrace:") {
+            Some((head, tail)) => (head, Some(tail)),
+            None => (&self.body, None),
+        }
+    }
+
     /// The message, if this entry came from the scene's JavaScript. The
-    /// `SceneError:` prefix the runtime adds is the only `ReportCategory
-    /// .JAVASCRIPT` marker that survives into the tool's text; severity alone
-    /// would also match a GLTF load failure, which is the client's business.
+    /// `SceneError:` prefix is the only `ReportCategory.JAVASCRIPT` marker that
+    /// survives into the tool's text; severity alone would also match a GLTF
+    /// load failure, which is the client's business.
     fn scene_js_message(&self) -> Option<&str> {
         let rest = self
             .body
             .strip_prefix("SceneError:")
             .or_else(|| self.body.strip_prefix("SceneWarning:"))?;
-        let message = match rest.split_once(" stackTrace:") {
-            Some((head, _)) => head,
-            None => rest,
-        };
-        let headline = message.split("\n    at ").next().unwrap_or(message);
+        let message = rest
+            .split_once(" stackTrace:")
+            .map_or(rest, |(head, _)| head);
+        let headline = message.split(OWN_STACK).next().unwrap_or(message);
         Some(headline.trim())
     }
 
@@ -249,18 +255,11 @@ impl Entry {
         self.body.starts_with("SceneWarning:")
     }
 
-    /// An `Error` that unwound carries its own `at` frames ahead of the host's
-    /// `stackTrace:`; a logged string has nothing before it. This is the same
-    /// split [`Entry::frames`] already relies on to decide which trace to read,
-    /// named so the printer can use it too.
     fn origin(&self) -> Origin {
-        let head = match self.body.split_once(" stackTrace:") {
-            Some((head, _)) => head,
-            None => &self.body,
-        };
-        match head.contains("\n    at ") {
-            true => Origin::Thrown,
-            false => Origin::Logged,
+        if self.split().0.contains(OWN_STACK) {
+            Origin::Thrown
+        } else {
+            Origin::Logged
         }
     }
 
@@ -268,12 +267,10 @@ impl Entry {
     /// `e.stack` is where the throw happened; the host's `stackTrace:` is where
     /// `console.error` was called — our catch block, whatever the scene did.
     fn frames(&self) -> impl Iterator<Item = &str> {
-        let source = match self.body.split_once(" stackTrace:") {
-            Some((head, tail)) => match head.contains("\n    at ") {
-                true => head,
-                false => tail,
-            },
-            None => self.body.as_str(),
+        let (head, tail) = self.split();
+        let source = match tail {
+            Some(tail) if !head.contains(OWN_STACK) => tail,
+            _ => head,
         };
         source
             .lines()
@@ -365,7 +362,7 @@ fn parse_frame(raw: &str) -> Option<(String, u32, u32)> {
 
 /// Is this one of the chunks this project emits? Keeps a wire-supplied name
 /// from selecting anything else on disk.
-fn known_chunk(project: &Project, bundle: &PathBuf) -> bool {
+fn known_chunk(project: &Project, bundle: &Path) -> bool {
     let Ok(main) = project.main_output() else {
         return false;
     };
@@ -373,13 +370,13 @@ fn known_chunk(project: &Project, bundle: &PathBuf) -> bool {
     let smart = crate::split::smart_chunk_rel_path(&main);
     [sdk, scene, smart, main]
         .iter()
-        .any(|rel| project.root.join(rel) == *bundle)
+        .any(|rel| project.root.join(rel) == bundle)
 }
 
 /// Resolve a position through the bundle's inline source map. Preview bundles
 /// carry it with `sourcesContent`, so nothing is read from the source tree and
 /// a stale map can only produce a wrong line, never a wrong file.
-fn map_frame(bundle: &PathBuf, line: u32, col: u32, context: SourceContext) -> Option<Frame> {
+fn map_frame(bundle: &Path, line: u32, col: u32, context: SourceContext) -> Option<Frame> {
     let code = std::fs::read_to_string(bundle).ok()?;
     let json = inline_map(&code)?;
     let map = oxc_sourcemap::SourceMap::from_json_string(&json).ok()?;

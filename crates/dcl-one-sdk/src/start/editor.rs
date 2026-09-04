@@ -1,6 +1,5 @@
-use super::{
-    data_layer_origin_allowed, forwarded_host, forwarded_prefix, forwarded_proto, AppState,
-};
+use super::http::preview_ws_origin;
+use super::{data_layer_origin_allowed, forwarded_prefix, AppState};
 use crate::data_layer;
 use crate::joinblock;
 use crate::netinfo;
@@ -50,10 +49,8 @@ fn editor_disabled() -> Response {
         .into_response()
 }
 
-/// The data layer is up but there is no browser bundle to serve from it.
-///
-/// This is the default state now: the blob ships the data-layer host and not
-/// the 18 MB editor UI. `/data-layer` works; only `/inspector/*` does not.
+/// The default state: the blob ships the data-layer host and not the 18 MB
+/// editor UI, so `/data-layer` works and only `/inspector/*` does not.
 fn editor_ui_missing() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -62,6 +59,12 @@ fn editor_ui_missing() -> Response {
          DCL_ONE_INSPECTOR_DIR=<path-to-an-@dcl/inspector-package>",
     )
         .into_response()
+}
+
+/// The inspector's browser bundle, or the response saying why there is none.
+fn ui_dir(st: &AppState) -> Result<&Path, Response> {
+    let dl = st.data_layer.as_ref().ok_or_else(editor_disabled)?;
+    dl.public_dir.as_deref().ok_or_else(editor_ui_missing)
 }
 
 pub(super) async fn data_layer_ws(State(st): State<Arc<AppState>>, req: Request) -> Response {
@@ -147,32 +150,13 @@ pub(super) async fn inspector_redirect(headers: HeaderMap) -> Response {
     Redirect::permanent(&format!("{prefix}/inspector/")).into_response()
 }
 
-fn editor_ws_url(headers: &HeaderMap) -> String {
-    let host = forwarded_host(headers).unwrap_or_else(|| {
-        headers
-            .get(header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("127.0.0.1")
-            .to_string()
-    });
-    let ws_proto = if forwarded_proto(headers) == "https" {
-        "wss"
-    } else {
-        "ws"
-    };
-    let prefix = forwarded_prefix(headers);
-    format!("{ws_proto}://{host}{prefix}/data-layer")
-}
-
 pub(super) async fn inspector_index(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(dl) = &st.data_layer else {
-        return editor_disabled();
-    };
-    let Some(public_dir) = &dl.public_dir else {
-        return editor_ui_missing();
+    let public_dir = match ui_dir(&st) {
+        Ok(dir) => dir,
+        Err(resp) => return resp,
     };
     let index = public_dir.join("index.html");
     let html = match tokio::fs::read_to_string(&index).await {
@@ -185,7 +169,8 @@ pub(super) async fn inspector_index(
                 .into_response()
         }
     };
-    let config = data_layer::inspector_config_json(&editor_ws_url(&headers));
+    let ws_url = format!("{}/data-layer", preview_ws_origin(&headers));
+    let config = data_layer::inspector_config_json(&ws_url);
     let body = data_layer::inject_config(&html, &config);
     (
         [
@@ -202,15 +187,13 @@ pub(super) async fn inspector_asset(
     AxPath(path): AxPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(dl) = &st.data_layer else {
-        return editor_disabled();
+    let public_dir = match ui_dir(&st) {
+        Ok(dir) => dir,
+        Err(resp) => return resp,
     };
     if path.is_empty() || path == "index.html" {
         return inspector_index(State(st.clone()), headers).await;
     }
-    let Some(public_dir) = &dl.public_dir else {
-        return editor_ui_missing();
-    };
     let Some(asset) = data_layer::resolve_asset(public_dir, &path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };

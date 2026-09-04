@@ -1,15 +1,14 @@
-//! Browser signing for world-management requests.
-//!
-//! The deploy linker (`crate::linker`) signs an entity id. This one signs the
-//! ADR signed-fetch payload (`method:path:timestamp:{}`) that world settings
-//! and permission changes authenticate with, so granting a deploy key no
-//! longer requires exporting the owner's private key.
+//! Browser signing for world-management requests: the ADR signed-fetch
+//! payload (`method:path:timestamp:{}`) that world settings and permission
+//! changes authenticate with, so granting a deploy key never requires
+//! exporting the owner's private key.
 //!
 //! Unlike the deploy flow, a rejection here is usually "wrong wallet
-//! connected" rather than "the deployment is broken", so 401/403 keeps the
-//! page alive and invites another attempt instead of killing the CLI.
+//! connected", so 401/403 keeps the page alive and invites another attempt
+//! instead of killing the CLI.
 
-use crate::linker::{fmt_wait, linker_bind_host, spawn_browser, LinkerOptions};
+use crate::deploy::{caused, read_server_message, refusal};
+use crate::linker::{finish, fmt_wait, linker_bind_host, spawn_browser, DoneSender, LinkerOptions};
 use crate::ux::{self, TrySteps, UserError};
 use crate::world::{browser_headers, signed_fetch_payload, WorldAction};
 use anyhow::{Context, Result};
@@ -23,7 +22,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 pub struct WorldSignRequest {
     pub base: String,
@@ -31,11 +29,9 @@ pub struct WorldSignRequest {
     pub action: WorldAction,
 }
 
-type DoneSender = tokio::sync::oneshot::Sender<Result<String>>;
-
 pub struct WorldLinkerState {
     req: WorldSignRequest,
-    /// Payloads minted by /api/info and not yet spent. Bounded so a page left
+    /// Payloads minted by /api/info and not yet spent; bounded so a page left
     /// reloading cannot grow it without limit.
     pending: Mutex<HashSet<String>>,
     done: Mutex<Option<DoneSender>>,
@@ -131,43 +127,31 @@ async fn sign(State(st): State<Arc<WorldLinkerState>>, Json(req): Json<SignReq>)
         Ok((status, body)) if (200..300).contains(&status) => {
             r.action.print_body(&body);
             let message = r.action.success(&r.name);
-            finish(&st, Ok(message.clone()));
+            finish(&st.done, Ok(message.clone()));
             Json(json!({ "ok": true, "message": message }))
         }
         Ok((status, body)) => {
             let detail = body.trim();
+            let tail = if detail.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{detail}")
+            };
             let expired = is_expired_signature(detail);
             let retryable = expired || status == 401 || status == 403;
             let error = if expired {
                 format!(
-                    "the signature expired before it reached the server \u{2014} it is only valid for about a minute.{}",
-                    if detail.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\n\n{detail}")
-                    }
+                    "the signature expired before it reached the server \u{2014} it is only valid for about a minute.{tail}"
                 )
             } else if retryable {
                 format!(
-                    "the worlds server refused this request (HTTP {status}) — {} is not allowed to {} on {}.{}",
+                    "the worlds server refused this request (HTTP {status}) — {} is not allowed to {} on {}.{tail}",
                     req.address,
                     r.action.summary(),
                     r.name,
-                    if detail.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\n\n{detail}")
-                    }
                 )
             } else {
-                format!(
-                    "the worlds server rejected this request (HTTP {status}){}",
-                    if detail.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\n\n{detail}")
-                    }
-                )
+                format!("the worlds server rejected this request (HTTP {status}){tail}")
             };
             if !retryable {
                 let err = UserError::new(
@@ -175,15 +159,9 @@ async fn sign(State(st): State<Arc<WorldLinkerState>>, Json(req): Json<SignReq>)
                         "the worlds server refused to {} (HTTP {status})",
                         r.action.summary()
                     ),
-                    TrySteps::one("read the server message above")
-                        .and("re-run with --verbose for the full response"),
+                    read_server_message(),
                 );
-                let err = if detail.is_empty() {
-                    err
-                } else {
-                    err.why(detail.to_string())
-                };
-                finish(&st, Err(err.into()));
+                finish(&st.done, Err(refusal(err, detail)));
             }
             Json(json!({
                 "ok": false,
@@ -194,37 +172,21 @@ async fn sign(State(st): State<Arc<WorldLinkerState>>, Json(req): Json<SignReq>)
         }
         Err(e) => {
             let msg = format!("{e:#}");
-            finish(&st, Err(e));
+            finish(&st.done, Err(e));
             Json(json!({ "ok": false, "fatal": true, "error": msg }))
         }
     }
 }
 
-/// Does this server response mean the signed-fetch timestamp aged out?
-///
 /// The worlds server answers an expired payload with an "Expired signature"
-/// error; matching on that (rather than on the status code, which is a plain
-/// 401) is what lets the page distinguish "sign again" from "wrong wallet".
+/// error on a plain 401; matching the body is what tells "sign again" from
+/// "wrong wallet".
 fn is_expired_signature(body: &str) -> bool {
     let lower = body.to_lowercase();
     lower.contains("expired signature") || lower.contains("timestamp expiration")
 }
 
-fn finish(st: &Arc<WorldLinkerState>, result: Result<String>) {
-    let tx = st
-        .done
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take();
-    if let Some(tx) = tx {
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let _ = tx.send(result);
-        });
-    }
-}
-
-fn timeout_error(timeout: Duration, url: &str, summary: &str) -> anyhow::Error {
+fn timeout_error(timeout: std::time::Duration, url: &str, summary: &str) -> anyhow::Error {
     UserError::new(
         format!(
             "no signature arrived within {} \u{2014} request abandoned",
@@ -247,18 +209,13 @@ pub async fn run(req: WorldSignRequest, opts: LinkerOptions) -> Result<String> {
     let loopback = bind_host == "127.0.0.1";
     let listener = tokio::net::TcpListener::bind((bind_host.as_str(), opts.port.unwrap_or(0)))
         .await
-        .map_err(|e| {
-            anyhow::Error::from(
-                UserError::new(
-                    match opts.port {
-                        Some(p) => format!("port {p} cannot be opened for the signing page"),
-                        None => "no port could be opened for the signing page".to_string(),
-                    },
-                    TrySteps::one("pass --port <free-port> or free the port and retry"),
-                )
-                .caused_by(e),
-            )
-        })?;
+        .map_err(caused(
+            match opts.port {
+                Some(p) => format!("port {p} cannot be opened for the signing page"),
+                None => "no port could be opened for the signing page".to_string(),
+            },
+            TrySteps::one("pass --port <free-port> or free the port and retry"),
+        ))?;
     let port = listener
         .local_addr()
         .context("reading the signing page port")?
@@ -435,25 +392,44 @@ mod tests {
         (base, rx, handle)
     }
 
-    #[tokio::test]
-    async fn info_describes_the_permission_change_and_mints_a_signable_payload() {
-        let (base, _rx, handle) = serve(permission_request("http://127.0.0.1:9")).await;
-        let client = reqwest::Client::new();
-
-        let page = client.get(format!("{base}/")).send().await.unwrap();
-        assert_eq!(page.status().as_u16(), 200);
-        let body = page.text().await.unwrap();
-        assert!(body.contains("personal_sign"));
-        assert!(body.contains("api/info"));
-
-        let info: Value = client
+    async fn get_info(base: &str) -> Value {
+        reqwest::Client::new()
             .get(format!("{base}/api/info"))
             .send()
             .await
             .unwrap()
             .json()
             .await
+            .unwrap()
+    }
+
+    async fn post_sign(base: &str, body: &Value) -> Value {
+        reqwest::Client::new()
+            .post(format!("{base}/api/sign"))
+            .json(body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn info_describes_the_permission_change_and_mints_a_signable_payload() {
+        let (base, _rx, handle) = serve(permission_request("http://127.0.0.1:9")).await;
+
+        let page = reqwest::Client::new()
+            .get(format!("{base}/"))
+            .send()
+            .await
             .unwrap();
+        assert_eq!(page.status().as_u16(), 200);
+        let body = page.text().await.unwrap();
+        assert!(body.contains("personal_sign"));
+        assert!(body.contains("api/info"));
+
+        let info = get_info(&base).await;
         assert_eq!(info["world"], "Test.dcl.eth");
         assert_eq!(info["method"], "PUT");
         assert_eq!(
@@ -480,15 +456,11 @@ mod tests {
     #[tokio::test]
     async fn a_stale_payload_is_rejected_without_killing_the_cli() {
         let (base, _rx, handle) = serve(permission_request("http://127.0.0.1:9")).await;
-        let stale: Value = reqwest::Client::new()
-            .post(format!("{base}/api/sign"))
-            .json(&json!({"address":"0x0","signature":"0x0","payload":"put:/nope:1:{}"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let stale = post_sign(
+            &base,
+            &json!({"address":"0x0","signature":"0x0","payload":"put:/nope:1:{}"}),
+        )
+        .await;
         assert_eq!(stale["ok"], false);
         assert_eq!(stale["fatal"], false);
         handle.abort();
@@ -497,31 +469,19 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_server_is_fatal_and_resolves_the_cli() {
         let (base, rx, handle) = serve(permission_request("http://127.0.0.1:9")).await;
-        let client = reqwest::Client::new();
-        let info: Value = client
-            .get(format!("{base}/api/info"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let info = get_info(&base).await;
         let payload = info["payload"].as_str().unwrap().to_string();
         let signer = crate::random_test_wallet();
         let sig = signer.sign_message(payload.as_bytes()).unwrap();
-        let resp: Value = client
-            .post(format!("{base}/api/sign"))
-            .json(&json!({
+        let resp = post_sign(
+            &base,
+            &json!({
                 "address": signer.address(),
                 "signature": sig,
                 "payload": payload,
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+            }),
+        )
+        .await;
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["fatal"], true);
         assert!(rx.await.unwrap().is_err());
@@ -535,25 +495,12 @@ mod tests {
             name: "Test.dcl.eth".to_string(),
             action: WorldAction::SettingsSet(SettingsUpdate {
                 title: Some("New Title".to_string()),
-                description: None,
-                content_rating: None,
-                spawn_coordinates: None,
-                skybox_time: None,
                 single_player: Some(true),
-                show_in_places: None,
-                categories: Vec::new(),
-                thumbnail: None,
+                ..Default::default()
             }),
         };
         let (base, _rx, handle) = serve(req).await;
-        let info: Value = reqwest::Client::new()
-            .get(format!("{base}/api/info"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let info = get_info(&base).await;
         let details: Vec<String> = info["details"]
             .as_array()
             .unwrap()

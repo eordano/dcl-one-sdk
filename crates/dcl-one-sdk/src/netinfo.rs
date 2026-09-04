@@ -49,14 +49,14 @@ pub fn classify(name: &str, ip: Ipv4Addr) -> IfaceClass {
 }
 
 pub fn enumerate() -> Vec<Iface> {
-    let mut out: Vec<Iface> = Vec::new();
-    if let Ok(addrs) = if_addrs::get_if_addrs() {
-        for a in addrs {
-            if let std::net::IpAddr::V4(ip) = a.ip() {
-                out.push(Iface::new(&a.name, ip));
-            }
-        }
-    }
+    let mut out: Vec<Iface> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| match a.ip() {
+            std::net::IpAddr::V4(ip) => Some(Iface::new(&a.name, ip)),
+            _ => None,
+        })
+        .collect();
     out.sort_by_key(|i| i.class);
     out
 }
@@ -85,20 +85,25 @@ mod tests {
 
     #[test]
     fn classify_covers_every_class() {
-        assert_eq!(classify("lo", ip("127.0.0.1")), IfaceClass::Loopback);
-        assert_eq!(classify("eth0", ip("10.1.2.20")), IfaceClass::Lan);
-        assert_eq!(classify("eth0", ip("10.1.2.3")), IfaceClass::Lan);
-        assert_eq!(classify("eth0", ip("172.16.0.5")), IfaceClass::Lan);
-        assert_eq!(classify("eth0", ip("203.0.113.9")), IfaceClass::Lan);
-        assert_eq!(classify("eth1", ip("169.254.7.42")), IfaceClass::LinkLocal);
-        assert_eq!(classify("wg0", ip("100.101.102.103")), IfaceClass::Overlay);
-        assert_eq!(classify("wg0", ip("100.127.255.1")), IfaceClass::Overlay);
-        assert_eq!(classify("eth0", ip("100.128.0.1")), IfaceClass::Lan);
-        assert_eq!(classify("docker0", ip("172.17.0.1")), IfaceClass::Bridge);
-        assert_eq!(classify("virbr0", ip("10.88.0.1")), IfaceClass::Bridge);
-        assert_eq!(classify("br-abc123", ip("10.9.0.1")), IfaceClass::Bridge);
-        assert_eq!(classify("veth99", ip("10.9.0.2")), IfaceClass::Bridge);
-        assert_eq!(classify("eth0", ip("172.20.0.7")), IfaceClass::Bridge);
+        use IfaceClass::*;
+        for (name, addr, class) in [
+            ("lo", "127.0.0.1", Loopback),
+            ("eth0", "10.1.2.20", Lan),
+            ("eth0", "10.1.2.3", Lan),
+            ("eth0", "172.16.0.5", Lan),
+            ("eth0", "203.0.113.9", Lan),
+            ("eth1", "169.254.7.42", LinkLocal),
+            ("wg0", "100.101.102.103", Overlay),
+            ("wg0", "100.127.255.1", Overlay),
+            ("eth0", "100.128.0.1", Lan),
+            ("docker0", "172.17.0.1", Bridge),
+            ("virbr0", "10.88.0.1", Bridge),
+            ("br-abc123", "10.9.0.1", Bridge),
+            ("veth99", "10.9.0.2", Bridge),
+            ("eth0", "172.20.0.7", Bridge),
+        ] {
+            assert_eq!(classify(name, ip(addr)), class, "{name} {addr}");
+        }
     }
 
     #[test]

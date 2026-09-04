@@ -18,6 +18,8 @@ pub fn world_name(scene_json: &Value) -> Option<String> {
         .get("worldConfiguration")
         .and_then(|w| w.get("name"))
         .and_then(|n| n.as_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
         .map(str::to_string)
 }
 
@@ -67,16 +69,13 @@ pub struct JoinBlock {
     /// Pre-encoded `&key=value...`, appended verbatim to every desktop link.
     pub deep_link_extra: String,
     pub native_hud: bool,
-    /// Native bevy client binary found on this machine (see
-    /// [`detect_native_bin`]); None prints the generic `bevy-explorer` name.
+    /// From [`detect_native_bin`]; None prints the generic `bevy-explorer` name.
     pub native_bin: Option<String>,
 }
 
-/// The native bevy client installed on this machine, if any: an explicit
-/// `DCL_ONE_NATIVE_BIN` wins, else `decentra-bevy` (the upstream bevy-explorer
-/// binary name) is looked up on PATH. Upstream rejects unknown flags, so the
-/// printed command must also drop the fork-only `--hud` for it — native_cmd
-/// keys that on the binary name.
+/// An explicit `DCL_ONE_NATIVE_BIN` wins, else `decentra-bevy` (the upstream
+/// bevy-explorer binary) is looked up on PATH. Upstream rejects unknown flags,
+/// so `native_cmd` drops the fork-only `--hud` when it prints that name.
 pub fn detect_native_bin() -> Option<String> {
     if let Ok(explicit) = std::env::var("DCL_ONE_NATIVE_BIN") {
         if !explicit.is_empty() {
@@ -129,19 +128,15 @@ pub fn parse_passthrough_params(tokens: &[String]) -> Vec<(String, String)> {
     params
 }
 
-/// The port the Explorer's own MCP server picks when the deep link names none
-/// (`McpServerPlugin.DEFAULT_PORT`). Sending it explicitly costs nothing and
-/// means the preview polls the port the client actually opened, rather than
-/// both sides guessing the same constant independently.
+/// The Explorer's own MCP default (`McpServerPlugin.DEFAULT_PORT`); sent
+/// explicitly so the preview polls the port the client actually opened.
 pub const DEFAULT_EXPLORER_MCP_PORT: u16 = 8123;
 
 /// Declared flags and core keys beat passthrough, as upstream's `params.has`
-/// merge; per-row keys (`multi-instance`) dedupe in `desktop_link_with`.
-///
-/// Both guards compare case-insensitively: the client reads the deep link with
-/// `HttpUtility.ParseQueryString`, whose keys are case-insensitive, so a
-/// passthrough `--REALM=…` would otherwise collide with our own `realm=` and be
-/// handed to the client as the comma-joined value of one key.
+/// merge; per-row keys (`multi-instance`) dedupe in `desktop_link`. Both guards
+/// compare case-insensitively because the client reads the deep link with
+/// `HttpUtility.ParseQueryString`, whose keys are case-insensitive: a
+/// passthrough `--REALM=…` would merge into our `realm=` as one comma-joined value.
 pub fn deep_link_extra(
     local_ab: bool,
     mcp: bool,
@@ -179,15 +174,14 @@ pub fn deep_link_extra(
         .collect()
 }
 
-/// The engine's default startup portable: its baked public world host is
+/// The engine's default startup portable; its baked public world host is
 /// CORS-blocked from a foreign web-explorer origin, so `portables=` repoints
 /// it at the realm's own same-origin `/world/…` mirror.
 pub const CONTROLLER_WORLD: &str = "basiccontroller.dcl.eth";
 
-/// Percent-encodes everything a query value must not carry raw (`&`, `=`, `?`,
-/// `#`, `%`, space, …) while leaving `:` `/` `,` `-` `.` `_` `~` alone, so the
-/// printed URL stays copy-pasteable. `form_encode` would escape the `://` of
-/// every realm and make these rows unreadable.
+/// Percent-encodes what a query value must not carry raw while leaving `:`
+/// `/` `,` alone, so the printed URL stays readable (`form_encode` would
+/// escape every realm's `://`).
 fn query_value_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -255,6 +249,11 @@ pub fn swap_url_host(url: &str, host: impl std::fmt::Display) -> String {
     }
 }
 
+/// One `  label:   value` line; labels pad to the width of `desktop:`.
+fn row(out: &mut String, label: &str, value: impl std::fmt::Display) {
+    out.push_str(&format!("  {label:<9} {value}\n"));
+}
+
 impl JoinBlock {
     pub fn heading(&self) -> String {
         format!(
@@ -277,20 +276,16 @@ impl JoinBlock {
         let mut out = String::new();
         self.push_interface_rows(&mut out);
         self.push_warnings(&mut out);
-        let realm = format!("http://127.0.0.1:{}", self.port);
+        let realm = self.local_realm();
         out.push('\n');
-        if self.editor {
-            out.push_str(&format!("  editor:   {realm}/inspector/\n"));
-        }
-        out.push_str(&format!("  desktop:  {}\n", self.desktop_link(&realm)));
+        self.push_editor_row(&mut out, &realm);
+        row(&mut out, "desktop:", self.desktop_link(&realm, ""));
         if self.native_bin.is_some() {
-            out.push_str(&format!("  native:   {}\n", self.native_cmd(&realm)));
+            row(&mut out, "native:", self.native_cmd(&realm));
         }
         if self.qr == QrMode::Print {
             if let Some(ip) = share_ip(&self.ifaces) {
-                let lan_realm = self.realm(ip);
-                out.push_str("  mobile:   scan to open in the Decentraland mobile app:\n");
-                self.push_mobile_qr(&mut out, &lan_realm);
+                self.push_mobile_qr(&mut out, &self.realm(ip));
             }
         }
         out
@@ -304,15 +299,17 @@ impl JoinBlock {
         format!("http://{ip}:{}", self.port)
     }
 
+    fn local_realm(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
     fn web_url(&self, realm: &str) -> String {
         web_join_url(&self.web_explorer, realm, self.position)
     }
 
-    fn desktop_link(&self, realm: &str) -> String {
-        self.desktop_link_with(realm, "")
-    }
-
-    fn desktop_link_with(&self, realm: &str, extra: &str) -> String {
+    /// Keys in the row's own `extra` drop the same key from the shared
+    /// `deep_link_extra`, so a passthrough `multi-instance` is never doubled.
+    fn desktop_link(&self, realm: &str, extra: &str) -> String {
         let row_keys: Vec<&str> = extra
             .split('&')
             .filter(|kv| !kv.is_empty())
@@ -335,8 +332,6 @@ impl JoinBlock {
 
     fn native_cmd(&self, realm: &str) -> String {
         let bin = self.native_bin.as_deref().unwrap_or("bevy-explorer");
-        // --hud is the fork's webkit-overlay flag; upstream decentra-bevy
-        // errors out on flags it does not know.
         let hud = if self.native_hud && bin == "bevy-explorer" {
             " --hud"
         } else {
@@ -348,12 +343,14 @@ impl JoinBlock {
         )
     }
 
-    fn mobile_link(&self, realm: &str) -> String {
-        mobile_deep_link(realm, self.position)
+    fn push_editor_row(&self, out: &mut String, realm: &str) {
+        if self.editor {
+            row(out, "editor:", format!("{realm}/inspector/"));
+        }
     }
 
-    fn rows(&self) -> Vec<(String, String, &'static str)> {
-        let mut rows = Vec::new();
+    fn push_interface_rows(&self, out: &mut String) {
+        let mut rows: Vec<(&str, String, &str)> = Vec::new();
         for i in &self.ifaces {
             let (label, note) = match i.class {
                 IfaceClass::Loopback => ("Local:", ""),
@@ -365,19 +362,14 @@ impl JoinBlock {
                 ),
                 IfaceClass::LinkLocal => continue,
             };
-            rows.push((label.to_string(), self.realm(i.ip), note));
+            rows.push((label, self.realm(i.ip), note));
         }
-        rows
-    }
-
-    fn push_interface_rows(&self, out: &mut String) {
-        let rows = self.rows();
         let width = rows.iter().map(|(_, url, _)| url.len()).max().unwrap_or(0);
         for (label, url, note) in &rows {
             if note.is_empty() {
-                out.push_str(&format!("  {label:<9} {url}\n"));
+                row(out, label, url);
             } else {
-                out.push_str(&format!("  {label:<9} {url:<width$}  ({note})\n"));
+                row(out, label, format!("{url:<width$}  ({note})"));
             }
         }
     }
@@ -401,19 +393,18 @@ impl JoinBlock {
     }
 
     fn push_local_section(&self, out: &mut String) {
-        let realm = format!("http://127.0.0.1:{}", self.port);
+        let realm = self.local_realm();
         out.push_str("\nJoin from THIS machine\n");
-        if self.editor {
-            out.push_str(&format!("  editor:   {realm}/inspector/\n"));
-        }
-        out.push_str(&format!("  web:      {}\n", self.web_url(&realm)));
+        self.push_editor_row(out, &realm);
+        row(out, "web:", self.web_url(&realm));
         self.push_local_network_access_note(out);
-        out.push_str(&format!("  desktop:  {}\n", self.desktop_link(&realm)));
-        out.push_str(&format!(
-            "  desktop (2nd instance): {}\n",
-            self.desktop_link_with(&realm, "&multi-instance=true")
-        ));
-        out.push_str(&format!("  native:   {}\n", self.native_cmd(&realm)));
+        row(out, "desktop:", self.desktop_link(&realm, ""));
+        row(
+            out,
+            "desktop (2nd instance):",
+            self.desktop_link(&realm, "&multi-instance=true"),
+        );
+        row(out, "native:", self.native_cmd(&realm));
         out.push_str(
             "  note: an Explorer already running SWALLOWS the plain desktop link \u{2014} it comes\n        to the front still on its old realm. Quit it first, or use the 2nd-instance\n        link above.\n",
         );
@@ -432,24 +423,23 @@ impl JoinBlock {
         let realm = self.realm(ip);
         let port = self.port;
         out.push_str("\nJoin from another device on this network\n");
-        if self.editor {
-            out.push_str(&format!("  editor:   {realm}/inspector/\n"));
-        }
+        self.push_editor_row(out, &realm);
         let lan_assets = self
             .optimized_assets_url
             .as_deref()
             .map(|u| swap_url_host(u, ip));
-        out.push_str(&format!(
-            "  desktop:  {}\n",
+        row(
+            out,
+            "desktop:",
             desktop_deep_link(
                 &realm,
                 self.position,
                 lan_assets.as_deref(),
-                &self.deep_link_extra
-            )
-        ));
-        out.push_str(&format!("  native:   {}\n", self.native_cmd(&realm)));
-        out.push_str(&format!("  web:      {}\n", self.web_url(&realm)));
+                &self.deep_link_extra,
+            ),
+        );
+        row(out, "native:", self.native_cmd(&realm));
+        row(out, "web:", self.web_url(&realm));
         if web_origin(&self.web_explorer).is_some() {
             out.push_str(
                 "  ! the Local Network Access \"Allow\" described above must be granted on\n    the JOINING device's Chrome/Edge \u{2014} that browser is the one blocked.\n",
@@ -459,20 +449,20 @@ impl JoinBlock {
             "  ! browsers other than Chrome/Edge block http:// realms from the https\n    explorer (mixed content). Workarounds: the mobile-app QR, a native\n    client, or on the joining PC run\n    ssh -L {port}:127.0.0.1:{port} <user>@<this-machine>\n    and join with realm=http://127.0.0.1:{port}\n"
         ));
         match self.qr {
-            QrMode::Print => {
-                out.push_str("  mobile:   scan to open in the Decentraland mobile app:\n");
-                self.push_mobile_qr(out, &realm);
-            }
-            QrMode::Hint => {
-                out.push_str(&format!(
-                    "  mobile:   re-run with --mobile for a scan-to-join QR code\n            (also served at http://{ip}:{port}/mobile-preview)\n"
-                ));
-            }
+            QrMode::Print => self.push_mobile_qr(out, &realm),
+            QrMode::Hint => out.push_str(&format!(
+                "  mobile:   re-run with --mobile for a scan-to-join QR code\n            (also served at http://{ip}:{port}/mobile-preview)\n"
+            )),
         }
     }
 
     fn push_mobile_qr(&self, out: &mut String, realm: &str) {
-        let link = self.mobile_link(realm);
+        row(
+            out,
+            "mobile:",
+            "scan to open in the Decentraland mobile app:",
+        );
+        let link = mobile_deep_link(realm, self.position);
         match qr_unicode(&link) {
             Some(qr) => {
                 out.push('\n');
@@ -502,8 +492,10 @@ impl JoinBlock {
             return;
         }
         out.push_str("\nJoin from the internet\n");
-        out.push_str(
-            "  tunnel:   dcl-one-sdk start --tunnel wss://<tunnel-host>   (public https realm)\n",
+        row(
+            out,
+            "tunnel:",
+            "dcl-one-sdk start --tunnel wss://<tunnel-host>   (public https realm)",
         );
         out.push_str(
             "  no tunnel service? dcl-one-sdk start --tunnel help   prints a zero-infra ssh -R recipe\n",
@@ -514,18 +506,13 @@ impl JoinBlock {
         let realm = public_url.trim_end_matches('/');
         let mut out = String::new();
         out.push_str("\nJoin from the INTERNET \u{2014} tunnel connected\n");
-        out.push_str(&format!("  realm:    {realm}\n"));
-        out.push_str(&format!("  web:      {}\n", self.web_url(realm)));
-        out.push_str(&format!("  desktop:  {}\n", self.desktop_link(realm)));
-        out.push_str(&format!("  native:   {}\n", self.native_cmd(realm)));
+        row(&mut out, "realm:", realm);
+        row(&mut out, "web:", self.web_url(realm));
+        row(&mut out, "desktop:", self.desktop_link(realm, ""));
+        row(&mut out, "native:", self.native_cmd(realm));
         match self.qr {
-            QrMode::Print => {
-                out.push_str("  mobile:   scan to open in the Decentraland mobile app:\n");
-                self.push_mobile_qr(&mut out, realm);
-            }
-            QrMode::Hint => {
-                out.push_str(&format!("  mobile:   {}\n", self.mobile_link(realm)));
-            }
+            QrMode::Print => self.push_mobile_qr(&mut out, realm),
+            QrMode::Hint => row(&mut out, "mobile:", mobile_deep_link(realm, self.position)),
         }
         out
     }
@@ -597,11 +584,15 @@ mod tests {
         ]
     }
 
+    fn full_block() -> JoinBlock {
+        block(full_ifaces(), QrMode::Hint)
+    }
+
     #[test]
     fn editor_rows_print_only_with_data_layer() {
-        let plain = block(full_ifaces(), QrMode::Hint).render();
+        let plain = full_block().render();
         assert!(!plain.contains("editor:"));
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         b.editor = true;
         let out = b.render();
         assert!(out.contains("  editor:   http://127.0.0.1:5600/inspector/\n"));
@@ -611,14 +602,26 @@ mod tests {
     #[test]
     fn heading_names_scene_and_position() {
         assert_eq!(
-            block(full_ifaces(), QrMode::Hint).heading(),
+            full_block().heading(),
             "Preview server ready \u{2014} scene \"cube spawner\" at 52,-68"
         );
     }
 
     #[test]
+    fn a_blank_world_name_is_no_world() {
+        assert_eq!(
+            world_name(&serde_json::json!({ "worldConfiguration": { "name": "" } })),
+            None
+        );
+        assert_eq!(
+            world_name(&serde_json::json!({ "worldConfiguration": { "name": " a.dcl.eth " } })),
+            Some("a.dcl.eth".to_string())
+        );
+    }
+
+    #[test]
     fn rows_classify_and_skip_link_local() {
-        let out = block(full_ifaces(), QrMode::Hint).render();
+        let out = full_block().render();
         assert!(out.contains("  Local:    http://127.0.0.1:5600\n"));
         assert!(out.contains("  Network:  http://10.1.2.20:5600"));
         assert!(out.contains("(overlay/VPN network)"));
@@ -628,7 +631,7 @@ mod tests {
 
     #[test]
     fn compact_body_is_addresses_and_one_deeplink() {
-        let out = block(full_ifaces(), QrMode::Hint).compact_body();
+        let out = full_block().compact_body();
         assert!(out.contains("  Local:    http://127.0.0.1:5600\n"));
         assert!(out.contains("  Network:  http://10.1.2.20:5600"));
         assert!(out.contains(
@@ -663,7 +666,7 @@ mod tests {
 
     #[test]
     fn lan_desktop_link_rehosts_the_optimized_assets_url() {
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         b.optimized_assets_url = Some("http://127.0.0.1:5147".to_string());
         let out = b.render();
         assert!(out.contains(
@@ -698,7 +701,7 @@ mod tests {
 
     #[test]
     fn deep_link_grammars_are_pinned() {
-        let out = block(full_ifaces(), QrMode::Hint).render();
+        let out = full_block().render();
         assert!(out.contains(
             "desktop:  decentraland://realm=http%3A%2F%2F127.0.0.1%3A5600&position=52%2C-68&local-scene=true&dclenv=org"
         ));
@@ -723,7 +726,7 @@ mod tests {
 
     #[test]
     fn lan_web_row_carries_the_mixed_content_warning() {
-        let out = block(full_ifaces(), QrMode::Hint).render();
+        let out = full_block().render();
         assert!(out.contains("browsers other than Chrome/Edge block http:// realms"));
         assert!(out.contains("ssh -L 5600:127.0.0.1:5600 <user>@<this-machine>"));
         assert!(out.contains("realm=http://127.0.0.1:5600"));
@@ -731,7 +734,7 @@ mod tests {
 
     #[test]
     fn hint_mode_points_at_mobile_flag_and_endpoint() {
-        let out = block(full_ifaces(), QrMode::Hint).render();
+        let out = full_block().render();
         assert!(out.contains("re-run with --mobile for a scan-to-join QR code"));
         assert!(out.contains("http://10.1.2.20:5600/mobile-preview"));
         assert!(!out.contains("decentraland://open?preview="));
@@ -773,7 +776,7 @@ mod tests {
 
     #[test]
     fn unreachable_probe_result_prints_firewall_warning() {
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         b.unreachable = vec!["10.1.2.20".parse().unwrap()];
         let out = b.render();
         assert!(out.contains("! could not reach 10.1.2.20:5600 from this host itself"));
@@ -816,7 +819,7 @@ mod tests {
 
     #[test]
     fn tunnel_hint_prints_only_when_enabled() {
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         assert!(!b.render().contains("Join from the internet"));
         b.tunnel_hint = true;
         let out = b.render();
@@ -827,8 +830,7 @@ mod tests {
 
     #[test]
     fn internet_section_pins_public_realm_grammars() {
-        let b = block(full_ifaces(), QrMode::Hint);
-        let out = b.internet_section("https://tunnel.example/t/abc123defg/");
+        let out = full_block().internet_section("https://tunnel.example/t/abc123defg/");
         assert!(out.contains("Join from the INTERNET \u{2014} tunnel connected"));
         assert!(out.contains("  realm:    https://tunnel.example/t/abc123defg\n"));
         assert!(out.contains(
@@ -847,7 +849,7 @@ mod tests {
 
     #[test]
     fn native_hud_flag_is_omitted_when_disabled() {
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         b.native_hud = false;
         let out = b.render();
         assert!(out.contains(
@@ -922,9 +924,8 @@ mod tests {
         assert_eq!(extra, "&mcp=true&custom=a+b");
     }
 
-    /// The client parses the deep link with `HttpUtility.ParseQueryString`,
-    /// which is case-insensitive: a surviving `REALM=` would not sit beside our
-    /// `realm=`, it would merge into it as `ours,theirs`.
+    /// `HttpUtility.ParseQueryString` is case-insensitive: a surviving `REALM=`
+    /// would merge into our `realm=` as `ours,theirs`.
     #[test]
     fn deep_link_extra_case_does_not_bypass_the_core_or_declared_guards() {
         let extra = deep_link_extra(
@@ -974,7 +975,7 @@ mod tests {
 
     #[test]
     fn passthrough_multi_instance_reaches_the_plain_row_without_duplicating() {
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         b.deep_link_extra = deep_link_extra(false, false, None, &["--multi-instance".to_string()]);
         let out = b.render();
         assert!(out.contains(
@@ -989,7 +990,7 @@ mod tests {
 
     #[test]
     fn desktop_links_carry_the_deep_link_extra_on_every_row() {
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         b.deep_link_extra = deep_link_extra(true, false, None, &[]);
         let out = b.render();
         assert!(out.contains(
@@ -1006,13 +1007,13 @@ mod tests {
 
     #[test]
     fn local_network_access_note_follows_the_web_explorer_origin() {
-        let out = block(full_ifaces(), QrMode::Hint).render();
+        let out = full_block().render();
         assert!(out.contains("Local Network Access"));
         assert!(out
             .contains("chrome://settings/content/siteDetails?site=https%3A%2F%2Fdecentraland.org"));
         assert!(out.contains("\"Apps on device\" (Chrome 145+)"));
         assert!(out.contains("granted on\n    the JOINING device's Chrome/Edge"));
-        let mut b = block(full_ifaces(), QrMode::Hint);
+        let mut b = full_block();
         b.web_explorer = "https://play.example.net/play".to_string();
         assert!(b
             .render()
@@ -1026,7 +1027,8 @@ mod tests {
     #[test]
     fn web_explorer_base_trims_trailing_slash() {
         assert_eq!(DEFAULT_WEB_EXPLORER, "https://decentraland.org/bevy-web");
-        let b = block(full_ifaces(), QrMode::Hint);
-        assert!(!b.web_url("http://127.0.0.1:5600").contains("web//?"));
+        assert!(!full_block()
+            .web_url("http://127.0.0.1:5600")
+            .contains("web//?"));
     }
 }

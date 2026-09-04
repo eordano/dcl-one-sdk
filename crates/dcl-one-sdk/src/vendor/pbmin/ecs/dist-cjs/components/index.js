@@ -17,7 +17,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MediaState = exports.NetworkParent = exports.NetworkEntity = exports.SyncComponents = exports.Tags = exports.Name = exports.ParticleSystem = exports.TriggerArea = exports.LightSource = exports.InputModifier = exports.VirtualCamera = exports.Tween = exports.MeshCollider = exports.MeshRenderer = exports.AudioStream = exports.AudioAnalysis = exports.AudioSource = exports.Animator = exports.Material = exports.Transform = void 0;
+exports.MediaState = exports.NetworkParent = exports.NetworkEntity = exports.SyncComponents = exports.Tags = exports.Name = exports.TouchScreenControls = exports.ParticleSystem = exports.TriggerArea = exports.LightSource = exports.InputModifier = exports.VirtualCamera = exports.Tween = exports.MeshCollider = exports.MeshRenderer = exports.AudioStream = exports.AudioAnalysis = exports.AudioSource = exports.Animator = exports.Material = exports.Transform = void 0;
 const Animator_1 = require("./extended/Animator");
 const AudioSource_1 = require("./extended/AudioSource");
 const AudioAnalysis_1 = require("./extended/AudioAnalysis");
@@ -38,6 +38,7 @@ const InputModifier_1 = require("./extended/InputModifier");
 const LightSource_1 = require("./extended/LightSource");
 const TriggerArea_1 = require("./extended/TriggerArea");
 const ParticleSystem_1 = require("./extended/ParticleSystem");
+const TouchScreenControls_1 = require("./extended/TouchScreenControls");
 const Tags_1 = __importDefault(require("./manual/Tags"));
 __exportStar(require("./generated/index.gen"), exports);
 /* @__PURE__ */
@@ -82,6 +83,9 @@ exports.TriggerArea = TriggerArea;
 /* @__PURE__ */
 const ParticleSystem = (engine) => (0, ParticleSystem_1.defineParticleSystemComponent)(engine);
 exports.ParticleSystem = ParticleSystem;
+/* @__PURE__ */
+const TouchScreenControls = (engine) => (0, TouchScreenControls_1.defineTouchScreenControlsComponent)(engine);
+exports.TouchScreenControls = TouchScreenControls;
 /**
  * @alpha
  */

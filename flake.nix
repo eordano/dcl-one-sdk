@@ -3,8 +3,9 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   inputs.crane.url = "github:ipetkov/crane/v0.21.0";
+  inputs.rust-overlay = { url = "github:oxalica/rust-overlay"; inputs.nixpkgs.follows = "nixpkgs"; };
 
-  outputs = { self, nixpkgs, crane }:
+  outputs = { self, nixpkgs, crane, rust-overlay }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems
@@ -42,7 +43,10 @@
       packages = forAllSystems (pkgs:
         let
           system = pkgs.stdenv.hostPlatform.system;
-          craneLib = crane.mkLib pkgs;
+          # rolldown's oxc generation needs a rustc newer than nixpkgs ships;
+          # rust-toolchain.toml pins the one CI builds with.
+          toolchain = (pkgs.extend (import rust-overlay)).rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
           # A release abgen is a relocatable bundle — launcher script, bin/, and
           # a bundled lib/ loader, with the Unity templates and shader bundles
@@ -68,12 +72,12 @@
           # manifest (no [package]), so crane cannot derive them from it.
           sdkCraneArgs = {
             pname = "dcl-one-sdk";
-            version = "0.20.0";
+            version = "0.21.0";
             src = ./.;
             strictDeps = true;
             cargoExtraArgs = "--locked -p dcl-one-sdk --bin dcl-one-sdk";
             doCheck = false;
-            nativeBuildInputs = [ pkgs.pkg-config pkgs.protobuf ];
+            nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs = [ pkgs.openssl ]
               ++ nixpkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
             OPENSSL_NO_VENDOR = "1";
@@ -105,12 +109,8 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           nativeBuildInputs = [
-            pkgs.cargo
-            pkgs.rustc
-            pkgs.rustfmt
-            pkgs.clippy
+            ((pkgs.extend (import rust-overlay)).rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
             pkgs.pkg-config
-            pkgs.protobuf
           ];
           buildInputs = [ pkgs.openssl ];
           env.OPENSSL_NO_VENDOR = "1";

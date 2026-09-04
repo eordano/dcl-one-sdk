@@ -3,6 +3,7 @@
 pub mod abgen_embed;
 pub mod asset_bundles;
 pub mod build;
+pub mod check_stamp;
 pub mod comms;
 pub mod composite_norm;
 pub mod context_files;

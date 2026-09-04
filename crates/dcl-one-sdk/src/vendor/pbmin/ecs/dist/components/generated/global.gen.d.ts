@@ -17,6 +17,7 @@ import { PBBillboard } from './pb/decentraland/sdk/components/billboard.gen';
 import { PBCameraMode } from './pb/decentraland/sdk/components/camera_mode.gen';
 import { PBCameraModeArea } from './pb/decentraland/sdk/components/camera_mode_area.gen';
 import { PBEngineInfo } from './pb/decentraland/sdk/components/engine_info.gen';
+import { PBExplorerUiEventsResult } from './pb/decentraland/sdk/components/explorer_ui_events_result.gen';
 import { PBGltfContainer } from './pb/decentraland/sdk/components/gltf_container.gen';
 import { PBGltfContainerLoadingState } from './pb/decentraland/sdk/components/gltf_container_loading_state.gen';
 import { PBGltfNodeModifiers } from './pb/decentraland/sdk/components/gltf_node_modifiers.gen';
@@ -37,6 +38,7 @@ import { PBRaycastResult } from './pb/decentraland/sdk/components/raycast_result
 import { PBRealmInfo } from './pb/decentraland/sdk/components/realm_info.gen';
 import { PBSkyboxTime } from './pb/decentraland/sdk/components/skybox_time.gen';
 import { PBTextShape } from './pb/decentraland/sdk/components/text_shape.gen';
+import { PBTouchScreenControls } from './pb/decentraland/sdk/components/touch_screen_controls.gen';
 import { PBTriggerArea } from './pb/decentraland/sdk/components/trigger_area.gen';
 import { PBTriggerAreaResult } from './pb/decentraland/sdk/components/trigger_area_result.gen';
 import { PBTweenSequence } from './pb/decentraland/sdk/components/tween_sequence.gen';
@@ -46,6 +48,7 @@ import { PBUiCanvasInformation } from './pb/decentraland/sdk/components/ui_canva
 import { PBUiDropdown } from './pb/decentraland/sdk/components/ui_dropdown.gen';
 import { PBUiDropdownResult } from './pb/decentraland/sdk/components/ui_dropdown_result.gen';
 import { PBUiInput } from './pb/decentraland/sdk/components/ui_input.gen';
+import { PBUiInputBinding } from './pb/decentraland/sdk/components/ui_input_binding.gen';
 import { PBUiInputResult } from './pb/decentraland/sdk/components/ui_input_result.gen';
 import { PBUiText } from './pb/decentraland/sdk/components/ui_text.gen';
 import { PBUiTransform } from './pb/decentraland/sdk/components/ui_transform.gen';
@@ -70,6 +73,7 @@ import { PBVisibilityComponent } from './pb/decentraland/sdk/components/visibili
 /** @public */ export declare const CameraMode: LastWriteWinElementSetComponentDefinition<PBCameraMode>;
 /** @public */ export declare const CameraModeArea: LastWriteWinElementSetComponentDefinition<PBCameraModeArea>;
 /** @public */ export declare const EngineInfo: LastWriteWinElementSetComponentDefinition<PBEngineInfo>;
+/** @public */ export declare const ExplorerUiEventsResult: GrowOnlyValueSetComponentDefinition<PBExplorerUiEventsResult>;
 /** @public */ export declare const GltfContainer: LastWriteWinElementSetComponentDefinition<PBGltfContainer>;
 /** @public */ export declare const GltfContainerLoadingState: LastWriteWinElementSetComponentDefinition<PBGltfContainerLoadingState>;
 /** @public */ export declare const GltfNodeModifiers: LastWriteWinElementSetComponentDefinition<PBGltfNodeModifiers>;
@@ -90,6 +94,7 @@ import { PBVisibilityComponent } from './pb/decentraland/sdk/components/visibili
 /** @public */ export declare const RealmInfo: LastWriteWinElementSetComponentDefinition<PBRealmInfo>;
 /** @public */ export declare const SkyboxTime: LastWriteWinElementSetComponentDefinition<PBSkyboxTime>;
 /** @public */ export declare const TextShape: LastWriteWinElementSetComponentDefinition<PBTextShape>;
+/** @public */ export declare const TouchScreenControls: LastWriteWinElementSetComponentDefinition<PBTouchScreenControls>;
 /** @public */ export declare const TriggerArea: LastWriteWinElementSetComponentDefinition<PBTriggerArea>;
 /** @public */ export declare const TriggerAreaResult: GrowOnlyValueSetComponentDefinition<PBTriggerAreaResult>;
 /** @public */ export declare const TweenSequence: LastWriteWinElementSetComponentDefinition<PBTweenSequence>;
@@ -99,6 +104,7 @@ import { PBVisibilityComponent } from './pb/decentraland/sdk/components/visibili
 /** @public */ export declare const UiDropdown: LastWriteWinElementSetComponentDefinition<PBUiDropdown>;
 /** @public */ export declare const UiDropdownResult: LastWriteWinElementSetComponentDefinition<PBUiDropdownResult>;
 /** @public */ export declare const UiInput: LastWriteWinElementSetComponentDefinition<PBUiInput>;
+/** @public */ export declare const UiInputBinding: LastWriteWinElementSetComponentDefinition<PBUiInputBinding>;
 /** @public */ export declare const UiInputResult: LastWriteWinElementSetComponentDefinition<PBUiInputResult>;
 /** @public */ export declare const UiText: LastWriteWinElementSetComponentDefinition<PBUiText>;
 /** @public */ export declare const UiTransform: LastWriteWinElementSetComponentDefinition<PBUiTransform>;

@@ -7,8 +7,11 @@ fn main() -> Result<()> {
         "proto/decentraland/sdk/development/local_development.proto",
         "proto/decentraland/kernel/comms/rfc5/ws_comms.proto",
     ];
-    let mut config = prost_build::Config::new();
-    config.compile_protos(&proto_files, &["proto"])?;
+    // needs no `protoc` on the PATH — the same descriptor set protoc would
+    // hand prost-build, minted in-process.
+    let proto_files: Vec<PathBuf> = proto_files.iter().map(PathBuf::from).collect();
+    let fds = compile_protos(&proto_files, Path::new("proto"))?;
+    prost_build::Config::new().compile_fds(fds)?;
     generate_component_schema()?;
     generate_abgen_embed()?;
     generate_skills_embed()?;
@@ -68,9 +71,47 @@ fn generate_skills_embed() -> Result<()> {
 /// Compile the vendored @dcl/protocol component protos into a static schema
 /// table (messages, enums, component ids) that src/crdt_gen.rs uses to
 /// serialize composite JSON into main.crdt without node or @dcl/inspector.
-fn generate_component_schema() -> Result<()> {
-    use prost::Message;
+fn protox_error(e: protox::Error) -> std::io::Error {
+    std::io::Error::other(format!("{e:?}"))
+}
 
+/// The vendored protos carry a UTF-8 BOM, which protoc skips and protox's
+/// lexer refuses; this resolver drops it before parsing.
+struct BomTolerant {
+    include: PathBuf,
+    inner: protox::file::IncludeFileResolver,
+}
+
+impl protox::file::FileResolver for BomTolerant {
+    fn resolve_path(&self, path: &Path) -> Option<String> {
+        self.inner.resolve_path(path)
+    }
+
+    fn open_file(&self, name: &str) -> std::result::Result<protox::file::File, protox::Error> {
+        let path = self.include.join(name);
+        if !path.is_file() {
+            return Err(protox::Error::file_not_found(name));
+        }
+        let source = std::fs::read_to_string(&path)?;
+        protox::file::File::from_source(name, source.strip_prefix('\u{feff}').unwrap_or(&source))
+    }
+}
+
+/// What `protoc --include_imports -o` produced, without protoc.
+fn compile_protos(files: &[PathBuf], include: &Path) -> Result<prost_types::FileDescriptorSet> {
+    let mut resolver = protox::file::ChainFileResolver::new();
+    resolver.add(BomTolerant {
+        include: include.to_path_buf(),
+        inner: protox::file::IncludeFileResolver::new(include.to_path_buf()),
+    });
+    resolver.add(protox::file::GoogleFileResolver::new());
+    let mut compiler = protox::Compiler::with_file_resolver(resolver);
+    compiler.include_imports(true);
+    compiler.open_files(files).map_err(protox_error)?;
+    Ok(compiler.file_descriptor_set())
+}
+
+fn generate_component_schema() -> Result<()> {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let comp_dir = Path::new("proto/decentraland/sdk/components");
     let mut protos: Vec<PathBuf> = std::fs::read_dir(comp_dir)?
@@ -80,16 +121,8 @@ fn generate_component_schema() -> Result<()> {
         .collect();
     protos.sort();
 
-    let descriptor_path = out_dir.join("components_descriptor.bin");
-    let gen_dir = out_dir.join("components-prost-gen");
-    std::fs::create_dir_all(&gen_dir)?;
-    let mut config = prost_build::Config::new();
-    config.file_descriptor_set_path(&descriptor_path);
-    config.out_dir(&gen_dir); // generated Rust types are unused; only the descriptor set matters
-    config.compile_protos(&protos, &[PathBuf::from("proto")])?;
-
-    let fds = prost_types::FileDescriptorSet::decode(&std::fs::read(&descriptor_path)?[..])
-        .expect("decoding the component FileDescriptorSet");
+    // from the component protos — and protox mints it without protoc.
+    let fds = compile_protos(&protos, Path::new("proto"))?;
 
     // First pass: assign stable indexes to every message and enum (nested included).
     let mut msg_index: Vec<(String, prost_types::DescriptorProto)> = Vec::new();

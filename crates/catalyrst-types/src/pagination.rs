@@ -69,6 +69,14 @@ impl<T> PaginatedResponse<T> {
             limit,
         }
     }
+
+    /// Same envelope with the 1-based `page` the social-service and comms
+    /// surfaces publish; the first page is `1` even when `limit` is unusable.
+    pub fn new_1based(results: Vec<T>, total: i64, limit: i64, offset: i64) -> Self {
+        let mut page = Self::new(results, total, limit, offset);
+        page.page += 1;
+        page
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +107,26 @@ mod tests {
         assert_eq!((p.limit, p.offset), (100, 0));
         let p = get_pagination_params(&pairs(&[]), 100);
         assert_eq!((p.limit, p.offset), (100, 0));
+    }
+
+    #[test]
+    fn one_based_pages_start_at_one() {
+        let p = PaginatedResponse::new_1based(vec![1, 2], 10, 5, 0);
+        assert_eq!((p.page, p.pages, p.total, p.limit), (1, 2, 10, 5));
+        let p = PaginatedResponse::new_1based(vec![1], 10, 5, 5);
+        assert_eq!(p.page, 2);
+        let p = PaginatedResponse::new_1based(Vec::<i32>::new(), 0, 0, 0);
+        assert_eq!((p.page, p.pages), (1, 0));
+    }
+
+    #[test]
+    fn zero_and_one_based_pages_differ_by_exactly_one() {
+        for (limit, offset) in [(10, 0), (10, 30), (25, 100), (0, 0)] {
+            let zero = PaginatedResponse::new(Vec::<i32>::new(), 99, limit, offset);
+            let one = PaginatedResponse::new_1based(Vec::<i32>::new(), 99, limit, offset);
+            assert_eq!(one.page, zero.page + 1);
+            assert_eq!(one.pages, zero.pages);
+        }
     }
 
     #[test]

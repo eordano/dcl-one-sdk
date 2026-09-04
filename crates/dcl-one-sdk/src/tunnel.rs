@@ -79,14 +79,10 @@ fn bad_tunnel_url(raw: &str, why: &str) -> anyhow::Error {
 
 pub const TOKEN_ENV: &str = "DCL_ONE_SDK_TUNNEL_TOKEN";
 
-/// Stamped on every request this agent replays into the local server.
-///
-/// The replay goes to `http://127.0.0.1:{port}`, so the local server sees a
-/// loopback peer no matter where the request came from — a gate that means
-/// "the human at this keyboard" cannot be written against the peer address
-/// alone. Deliberately in the `x-forwarded-` namespace, because the header
-/// loop below strips every client-supplied header with that prefix: a caller
-/// can neither forge this nor suppress it.
+/// Stamped on every request replayed into the local server, which otherwise
+/// sees only a loopback peer and cannot tell a tunnel visitor from the human at
+/// the keyboard. It sits in the `x-forwarded-` namespace that the replay strips
+/// from client headers, so a caller can neither forge nor suppress it.
 pub const FORWARDED_HEADER: &str = "x-forwarded-via-dcl-tunnel";
 
 pub fn resolve_token(
@@ -129,24 +125,20 @@ async fn run(cfg: AgentConfig, events: mpsc::UnboundedSender<AgentEvent>) {
     let mut resume: Option<Resume> = None;
     let mut delay = BACKOFF_MIN;
     loop {
-        match connect_and_serve(&cfg, &mut resume, &events).await {
+        let event = match connect_and_serve(&cfg, &mut resume, &events).await {
             Ok(error) => {
                 delay = BACKOFF_MIN;
-                if events.send(AgentEvent::Disconnected { error }).is_err() {
-                    return;
-                }
+                AgentEvent::Disconnected { error }
             }
             Err(error) => {
                 tracing::debug!("tunnel connect failed: {error:#}");
-                if events
-                    .send(AgentEvent::ConnectFailed {
-                        error: crate::ux::concise_cause(&error),
-                    })
-                    .is_err()
-                {
-                    return;
+                AgentEvent::ConnectFailed {
+                    error: crate::ux::concise_cause(&error),
                 }
             }
+        };
+        if events.send(event).is_err() {
+            return;
         }
         tokio::time::sleep(jitter(delay)).await;
         delay = (delay * 2).min(BACKOFF_MAX);
@@ -174,6 +166,8 @@ fn local_forward_url(
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     Some(format!("{scheme}://127.0.0.1:{local_port}{path}{query}"))
 }
+
+type Channels = Arc<Mutex<HashMap<u32, ChanState>>>;
 
 enum ChanState {
     HttpPending {
@@ -247,14 +241,14 @@ async fn connect_and_serve(
     })
     .await
     .map_err(|_| anyhow::anyhow!("timed out waiting for the tunnel welcome"))??;
-    let (id, public_url, resume_key, ping_s) = match welcome {
-        Control::Welcome {
-            id,
-            public_url,
-            resume_key,
-            ping_s,
-        } => (id, public_url, resume_key, ping_s),
-        other => anyhow::bail!("expected a welcome from the tunnel, got {other:?}"),
+    let Control::Welcome {
+        id,
+        public_url,
+        resume_key,
+        ping_s,
+    } = welcome
+    else {
+        anyhow::bail!("expected a welcome from the tunnel, got {welcome:?}");
     };
     *resume = Some(Resume {
         id: id.clone(),
@@ -268,26 +262,21 @@ async fn connect_and_serve(
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let channels: Arc<Mutex<HashMap<u32, ChanState>>> = Arc::new(Mutex::new(HashMap::new()));
+    let channels: Channels = Arc::new(Mutex::new(HashMap::new()));
     let (trunk_tx, mut trunk_rx) = mpsc::channel::<Message>(TRUNK_BUFFER);
     let ping = Duration::from_secs(ping_s.max(1));
     let mut last_in = tokio::time::Instant::now();
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + ping, ping);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let disconnect_reason;
-    loop {
+    let reason = loop {
         tokio::select! {
             out = trunk_rx.recv() => match out {
                 Some(msg) => {
                     if let Err(e) = sink.send(msg).await {
-                        disconnect_reason = format!("send failed: {e}");
-                        break;
+                        break format!("send failed: {e}");
                     }
                 }
-                None => {
-                    disconnect_reason = "agent shutting down".to_string();
-                    break;
-                }
+                None => break "agent shutting down".to_string(),
             },
             incoming = stream.next() => match incoming {
                 Some(Ok(msg)) => {
@@ -299,40 +288,29 @@ async fn connect_and_serve(
                             }
                         }
                         Message::Binary(bytes) => handle_data(&bytes, &channels, &trunk_tx).await,
-                        Message::Close(_) => {
-                            disconnect_reason = "tunnel closed the trunk".to_string();
-                            break;
-                        }
+                        Message::Close(_) => break "tunnel closed the trunk".to_string(),
                         _ => {}
                     }
                 }
-                Some(Err(e)) => {
-                    disconnect_reason = format!("trunk error: {e}");
-                    break;
-                }
-                None => {
-                    disconnect_reason = "tunnel closed the trunk".to_string();
-                    break;
-                }
+                Some(Err(e)) => break format!("trunk error: {e}"),
+                None => break "tunnel closed the trunk".to_string(),
             },
             _ = ticker.tick() => {
                 if last_in.elapsed() > ping * 3 {
-                    disconnect_reason = "tunnel unresponsive (missed pings)".to_string();
-                    break;
+                    break "tunnel unresponsive (missed pings)".to_string();
                 }
                 if sink.send(Message::Text(Control::Ping.encode().into())).await.is_err() {
-                    disconnect_reason = "send failed".to_string();
-                    break;
+                    break "send failed".to_string();
                 }
             }
         }
-    }
+    };
     for (_, state) in lock(&channels).drain() {
         if let ChanState::Running { task, .. } = state {
             task.abort();
         }
     }
-    Ok(disconnect_reason)
+    Ok(reason)
 }
 
 fn forwarded_from_public_url(public_url: &str) -> Forwarded {
@@ -367,7 +345,7 @@ fn handle_control(
     cfg: &AgentConfig,
     client: &reqwest::Client,
     fwd: &Arc<Forwarded>,
-    channels: &Arc<Mutex<HashMap<u32, ChanState>>>,
+    channels: &Channels,
     trunk_tx: &mpsc::Sender<Message>,
 ) {
     match control {
@@ -449,16 +427,12 @@ fn handle_control(
         }
         Control::Close { ch, code, reason } => {
             let state = lock(channels).remove(&ch);
-            match state {
-                Some(ChanState::Running { events, task }) => match events {
-                    Some(tx) => {
-                        if tx.try_send(ChanEvent::Close { code, reason }).is_err() {
-                            task.abort();
-                        }
-                    }
-                    None => task.abort(),
-                },
-                Some(ChanState::HttpPending { .. }) | None => {}
+            if let Some(ChanState::Running { events, task }) = state {
+                let delivered =
+                    events.is_some_and(|tx| tx.try_send(ChanEvent::Close { code, reason }).is_ok());
+                if !delivered {
+                    task.abort();
+                }
             }
         }
         Control::Ping => {
@@ -468,20 +442,14 @@ fn handle_control(
     }
 }
 
-async fn handle_data(
-    bytes: &[u8],
-    channels: &Arc<Mutex<HashMap<u32, ChanState>>>,
-    trunk_tx: &mpsc::Sender<Message>,
-) {
+async fn handle_data(bytes: &[u8], channels: &Channels, trunk_tx: &mpsc::Sender<Message>) {
     let Some(frame) = decode_data(bytes) else {
         return;
     };
     let ch = frame.ch;
     enum Routed {
-        Buffered,
         Overflow,
         Event(mpsc::Sender<ChanEvent>),
-        Gone,
     }
     let routed = {
         let mut map = lock(channels);
@@ -489,22 +457,21 @@ async fn handle_data(
             Some(ChanState::HttpPending { body, .. }) => {
                 if body.len() + frame.payload.len() > BODY_HARD_CAP {
                     map.remove(&ch);
-                    Routed::Overflow
+                    Some(Routed::Overflow)
                 } else {
                     body.extend_from_slice(&frame.payload);
-                    Routed::Buffered
+                    None
                 }
             }
             Some(ChanState::Running {
                 events: Some(tx), ..
-            }) => Routed::Event(tx.clone()),
-            Some(ChanState::Running { events: None, .. }) => Routed::Gone,
-            None => Routed::Gone,
+            }) => Some(Routed::Event(tx.clone())),
+            _ => None,
         }
     };
     match routed {
-        Routed::Buffered | Routed::Gone => {}
-        Routed::Overflow => {
+        None => {}
+        Some(Routed::Overflow) => {
             let _ = trunk_tx.try_send(Message::Text(
                 Control::OpenErr {
                     ch,
@@ -514,7 +481,7 @@ async fn handle_data(
                 .into(),
             ));
         }
-        Routed::Event(tx) => {
+        Some(Routed::Event(tx)) => {
             let _ = tx
                 .send(ChanEvent::Data {
                     binary: frame.binary,
@@ -534,34 +501,14 @@ async fn run_http_channel(
     client: reqwest::Client,
     fwd: Arc<Forwarded>,
     trunk_tx: mpsc::Sender<Message>,
-    channels: Arc<Mutex<HashMap<u32, ChanState>>>,
+    channels: Channels,
 ) {
     let Some(url) = local_forward_url("http", local_port, &open.path, open.query.as_deref()) else {
-        send_control(
-            &trunk_tx,
-            Control::OpenErr {
-                ch,
-                error: "invalid forward path".into(),
-            },
-        )
-        .await;
-        lock(&channels).remove(&ch);
-        return;
+        return fail_open(&trunk_tx, &channels, ch, "invalid forward path".into()).await;
     };
-    let method = match reqwest::Method::from_bytes(open.method.as_bytes()) {
-        Ok(m) => m,
-        Err(_) => {
-            send_control(
-                &trunk_tx,
-                Control::OpenErr {
-                    ch,
-                    error: format!("unsupported method {}", open.method),
-                },
-            )
-            .await;
-            lock(&channels).remove(&ch);
-            return;
-        }
+    let Ok(method) = reqwest::Method::from_bytes(open.method.as_bytes()) else {
+        let error = format!("unsupported method {}", open.method);
+        return fail_open(&trunk_tx, &channels, ch, error).await;
     };
     let mut request = client.request(method, url);
     for (name, value) in &open.headers {
@@ -584,71 +531,54 @@ async fn run_http_channel(
     if !body.is_empty() {
         request = request.body(body);
     }
-    match request.send().await {
-        Ok(mut response) => {
-            let status = response.status().as_u16();
-            let headers: Vec<(String, String)> = response
-                .headers()
-                .iter()
-                .filter(|(name, _)| !is_hop_by_hop(name.as_str()))
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|v| (name.as_str().to_string(), v.to_string()))
-                })
-                .collect();
-            send_control(
-                &trunk_tx,
-                Control::OpenOk {
-                    ch,
-                    status,
-                    headers: Some(headers),
-                    subprotocol: None,
-                },
-            )
-            .await;
-            loop {
-                match response.chunk().await {
-                    Ok(Some(chunk)) => {
-                        if !chunk.is_empty()
-                            && trunk_tx
-                                .send(Message::Binary(encode_data(ch, true, &chunk).into()))
-                                .await
-                                .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        send_control(&trunk_tx, Control::End { ch }).await;
-                        break;
-                    }
-                    Err(e) => {
-                        send_control(
-                            &trunk_tx,
-                            Control::Close {
-                                ch,
-                                code: Some(1011),
-                                reason: Some(format!("local read failed: {e}")),
-                            },
-                        )
-                        .await;
-                        break;
-                    }
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        Err(e) => {
+            let error = format!("local preview unreachable: {e}");
+            return fail_open(&trunk_tx, &channels, ch, error).await;
+        }
+    };
+    let status = response.status().as_u16();
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| !is_hop_by_hop(name.as_str()))
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_string(), v.to_string()))
+        })
+        .collect();
+    send_control(
+        &trunk_tx,
+        Control::OpenOk {
+            ch,
+            status,
+            headers: Some(headers),
+            subprotocol: None,
+        },
+    )
+    .await;
+    let close = loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if !chunk.is_empty() && !send_data(&trunk_tx, ch, true, &chunk).await {
+                    break None;
                 }
             }
-        }
-        Err(e) => {
-            send_control(
-                &trunk_tx,
-                Control::OpenErr {
+            Ok(None) => break Some(Control::End { ch }),
+            Err(e) => {
+                break Some(Control::Close {
                     ch,
-                    error: format!("local preview unreachable: {e}"),
-                },
-            )
-            .await;
+                    code: Some(1011),
+                    reason: Some(format!("local read failed: {e}")),
+                })
+            }
         }
+    };
+    if let Some(control) = close {
+        send_control(&trunk_tx, control).await;
     }
     lock(&channels).remove(&ch);
 }
@@ -662,34 +592,17 @@ async fn run_ws_channel(
     subprotocols: Vec<String>,
     fwd: Arc<Forwarded>,
     trunk_tx: mpsc::Sender<Message>,
-    channels: Arc<Mutex<HashMap<u32, ChanState>>>,
+    channels: Channels,
     mut events_rx: mpsc::Receiver<ChanEvent>,
 ) {
     let Some(url) = local_forward_url("ws", local_port, &path, query.as_deref()) else {
-        send_control(
-            &trunk_tx,
-            Control::OpenErr {
-                ch,
-                error: "invalid forward path".into(),
-            },
-        )
-        .await;
-        lock(&channels).remove(&ch);
-        return;
+        return fail_open(&trunk_tx, &channels, ch, "invalid forward path".into()).await;
     };
     let mut request = match url.as_str().into_client_request() {
         Ok(r) => r,
         Err(e) => {
-            send_control(
-                &trunk_tx,
-                Control::OpenErr {
-                    ch,
-                    error: format!("bad ws path: {e}"),
-                },
-            )
-            .await;
-            lock(&channels).remove(&ch);
-            return;
+            let error = format!("bad ws path: {e}");
+            return fail_open(&trunk_tx, &channels, ch, error).await;
         }
     };
     if !subprotocols.is_empty() {
@@ -716,16 +629,8 @@ async fn run_ws_channel(
     let (socket, response) = match tokio_tungstenite::connect_async(request).await {
         Ok(ok) => ok,
         Err(e) => {
-            send_control(
-                &trunk_tx,
-                Control::OpenErr {
-                    ch,
-                    error: format!("local preview unreachable: {e}"),
-                },
-            )
-            .await;
-            lock(&channels).remove(&ch);
-            return;
+            let error = format!("local preview unreachable: {e}");
+            return fail_open(&trunk_tx, &channels, ch, error).await;
         }
     };
     let subprotocol = response
@@ -774,26 +679,6 @@ async fn run_ws_channel(
                 None => break,
             },
             incoming = local_stream.next() => match incoming {
-                Some(Ok(Message::Text(text))) => {
-                    if trunk_tx
-                        .send(Message::Binary(encode_data(ch, false, text.as_bytes()).into()))
-                        .await
-                        .is_err()
-                    {
-                        notify_service = false;
-                        break;
-                    }
-                }
-                Some(Ok(Message::Binary(bytes))) => {
-                    if trunk_tx
-                        .send(Message::Binary(encode_data(ch, true, &bytes).into()))
-                        .await
-                        .is_err()
-                    {
-                        notify_service = false;
-                        break;
-                    }
-                }
                 Some(Ok(Message::Close(frame))) => {
                     send_control(
                         &trunk_tx,
@@ -809,7 +694,17 @@ async fn run_ws_channel(
                     notify_service = false;
                     break;
                 }
-                Some(Ok(_)) => continue,
+                Some(Ok(msg)) => {
+                    let (binary, payload) = match &msg {
+                        Message::Text(text) => (false, text.as_bytes()),
+                        Message::Binary(bytes) => (true, &bytes[..]),
+                        _ => continue,
+                    };
+                    if !send_data(&trunk_tx, ch, binary, payload).await {
+                        notify_service = false;
+                        break;
+                    }
+                }
                 Some(Err(_)) | None => break,
             },
         }
@@ -830,6 +725,23 @@ async fn run_ws_channel(
 
 async fn send_control(trunk_tx: &mpsc::Sender<Message>, control: Control) {
     let _ = trunk_tx.send(Message::Text(control.encode().into())).await;
+}
+
+async fn send_data(
+    trunk_tx: &mpsc::Sender<Message>,
+    ch: u32,
+    binary: bool,
+    payload: &[u8],
+) -> bool {
+    trunk_tx
+        .send(Message::Binary(encode_data(ch, binary, payload).into()))
+        .await
+        .is_ok()
+}
+
+async fn fail_open(trunk_tx: &mpsc::Sender<Message>, channels: &Channels, ch: u32, error: String) {
+    send_control(trunk_tx, Control::OpenErr { ch, error }).await;
+    lock(channels).remove(&ch);
 }
 
 pub fn tunnel_help() -> String {
@@ -866,29 +778,22 @@ pub fn tunnel_help() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::test_tree::TempTree;
 
     #[test]
     fn normalize_accepts_bare_hosts_and_appends_the_trunk_path() {
-        assert_eq!(
-            normalize_trunk_url("tunnel.example").unwrap(),
-            "wss://tunnel.example/t/_connect"
-        );
-        assert_eq!(
-            normalize_trunk_url("wss://tunnel.example").unwrap(),
-            "wss://tunnel.example/t/_connect"
-        );
-        assert_eq!(
-            normalize_trunk_url("ws://127.0.0.1:5167").unwrap(),
-            "ws://127.0.0.1:5167/t/_connect"
-        );
-        assert_eq!(
-            normalize_trunk_url("https://tunnel.example").unwrap(),
-            "wss://tunnel.example/t/_connect"
-        );
-        assert_eq!(
-            normalize_trunk_url("wss://tunnel.example/custom/path").unwrap(),
-            "wss://tunnel.example/custom/path"
-        );
+        for (raw, expected) in [
+            ("tunnel.example", "wss://tunnel.example/t/_connect"),
+            ("wss://tunnel.example", "wss://tunnel.example/t/_connect"),
+            ("ws://127.0.0.1:5167", "ws://127.0.0.1:5167/t/_connect"),
+            ("https://tunnel.example", "wss://tunnel.example/t/_connect"),
+            (
+                "wss://tunnel.example/custom/path",
+                "wss://tunnel.example/custom/path",
+            ),
+        ] {
+            assert_eq!(normalize_trunk_url(raw).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -955,14 +860,9 @@ mod tests {
 
     #[test]
     fn token_precedence_is_flag_then_file_then_env() {
-        let dir = std::env::temp_dir().join(format!(
-            "dcl-one-sdk-tunnel-token-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("token.txt");
-        std::fs::write(&file, "from-file\n").unwrap();
+        let dir = TempTree::new("tunnel-token");
+        dir.write("token.txt", b"from-file\n");
+        let file = dir.0.join("token.txt");
         std::env::set_var(TOKEN_ENV, "from-env");
         assert_eq!(
             resolve_token(Some("from-flag".into()), Some(&file)).unwrap(),
@@ -977,7 +877,6 @@ mod tests {
         assert_eq!(resolve_token(None, None).unwrap(), None);
         std::env::remove_var(TOKEN_ENV);
         assert_eq!(resolve_token(None, None).unwrap(), None);
-        assert!(resolve_token(None, Some(&dir.join("missing.txt"))).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(resolve_token(None, Some(&dir.0.join("missing.txt"))).is_err());
     }
 }

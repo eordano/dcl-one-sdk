@@ -1,4 +1,4 @@
-use crate::build::BuildOptions;
+use crate::build::{self, BuildOptions};
 use crate::entrypoint;
 use crate::esbuild::{self, EsbuildOptions};
 use crate::live_reload::ReloadEvent;
@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+/// A batch closes after `QUIET` without an event (a save is several events a
+/// few ms apart), and no later than `DEBOUNCE` after the first.
+const QUIET: Duration = Duration::from_millis(20);
 const DEBOUNCE: Duration = Duration::from_millis(100);
 
 pub struct FsWatcher {
@@ -74,12 +77,15 @@ impl FsWatcher {
                 batch.push(first);
             }
             let deadline = tokio::time::Instant::now() + DEBOUNCE;
+            let mut quiet_until = tokio::time::Instant::now() + QUIET;
             loop {
-                match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                let until = deadline.min(quiet_until);
+                match tokio::time::timeout_at(until, self.rx.recv()).await {
                     Ok(Some(p)) => {
                         if is_relevant(&self.root, &p) {
                             batch.push(p);
                         }
+                        quiet_until = tokio::time::Instant::now() + QUIET;
                     }
                     Ok(None) => return (!batch.is_empty()).then_some(batch),
                     Err(_) => break,
@@ -100,13 +106,11 @@ pub fn is_relevant(root: &Path, path: &Path) -> bool {
     if first.is_some_and(|f| f.starts_with('.') || matches!(f, "node_modules" | "bin")) {
         return false;
     }
-    if is_model(path) {
-        return true;
-    }
-    matches!(
-        path.extension().and_then(|e| e.to_str()).unwrap_or(""),
-        "ts" | "tsx" | "js" | "jsx" | "composite"
-    )
+    is_model(path)
+        || matches!(
+            path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+            "ts" | "tsx" | "js" | "jsx" | "composite"
+        )
 }
 
 pub fn is_model(path: &Path) -> bool {
@@ -152,13 +156,8 @@ pub struct WatchSession {
     /// `Some` when the toolchain ships prebuilt chunks: the SDK chunk is copied
     /// rather than bundled, and the smart-item chunk is a separate file.
     prebuilt: Option<crate::prebuilt::Prebuilt>,
-    outfile: PathBuf,
-    sdk_rel: String,
-    smart_rel: String,
-    smart_installed: bool,
-    scene_rel: String,
-    max_composite_entity: u32,
-    typecheck: crate::build::BackgroundCheck,
+    loader: split::Loader,
+    typecheck: build::BackgroundCheck,
     type_checking: bool,
 }
 
@@ -169,99 +168,28 @@ impl WatchSession {
         initial_build: bool,
         steps: &mut ux::Steps,
     ) -> Result<Self> {
-        let main = project.main_output()?;
-        let outfile = project.root.join(&main);
-        let (sdk_rel, scene_rel) = split::chunk_rel_paths(&main);
-        let smart_rel = split::smart_chunk_rel_path(&main);
-        let generated = entrypoint::generate(
-            &project,
-            opts.ignore_composite,
-            opts.custom_entry_point,
-            true,
-        )?;
-        split::write_generated(&project, &generated.dir)?;
-        split::write_marker(&generated.dir)?;
-        split::write_loader_stub(
-            &outfile,
-            &sdk_rel,
-            None,
-            &scene_rel,
-            generated.max_composite_entity,
-            crate::entrypoint::authoritative_multiplayer(&project),
-        )?;
-        tracing::info!("loader stub saved {}", outfile.display());
+        let mut staged = build::stage(&project, opts, &project.root)?;
+        staged.loader.write()?;
         if initial_build {
             steps.done(format!(
                 "Loader stub saved {}",
-                ux::rel_to(&project.root, &outfile)
+                ux::rel_to(&project.root, &staged.loader.outfile)
             ));
-        }
-        let tsconfig = project.tsconfig()?;
-        let prebuilt = crate::prebuilt::locate(&project);
-        let sdk_opts = crate::build::sdk_chunk_options(
-            &project,
-            &generated,
-            project.root.join(&sdk_rel),
-            &tsconfig,
-            opts,
-        )?;
-        let scene_opts = EsbuildOptions {
-            production: opts.production,
-            entrypoint: generated.entrypoint,
-            outfile: project.root.join(&scene_rel),
-            tsconfig,
-            aliases: vec![],
-            externals: split::scene_externals(&project),
-        };
-        let mut smart_installed = false;
-        if initial_build {
-            let started = Instant::now();
-            match &prebuilt {
-                Some(chunks) => {
-                    crate::prebuilt::install(&chunks.core, &project.root.join(&sdk_rel))?;
-                    steps.done(format!("SDK chunk installed {sdk_rel} (prebuilt)"));
-                }
-                None => {
-                    esbuild::bundle(&project, &sdk_opts).await?;
-                    tracing::info!("sdk chunk saved {}", sdk_opts.outfile.display());
-                    steps.done(crate::build::saved(
-                        "SDK chunk",
-                        &project.root,
-                        &sdk_opts.outfile,
-                        started,
-                    ));
-                }
-            }
-            let started = Instant::now();
-            esbuild::bundle(&project, &scene_opts).await?;
-            tracing::info!("scene chunk saved {}", scene_opts.outfile.display());
-            steps.done(crate::build::saved(
-                "Scene chunk",
-                &project.root,
-                &scene_opts.outfile,
-                started,
-            ));
-            smart_installed = crate::build::install_smart_chunk(
-                &project,
-                prebuilt.as_ref(),
-                &project.root,
-                &scene_rel,
-                &smart_rel,
-            )?;
-            if smart_installed {
-                split::write_loader_stub(
-                    &outfile,
-                    &sdk_rel,
-                    Some(smart_rel.as_str()),
-                    &scene_rel,
-                    generated.max_composite_entity,
-                    crate::entrypoint::authoritative_multiplayer(&project),
-                )?;
+            let smart = build::emit_chunks(&project, &staged, &project.root, steps).await?;
+            if smart {
+                staged.loader.smart_installed = true;
+                staged.loader.write()?;
             }
         }
+        let build::Staged {
+            generated,
+            prebuilt,
+            sdk_opts,
+            scene_opts,
+            loader,
+        } = staged;
         let registry = split::registry_keys(&project);
-        let script_utils =
-            std::fs::read_to_string(generated.dir.join("script-utils.js")).unwrap_or_default();
+        let script_utils = read_script_utils(&generated.dir);
         let mut session = Self {
             project,
             es_opts: scene_opts,
@@ -274,13 +202,8 @@ impl WatchSession {
                 generated_dir: generated.dir,
             },
             prebuilt,
-            outfile,
-            sdk_rel,
-            smart_rel,
-            smart_installed,
-            scene_rel,
-            max_composite_entity: generated.max_composite_entity,
-            typecheck: crate::build::BackgroundCheck::default(),
+            loader,
+            typecheck: build::BackgroundCheck::default(),
             type_checking: !opts.skip_type_check,
         };
         if session.type_checking && initial_build {
@@ -294,25 +217,21 @@ impl WatchSession {
     }
 
     fn rewrite_loader_stub(&self) {
-        if let Err(e) = split::write_loader_stub(
-            &self.outfile,
-            &self.sdk_rel,
-            self.smart_installed.then_some(self.smart_rel.as_str()),
-            &self.scene_rel,
-            self.max_composite_entity,
-            crate::entrypoint::authoritative_multiplayer(&self.project),
-        ) {
+        if let Err(e) = self.loader.write() {
             ux::report_watch(&e);
         }
     }
 
     pub async fn run(mut self, mut fs: FsWatcher, notify: impl Fn(ReloadEvent)) -> Result<()> {
-        loop {
-            let Some(batch) = fs.next_batch().await else {
-                break;
-            };
+        while let Some(batch) = fs.next_batch().await {
             let (models, paths) = partition_batch(batch);
-            note_models(&self.project.root, &models);
+            for (model, removed) in &models {
+                let verb = if *removed { "removed" } else { "update" };
+                ux::note_clocked(format!(
+                    "\u{21bb} model {verb} {}",
+                    ux::rel_to(&self.project.root, model)
+                ));
+            }
             for (path, removed) in models {
                 notify(ReloadEvent::Model { path, removed });
             }
@@ -336,8 +255,8 @@ impl WatchSession {
                     continue;
                 }
                 Ok(Some(new_max)) => {
-                    if new_max != self.max_composite_entity {
-                        self.max_composite_entity = new_max;
+                    if new_max != self.loader.max_composite_entity {
+                        self.loader.max_composite_entity = new_max;
                         self.rewrite_loader_stub();
                     }
                     true
@@ -347,42 +266,45 @@ impl WatchSession {
             if self.prebuilt.is_none() {
                 refresh_sdk_chunk_cli(&self.project, &mut self.split, composites_changed).await;
             }
-            match esbuild::bundle(&self.project, &self.es_opts).await {
-                Ok(()) => {
-                    tracing::info!(
-                        "rebuilt {} in {}",
-                        self.es_opts.outfile.display(),
-                        ux::fmt_elapsed(started.elapsed())
-                    );
-                    match crate::build::install_smart_chunk(
-                        &self.project,
-                        self.prebuilt.as_ref(),
-                        &self.project.root,
-                        &self.scene_rel,
-                        &self.smart_rel,
-                    ) {
-                        Ok(now) if now != self.smart_installed => {
-                            self.smart_installed = now;
-                            self.rewrite_loader_stub();
-                        }
-                        Ok(_) => {}
-                        Err(e) => ux::report_watch(&e),
-                    }
-                    ux::note_clocked(format!(
-                        "\u{21bb} rebuilt {} ({})",
-                        ux::rel_to(&self.project.root, &self.es_opts.outfile),
-                        ux::fmt_elapsed_tinted(started.elapsed(), ux::RESTORE_DIM)
-                    ));
-                    notify(ReloadEvent::Scene);
-                    if self.type_checking {
-                        self.typecheck.restart(self.project.clone());
-                    }
+            if let Err(e) = esbuild::bundle(&self.project, &self.es_opts).await {
+                ux::report_watch(&e);
+                continue;
+            }
+            tracing::info!(
+                "rebuilt {} in {}",
+                self.es_opts.outfile.display(),
+                ux::fmt_elapsed(started.elapsed())
+            );
+            match build::install_smart_chunk(
+                &self.project,
+                self.prebuilt.as_ref(),
+                &self.project.root,
+                &self.loader.paths.scene,
+                &self.loader.paths.smart,
+            ) {
+                Ok(now) if now != self.loader.smart_installed => {
+                    self.loader.smart_installed = now;
+                    self.rewrite_loader_stub();
                 }
+                Ok(_) => {}
                 Err(e) => ux::report_watch(&e),
+            }
+            ux::note_clocked(format!(
+                "\u{21bb} rebuilt {} ({})",
+                ux::rel_to(&self.project.root, &self.es_opts.outfile),
+                ux::fmt_elapsed_tinted(started.elapsed(), ux::RESTORE_DIM)
+            ));
+            notify(ReloadEvent::Scene);
+            if self.type_checking {
+                self.typecheck.restart(self.project.clone());
             }
         }
         Ok(())
     }
+}
+
+fn read_script_utils(generated_dir: &Path) -> String {
+    std::fs::read_to_string(generated_dir.join("script-utils.js")).unwrap_or_default()
 }
 
 fn watch_regen_error(e: anyhow::Error, what: &str) -> anyhow::Error {
@@ -392,13 +314,6 @@ fn watch_regen_error(e: anyhow::Error, what: &str) -> anyhow::Error {
     )
     .why(format!("{e:#}"))
     .into()
-}
-
-fn note_models(root: &Path, models: &[(PathBuf, bool)]) {
-    for (model, removed) in models {
-        let verb = if *removed { "removed" } else { "update" };
-        ux::note_clocked(format!("\u{21bb} model {verb} {}", ux::rel_to(root, model)));
-    }
 }
 
 async fn regenerate_composites(
@@ -433,10 +348,9 @@ async fn regenerate_composites(
 
 async fn refresh_sdk_chunk_cli(project: &Project, sp: &mut SplitState, composites_changed: bool) {
     let keys = split::registry_keys(project);
-    let script_utils = if composites_changed {
-        std::fs::read_to_string(sp.generated_dir.join("script-utils.js")).unwrap_or_default()
-    } else {
-        sp.script_utils.clone()
+    let script_utils = match composites_changed {
+        true => read_script_utils(&sp.generated_dir),
+        false => sp.script_utils.clone(),
     };
     if keys == sp.registry && script_utils == sp.script_utils {
         return;
@@ -472,22 +386,18 @@ mod tests {
 
     #[test]
     fn partition_batch_flags_missing_models_as_removed() {
-        let dir =
-            std::env::temp_dir().join(format!("dcl-one-sdk-partition-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let present = dir.join("tree.glb");
+        let dir = crate::scene::Tmp::new("partition");
+        let present = dir.0.join("tree.glb");
         std::fs::write(&present, b"glb").unwrap();
-        let gone = dir.join("old.gltf");
+        let gone = dir.0.join("old.gltf");
         let (models, code) = partition_batch(vec![
             present.clone(),
             gone.clone(),
             present.clone(),
-            dir.join("src/game.ts"),
+            dir.0.join("src/game.ts"),
         ]);
-        assert_eq!(code, vec![dir.join("src/game.ts")]);
+        assert_eq!(code, vec![dir.0.join("src/game.ts")]);
         assert_eq!(models, vec![(gone, true), (present, false)]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn under_root(rel: &str) -> bool {

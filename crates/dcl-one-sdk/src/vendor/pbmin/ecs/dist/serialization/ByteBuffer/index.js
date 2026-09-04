@@ -35,7 +35,7 @@ export class ReadWriteByteBuffer {
     constructor(buffer, readingOffset, writingOffset) {
         _ReadWriteByteBuffer_instances.add(this);
         this._buffer = buffer || new Uint8Array(defaultInitialCapacity);
-        this.view = new DataView(this._buffer.buffer, this._buffer.byteOffset);
+        this.view = new DataView(this._buffer.buffer, this._buffer.byteOffset, this._buffer.byteLength);
         this.woffset = writingOffset ?? (buffer ? this._buffer.length : null) ?? 0;
         this.roffset = readingOffset ?? 0;
     }
@@ -230,9 +230,8 @@ _ReadWriteByteBuffer_instances = new WeakSet(), _ReadWriteByteBuffer_woAdd = fun
         const newsize = getNextSize(this._buffer.byteLength, this.woffset + amount);
         const newBuffer = new Uint8Array(newsize);
         newBuffer.set(this._buffer);
-        const oldOffset = this._buffer.byteOffset;
         this._buffer = newBuffer;
-        this.view = new DataView(this._buffer.buffer, oldOffset);
+        this.view = new DataView(this._buffer.buffer, this._buffer.byteOffset, this._buffer.byteLength);
     }
     this.woffset += amount;
     return this.woffset - amount;

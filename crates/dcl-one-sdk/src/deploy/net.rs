@@ -4,15 +4,19 @@ use super::{
 use crate::ux::{self, TrySteps, UserError};
 use anyhow::{bail, Context, Result};
 use catalyrst_crypto::Wallet;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::time::Duration;
 
-/// The canonical public server for named worlds. A scene whose
-/// `worldConfiguration.name` is set already names its destination, so this is
-/// what a world deploy resolves to when no flag or env default says otherwise.
+/// Where a world deploy goes when no flag or env default names a server.
 pub const WORLDS_CONTENT_SERVER: &str = "https://worlds-content-server.decentraland.org";
+
+const USER_AGENT: &str = concat!("dcl-one-sdk/", env!("CARGO_PKG_VERSION"));
+pub(crate) const VERBOSE_HINT: &str = "re-run with --verbose for the full response";
+
+type Files = [(String, String, Vec<u8>)];
 
 pub(crate) fn client(connect: Duration, total: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
@@ -21,7 +25,7 @@ pub(crate) fn client(connect: Duration, total: Duration) -> Result<reqwest::Clie
         // a self-hosted realm. Saying who we are is not a bypass — an edge
         // that challenges still challenges — it just stops the requests
         // reading as nobody's.
-        .user_agent(concat!("dcl-one-sdk/", env!("CARGO_PKG_VERSION")))
+        .user_agent(USER_AGENT)
         .connect_timeout(connect)
         .timeout(total)
         .build()
@@ -36,32 +40,72 @@ fn upload_client() -> Result<reqwest::Client> {
     client(Duration::from_secs(10), Duration::from_secs(300))
 }
 
-/// Upload the entity with Node's `fetch`. A Cloudflare-fronted worlds server
-/// challenges reqwest and curl but NOT Node — the official Creator Hub and
-/// sdk-commands are Node, so its request fingerprint is the one the edge is
-/// built to accept. The SDK already needs Node to build, so it is here. The
-/// bytes are staged to a temp dir and a tiny module POSTs them; `None` means
-/// Node is absent (fall back to curl, then reqwest). Same signed entity,
-/// different sender.
+/// Send and read the body; the caller maps the transport error to its own
+/// "unreachable" message.
+pub(crate) async fn send_text(req: reqwest::RequestBuilder) -> reqwest::Result<(u16, String)> {
+    let resp = req.send().await?;
+    Ok((
+        resp.status().as_u16(),
+        resp.text().await.unwrap_or_default(),
+    ))
+}
+
+pub(crate) fn with_headers(
+    req: reqwest::RequestBuilder,
+    headers: Vec<(String, String)>,
+) -> reqwest::RequestBuilder {
+    headers.into_iter().fold(req, |r, (k, v)| r.header(k, v))
+}
+
+pub(crate) fn read_server_message() -> TrySteps {
+    TrySteps::one("read the server message above").and(VERBOSE_HINT)
+}
+
+/// A refusal carrying the server body as its "why" when there is one.
+pub(crate) fn refusal(u: UserError, body: &str) -> anyhow::Error {
+    let body = body.trim();
+    if body.is_empty() {
+        u.into()
+    } else {
+        u.why(body).into()
+    }
+}
+
+fn stage_entity(dir: &Path, entity_id: &str, entity_bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(entity_id), entity_bytes)
+}
+
+/// The multipart `authChain[i][k]` fields, one per link and key.
+fn chain_fields(chain: &Value) -> Vec<(usize, &'static str, &str)> {
+    let mut out = Vec::new();
+    for (i, link) in chain.as_array().into_iter().flatten().enumerate() {
+        for k in ["type", "payload", "signature"] {
+            out.push((i, k, link.get(k).and_then(Value::as_str).unwrap_or("")));
+        }
+    }
+    out
+}
+
+/// Upload with Node's `fetch`: a Cloudflare-fronted worlds server challenges
+/// reqwest and curl but not Node, whose fingerprint (the official Creator Hub
+/// and sdk-commands) is the one the edge accepts. `None` means Node is
+/// absent.
 async fn node_upload(
     url: &str,
     entity_id: &str,
     entity_bytes: &[u8],
-    files: &[(String, String, Vec<u8>)],
-    auth_chain: &serde_json::Value,
+    files: &Files,
+    auth_chain: &Value,
 ) -> Option<Result<(u16, String)>> {
     let node = crate::build::find_node()?;
     let dir = std::env::temp_dir().join(format!("dcl-one-sdk-nodeup-{entity_id}"));
-    let cleanup = || {
-        let _ = std::fs::remove_dir_all(&dir);
-    };
     let stage = || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(entity_id), entity_bytes)?;
-        for (_rel, hash, bytes) in files {
+        stage_entity(&dir, entity_id, entity_bytes)?;
+        for (_, hash, bytes) in files {
             std::fs::write(dir.join(hash), bytes)?;
         }
-        let cfg = serde_json::json!({
+        let cfg = json!({
             "url": url,
             "dir": dir.to_string_lossy(),
             "entityId": entity_id,
@@ -69,11 +113,10 @@ async fn node_upload(
             "files": files.iter().map(|(_, h, _)| h).collect::<Vec<_>>(),
         });
         std::fs::write(dir.join("cfg.json"), serde_json::to_vec(&cfg)?)?;
-        std::fs::write(dir.join("up.mjs"), NODE_UPLOAD_MJS)?;
-        Ok(())
+        std::fs::write(dir.join("up.mjs"), NODE_UPLOAD_MJS)
     };
     if stage().is_err() {
-        cleanup();
+        let _ = std::fs::remove_dir_all(&dir);
         return Some(Err(anyhow::anyhow!("could not stage the upload")));
     }
     let out = tokio::process::Command::new(&node)
@@ -81,33 +124,30 @@ async fn node_upload(
         .arg(dir.join("cfg.json"))
         .output()
         .await;
-    cleanup();
-    match out {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let v: serde_json::Value = match serde_json::from_str(stdout.trim()) {
-                Ok(v) => v,
-                // No JSON on stdout means the fetch threw before a response —
-                // a connection refused / DNS failure / timeout. Report it as
-                // status 0, which the caller renders as "could not reach the
-                // content server", the same as the reqwest transport error.
-                Err(_) => return Some(Ok((0, String::new()))),
-            };
-            let code = v.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16;
-            let body = v
-                .get("body")
-                .and_then(|b| b.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(Ok((code, body)))
-        }
-        Err(e) => Some(Err(anyhow::anyhow!("node could not run: {e}"))),
-    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let o = match out {
+        Ok(o) => o,
+        Err(e) => return Some(Err(anyhow::anyhow!("node could not run: {e}"))),
+    };
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    // No JSON on stdout means the fetch threw before a response —
+    // a connection refused / DNS failure / timeout. Report it as
+    // status 0, which the caller renders as "could not reach the
+    // content server", the same as the reqwest transport error.
+    let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) else {
+        return Some(Ok((0, String::new())));
+    };
+    let code = v.get("status").and_then(Value::as_u64).unwrap_or(0) as u16;
+    let body = v
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some(Ok((code, body)))
 }
 
-/// The module `node_upload` runs. Node 18+ has global `fetch`/`FormData`/
-/// `Blob`; it reads the staged bytes and POSTs the multipart, printing one
-/// line of JSON with the status and body.
+/// Node 18+ has global `fetch`/`FormData`/`Blob`; prints one JSON line with
+/// the status and body.
 const NODE_UPLOAD_MJS: &str = r#"import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 const cfg = JSON.parse(readFileSync(process.argv[2], 'utf8'));
@@ -132,63 +172,57 @@ try {
 }
 "#;
 
-/// Upload the entity with curl. A Cloudflare-fronted worlds server
-/// challenges the reqwest upload — its request fingerprint (multipart
-/// boundary, header order and casing) reads as automated where curl's does
-/// not. Node is preferred (its fingerprint is the one the edge accepts);
-/// curl is the fallback when Node is absent. `None` means curl is absent
-/// too. The signed entity is identical — this changes who sends, not what.
+/// Upload with curl, the fallback when Node is absent: its multipart
+/// fingerprint passes edges that challenge reqwest's. `None` means curl is
+/// absent too.
 async fn curl_upload(
     url: &str,
     entity_id: &str,
     entity_bytes: &[u8],
-    files: &[(String, String, Vec<u8>)],
-    auth_chain: &serde_json::Value,
+    files: &Files,
+    auth_chain: &Value,
 ) -> Option<Result<(u16, String)>> {
     let dir = std::env::temp_dir().join(format!("dcl-one-sdk-upload-{entity_id}"));
-    let cleanup = || {
-        let _ = std::fs::remove_dir_all(&dir);
-    };
-    if std::fs::create_dir_all(&dir).is_err()
-        || std::fs::write(dir.join(entity_id), entity_bytes).is_err()
-    {
+    if stage_entity(&dir, entity_id, entity_bytes).is_err() {
         return Some(Err(anyhow::anyhow!("could not stage the upload")));
     }
+    let part = |name: &str, mime: &str| {
+        format!(
+            "{name}=@{};type={mime};filename={name}",
+            dir.join(name).display()
+        )
+    };
     let mut cmd = tokio::process::Command::new("curl");
-    cmd.arg("-sS")
-        .args(["-X", "POST"])
-        .args(["-A", concat!("dcl-one-sdk/", env!("CARGO_PKG_VERSION"))])
-        .args(["-w", "\n%{http_code}"])
-        .arg("-F")
-        .arg(format!("entityId={entity_id}"))
-        .arg("-F")
-        .arg(format!(
-            "authChain={}",
-            serde_json::to_string(auth_chain).ok()?
-        ));
-    for (i, link) in auth_chain.as_array().into_iter().flatten().enumerate() {
-        let f = |k: &str| link.get(k).and_then(|v| v.as_str()).unwrap_or("");
-        for k in ["type", "payload", "signature"] {
-            cmd.arg("-F").arg(format!("authChain[{i}][{k}]={}", f(k)));
-        }
-    }
-    cmd.arg("-F").arg(format!(
-        "{entity_id}=@{};type=application/json;filename={entity_id}",
-        dir.join(entity_id).display()
+    cmd.args([
+        "-sS",
+        "-X",
+        "POST",
+        "-A",
+        USER_AGENT,
+        "-w",
+        "\n%{http_code}",
+    ])
+    .arg("-F")
+    .arg(format!("entityId={entity_id}"))
+    .arg("-F")
+    .arg(format!(
+        "authChain={}",
+        serde_json::to_string(auth_chain).ok()?
     ));
-    for (_rel, hash, bytes) in files {
+    for (i, k, v) in chain_fields(auth_chain) {
+        cmd.arg("-F").arg(format!("authChain[{i}][{k}]={v}"));
+    }
+    cmd.arg("-F").arg(part(entity_id, "application/json"));
+    for (_, hash, bytes) in files {
         if std::fs::write(dir.join(hash), bytes).is_err() {
-            cleanup();
+            let _ = std::fs::remove_dir_all(&dir);
             return Some(Err(anyhow::anyhow!("could not stage a payload file")));
         }
-        cmd.arg("-F").arg(format!(
-            "{hash}=@{};type=application/octet-stream;filename={hash}",
-            dir.join(hash).display()
-        ));
+        cmd.arg("-F").arg(part(hash, "application/octet-stream"));
     }
     cmd.arg(url);
     let out = cmd.output().await;
-    cleanup();
+    let _ = std::fs::remove_dir_all(&dir);
     match out {
         Ok(o) => {
             let combined = String::from_utf8_lossy(&o.stdout);
@@ -203,16 +237,56 @@ async fn curl_upload(
     }
 }
 
-/// How far the caller has already consented to a target being chosen for it.
-/// Only consulted when nothing named one, which is the single path on which
-/// this CLI can reach the public network without being asked to.
+async fn reqwest_upload(
+    url: &str,
+    entity_id: &str,
+    entity_bytes: Vec<u8>,
+    files: &Files,
+    auth_chain: &Value,
+) -> Result<(u16, String)> {
+    use reqwest::multipart::{Form, Part};
+    let mut form = Form::new()
+        .text("entityId", entity_id.to_string())
+        .text("authChain", serde_json::to_string(auth_chain)?);
+    for (i, k, v) in chain_fields(auth_chain) {
+        form = form.text(format!("authChain[{i}][{k}]"), v.to_string());
+    }
+    form = form.part(
+        entity_id.to_string(),
+        Part::bytes(entity_bytes)
+            .file_name(entity_id.to_string())
+            .mime_str("application/json")?,
+    );
+    for (_, hash, bytes) in files {
+        form = form.part(
+            hash.clone(),
+            Part::bytes(bytes.clone()).file_name(hash.clone()),
+        );
+    }
+    send_text(upload_client()?.post(url).multipart(form))
+        .await
+        .map_err(|e| unreachable_server(url, e))
+}
+
+/// How far the caller has already consented to a target being chosen for it —
+/// the only path on which this CLI reaches the public network unasked.
 #[derive(Clone, Copy, Default)]
 pub(super) struct TargetConsent {
     pub assume_yes: bool,
     pub non_interactive: bool,
-    /// The chosen-for-you note stays off the terminal: the page-driven flow
-    /// already names the destination on the page that consented to it.
+    /// Skip the chosen-for-you note: the page-driven flow names the
+    /// destination on the page that consented to it.
     pub quiet: bool,
+}
+
+impl TargetConsent {
+    fn from_opts(opts: &DeployOptions) -> Self {
+        TargetConsent {
+            assume_yes: opts.yes,
+            non_interactive: opts.ci,
+            quiet: opts.quiet,
+        }
+    }
 }
 
 pub(super) async fn resolve_target(
@@ -225,11 +299,7 @@ pub(super) async fn resolve_target(
         opts.target_content.as_deref(),
         world,
         headless,
-        TargetConsent {
-            assume_yes: opts.yes,
-            non_interactive: opts.ci,
-            quiet: opts.quiet,
-        },
+        TargetConsent::from_opts(opts),
     )
     .await
 }
@@ -252,7 +322,7 @@ pub(super) async fn resolve_target_from(
         (Some(t), None) => catalyst_content_url(t).await,
         (None, None) => {
             if let Some(t) = env_default_target() {
-                return default_env_target(&t).await;
+                return Ok(default_env_target(&t));
             }
             if let Some(w) = world {
                 ux::note(format!(
@@ -282,37 +352,34 @@ pub fn non_upstream_note(target: &str) -> Option<String> {
     let upstream = UPSTREAM_CATALYST_HOSTS
         .iter()
         .any(|r| host_of(r).is_some_and(|h| h.eq_ignore_ascii_case(&host)));
-    if upstream {
-        None
-    } else {
-        Some(format!(
+    (!upstream).then(|| {
+        format!(
             "publishing to {host}: this updates that network only, not Genesis City on decentraland.org"
-        ))
-    }
+        )
+    })
+}
+
+fn after_scheme(url: &str) -> &str {
+    url.split_once("://").map_or(url, |(_, r)| r)
 }
 
 pub(crate) fn host_of(url: &str) -> Option<String> {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
-    }
+    let host = after_scheme(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 pub(super) fn url_path(base: &str) -> String {
-    let rest = base.split_once("://").map_or(base, |(_, r)| r);
-    match rest.find('/') {
-        Some(i) => rest[i..].to_string(),
-        None => String::new(),
-    }
+    let rest = after_scheme(base);
+    rest.find('/')
+        .map_or(String::new(), |i| rest[i..].to_string())
 }
 
-/// A blank `DCL_ONE_SDK_DEFAULT_TARGET` means "unset", not "deploy to the empty
-/// string": it sanitizes to a bare "https:", which no server answers. The
-/// landing page reads it the same way when it prints the deploy command, so
-/// both have to fall through to the world branch or the rotation together.
+/// A blank `DCL_ONE_SDK_DEFAULT_TARGET` is "unset", not the empty string: it
+/// would sanitize to a bare "https:". The landing page reads it the same way
+/// when it prints the deploy command, so both fall through together.
 pub fn env_default_target() -> Option<String> {
     std::env::var("DCL_ONE_SDK_DEFAULT_TARGET")
         .ok()
@@ -320,18 +387,14 @@ pub fn env_default_target() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// The variable rides the environment, and a bare restart silently falls
-/// back to the public servers -- a world deploy aimed at a self-hosted realm
-/// walks into the upstream wall instead. So the value sticks per scene: a
-/// run with the variable writes `.dcl-one/deploy-target`, a run without one
-/// adopts what is written there (and says which file spoke, so an
-/// intentional return to the public servers knows what to delete).
-pub fn sticky_default_target(root: &std::path::Path) {
+/// A bare restart would silently fall back to the public servers, so the env
+/// target sticks per scene: a run with the variable writes
+/// `.dcl-one/deploy-target`, a run without one adopts it (and names the file,
+/// so a return to the public servers knows what to delete).
+pub fn sticky_default_target(root: &Path) {
     let path = root.join(".dcl-one").join("deploy-target");
     if let Some(t) = env_default_target() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
+        let _ = crate::scene::work_dir(root);
         let _ = std::fs::write(&path, format!("{t}\n"));
         return;
     }
@@ -359,31 +422,28 @@ pub fn sanitize_catalyst_url(t: &str) -> String {
     with_scheme.trim_end_matches('/').to_string()
 }
 
-async fn fetch_about(client: &reqwest::Client, base: &str) -> Result<serde_json::Value> {
-    let url = format!("{base}/about");
-    let resp = client.get(&url).send().await?;
+async fn get_json(client: &reqwest::Client, url: &str, parsing: String) -> Result<Value> {
+    let resp = client.get(url).send().await?;
     let status = resp.status();
     if !status.is_success() {
         bail!("GET {url} returned HTTP {}", status.as_u16());
     }
-    resp.json::<serde_json::Value>()
-        .await
-        .with_context(|| format!("parsing {url} as JSON"))
+    resp.json::<Value>().await.context(parsing)
 }
 
-fn about_content_url(about: &serde_json::Value, base: &str) -> Option<String> {
-    about
-        .get("content")
-        .and_then(|c| c.get("publicUrl"))
-        .and_then(|u| u.as_str())
-        .map(|u| {
-            let u = u.trim_end_matches('/');
-            if u.contains("://") {
-                u.to_string()
-            } else {
-                format!("{base}{u}")
-            }
-        })
+async fn fetch_about(client: &reqwest::Client, base: &str) -> Result<Value> {
+    let url = format!("{base}/about");
+    get_json(client, &url, format!("parsing {url} as JSON")).await
+}
+
+fn about_content_url(about: &Value, base: &str) -> Option<String> {
+    let u = about.get("content")?.get("publicUrl")?.as_str()?;
+    let u = u.trim_end_matches('/');
+    Some(if u.contains("://") {
+        u.to_string()
+    } else {
+        format!("{base}{u}")
+    })
 }
 
 async fn catalyst_content_url(t: &str) -> Result<String> {
@@ -409,7 +469,7 @@ async fn catalyst_content_url(t: &str) -> Result<String> {
     })
 }
 
-async fn default_env_target(t: &str) -> Result<String> {
+fn default_env_target(t: &str) -> String {
     // Used verbatim as a content server — no `/about` probe. That probe was
     // one reqwest GET to the deploy host before the upload, and behind a
     // Cloudflare-fronted worlds server it flags the IP so the upload that
@@ -420,11 +480,29 @@ async fn default_env_target(t: &str) -> Result<String> {
     ux::note(format!(
         "using DCL_ONE_SDK_DEFAULT_TARGET as a content server: {base}"
     ));
-    Ok(base)
+    base
 }
 
-/// Nothing named a target, so one is about to be picked, and the built-in
-/// rotation publishes to Genesis City: say so and get a yes before uploading.
+/// Get a yes for a destructive or implicit step: `refuse` is the error when
+/// nobody can be asked, `cancel_step` the way out named after a "no".
+fn confirm(
+    consent: TargetConsent,
+    refuse: impl FnOnce() -> UserError,
+    cancel_step: &str,
+) -> Result<()> {
+    if consent.assume_yes {
+        return Ok(());
+    }
+    if consent.non_interactive || !std::io::stdin().is_terminal() {
+        return Err(refuse().into());
+    }
+    if prompt_continue()? {
+        Ok(())
+    } else {
+        Err(UserError::new("deployment cancelled", TrySteps::one(cancel_step)).into())
+    }
+}
+
 fn consent_to_public_deploy(base: &str, consent: TargetConsent) -> Result<()> {
     let host = host_of(base).unwrap_or_else(|| base.to_string());
     if !consent.quiet {
@@ -432,38 +510,27 @@ fn consent_to_public_deploy(base: &str, consent: TargetConsent) -> Result<()> {
             "no --target given \u{2014} publishing to the public Genesis City network via {host}"
         ));
     }
-    if consent.assume_yes {
-        return Ok(());
-    }
-    if consent.non_interactive || !std::io::stdin().is_terminal() {
-        return Err(UserError::new(
-            format!("this deploy would publish to the public Genesis City network via {base}"),
-            TrySteps::one(
-                "pass --target <catalyst-domain> or --target-content <url> to publish elsewhere",
+    confirm(
+        consent,
+        || {
+            UserError::new(
+                format!("this deploy would publish to the public Genesis City network via {base}"),
+                TrySteps::one(
+                    "pass --target <catalyst-domain> or --target-content <url> to publish elsewhere",
+                )
+                .and("or set DCL_ONE_SDK_DEFAULT_TARGET=<catalyst-or-content-url>")
+                .and("or pass --yes to confirm the public deploy non-interactively"),
             )
-            .and("or set DCL_ONE_SDK_DEFAULT_TARGET=<catalyst-or-content-url>")
-            .and("or pass --yes to confirm the public deploy non-interactively"),
-        )
-        .why("no target was given, so the target was chosen for you")
-        .into());
-    }
-    if prompt_continue()? {
-        Ok(())
-    } else {
-        Err(UserError::new(
-            "deployment cancelled",
-            TrySteps::one("pass --target <catalyst-domain> to publish somewhere else"),
-        )
-        .into())
-    }
+            .why("no target was given, so the target was chosen for you")
+        },
+        "pass --target <catalyst-domain> to publish somewhere else",
+    )
 }
 
 async fn rotation_content_url(consent: TargetConsent) -> Result<String> {
     let configured = configured_catalyst_rotation();
     let rotation = configured.clone().unwrap_or_else(catalyst_rotation);
     let client = probe_client()?;
-    // Probed concurrently, taken in rotation-priority order: a dead network
-    // costs one timeout, not one per host.
     let probes: Vec<_> = rotation
         .iter()
         .map(|base| {
@@ -471,14 +538,11 @@ async fn rotation_content_url(consent: TargetConsent) -> Result<String> {
             let base = base.clone();
             tokio::spawn(async move {
                 let about = fetch_about(&client, &base).await.ok()?;
-                if !about
-                    .get("healthy")
-                    .and_then(|h| h.as_bool())
+                let healthy = about.get("healthy").and_then(Value::as_bool);
+                healthy
                     .unwrap_or(false)
-                {
-                    return None;
-                }
-                about_content_url(&about, &base)
+                    .then(|| about_content_url(&about, &base))
+                    .flatten()
             })
         })
         .collect();
@@ -507,38 +571,49 @@ pub struct WorldScene {
     pub parcels: Vec<String>,
     pub timestamp: Option<i64>,
     pub content_hashes: Vec<String>,
-    /// Deployed bytes, when the server reports them (the row's `size` is a
-    /// stringified integer on servers that do; absent elsewhere).
+    /// Deployed bytes; some servers report `size` as a stringified integer,
+    /// others not at all.
     pub size: Option<u64>,
 }
 
-pub(crate) fn entity_title(entity: &serde_json::Value) -> String {
+pub(crate) fn entity_title(entity: &Value) -> String {
     entity
         .get("metadata")
         .and_then(|m| m.get("display"))
         .and_then(|d| d.get("title"))
-        .and_then(|t| t.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("Untitled")
         .to_string()
 }
 
-pub(crate) fn entity_content_hashes(entity: &serde_json::Value) -> Vec<String> {
-    entity
-        .get("content")
-        .and_then(|c| c.as_array())
-        .map(|content| {
-            content
-                .iter()
-                .filter_map(|f| f.get("hash").and_then(|h| h.as_str()))
+fn string_list(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect()
         })
         .unwrap_or_default()
 }
 
-pub(crate) fn parse_world_scenes(body: &serde_json::Value) -> Vec<WorldScene> {
+pub(crate) fn entity_content_hashes(entity: &Value) -> Vec<String> {
+    entity
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter_map(|f| f.get("hash").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_world_scenes(body: &Value) -> Vec<WorldScene> {
     body.get("scenes")
-        .and_then(|s| s.as_array())
+        .and_then(Value::as_array)
         .map(|scenes| {
             scenes
                 .iter()
@@ -546,19 +621,11 @@ pub(crate) fn parse_world_scenes(body: &serde_json::Value) -> Vec<WorldScene> {
                     let entity = s.get("entity").cloned().unwrap_or_default();
                     WorldScene {
                         title: entity_title(&entity),
-                        parcels: s
-                            .get("parcels")
-                            .and_then(|p| p.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(str::to_string))
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        timestamp: entity.get("timestamp").and_then(|t| t.as_i64()),
+                        parcels: string_list(s.get("parcels")),
+                        timestamp: entity.get("timestamp").and_then(Value::as_i64),
                         content_hashes: entity_content_hashes(&entity),
                         size: s.get("size").and_then(|v| match v {
-                            serde_json::Value::String(s) => s.parse().ok(),
+                            Value::String(s) => s.parse().ok(),
                             other => other.as_u64(),
                         }),
                     }
@@ -569,69 +636,90 @@ pub(crate) fn parse_world_scenes(body: &serde_json::Value) -> Vec<WorldScene> {
 }
 
 async fn fetch_world_scenes(target: &str, world: &str) -> Result<Vec<WorldScene>> {
-    let client = probe_client()?;
     let url = format!("{target}/world/{}/scenes", encode_segment(world));
-    let resp = client.get(&url).send().await?;
-    let status = resp.status();
-    if !status.is_success() {
-        bail!("GET {url} returned HTTP {}", status.as_u16());
-    }
-    let body: serde_json::Value = resp.json().await.context("parsing the world scenes list")?;
+    let body = get_json(
+        &probe_client()?,
+        &url,
+        "parsing the world scenes list".to_string(),
+    )
+    .await?;
     Ok(parse_world_scenes(&body))
 }
 
-pub struct PermissionCheck {
-    pub allowed: bool,
-    pub denied_parcels: Vec<String>,
-    /// The permissions document the decision was made from. Carried so a
-    /// refusal can show who owns the world and who was granted what, instead
-    /// of leaving the user to go and ask.
-    pub doc: serde_json::Value,
+struct PermissionCheck {
+    allowed: bool,
+    denied_parcels: Vec<String>,
+    /// So a refusal can show who owns the world and who was granted what.
+    doc: Value,
 }
 
-/// What the permissions document alone says about an address. The scoped
-/// list is a second request, so the decision is split where the protocol
-/// splits it: this half needs one document, and only `NeedsParcels` pays for
-/// the other one. Pure, because both the deploy and the /target page decide
-/// with it, and only fixtures can prove they decide alike.
+/// Whether the signing wallet may publish to the world, asked before the
+/// upload. Off unless `deploy --check-permissions`: the pre-flight GET is
+/// what gets the upload challenged behind a Cloudflare-fronted worlds
+/// server, and the server refuses an unpermitted upload itself. On, a
+/// refusal names the owner and the grant command instead of a bare HTTP
+/// error. Land deploys have no such document and always pass.
+#[derive(Clone)]
+pub struct PermissionGate {
+    pub target: String,
+    pub world: Option<String>,
+    pub pointers: Vec<String>,
+    pub enabled: bool,
+}
+
+impl PermissionGate {
+    pub fn off() -> Self {
+        PermissionGate {
+            target: String::new(),
+            world: None,
+            pointers: Vec::new(),
+            enabled: false,
+        }
+    }
+
+    pub async fn verify(&self, address: &str) -> Result<()> {
+        match (self.enabled, self.world.as_deref()) {
+            (true, Some(world)) => {
+                enforce_world_permission(&self.target, world, address, &self.pointers).await
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// What the permissions document alone says; only `NeedsParcels` pays for the
+/// second (scoped-parcels) request. Pure, so the deploy and the /target page
+/// provably decide alike.
 pub(crate) enum DocAnswer {
     Granted,
     NeedsParcels,
 }
 
-pub(crate) fn deployment_permission_in_doc(doc: &serde_json::Value, address: &str) -> DocAnswer {
-    if doc
-        .get("owner")
-        .and_then(|o| o.as_str())
-        .is_some_and(|o| o.eq_ignore_ascii_case(address))
-    {
+pub(crate) fn deployment_permission_in_doc(doc: &Value, address: &str) -> DocAnswer {
+    let same = |v: &Value| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(address));
+    if doc.get("owner").is_some_and(same) {
         return DocAnswer::Granted;
     }
     if let Some(dep) = doc.get("permissions").and_then(|p| p.get("deployment")) {
-        if dep.get("type").and_then(|t| t.as_str()) == Some("unrestricted") {
+        if dep.get("type").and_then(Value::as_str) == Some("unrestricted") {
             return DocAnswer::Granted;
         }
         let in_wallets = dep
             .get("wallets")
-            .and_then(|w| w.as_array())
-            .is_some_and(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .any(|w| w.eq_ignore_ascii_case(address))
-            });
+            .and_then(Value::as_array)
+            .is_some_and(|arr| arr.iter().any(same));
         if in_wallets {
             let world_wide = doc
                 .get("summary")
                 .and_then(|s| s.get(address.to_lowercase()))
-                .and_then(|entries| entries.as_array())
+                .and_then(Value::as_array)
                 .and_then(|arr| {
-                    arr.iter().find(|e| {
-                        e.get("permission").and_then(|p| p.as_str()) == Some("deployment")
-                    })
+                    arr.iter()
+                        .find(|e| e.get("permission").and_then(Value::as_str) == Some("deployment"))
                 })
                 .map(|e| {
                     e.get("world_wide")
-                        .and_then(|w| w.as_bool())
+                        .and_then(Value::as_bool)
                         .unwrap_or(false)
                 });
             if world_wide.unwrap_or(true) {
@@ -642,13 +730,12 @@ pub(crate) fn deployment_permission_in_doc(doc: &serde_json::Value, address: &st
     DocAnswer::NeedsParcels
 }
 
-/// The deploying pointers the scoped-grant list does NOT cover — the parcels
-/// a deploy would be refused for.
-pub(crate) fn denied_parcels_in(scoped: &serde_json::Value, deploying: &[String]) -> Vec<String> {
+/// The deploying pointers the scoped-grant list does NOT cover.
+pub(crate) fn denied_parcels_in(scoped: &Value, deploying: &[String]) -> Vec<String> {
     let allowed: HashSet<&str> = scoped
         .get("parcels")
-        .and_then(|p| p.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     deploying
         .iter()
@@ -666,12 +753,7 @@ async fn check_world_deployment_permission(
     let client = probe_client()?;
     let base = target.trim_end_matches('/');
     let url = format!("{base}/world/{}/permissions", encode_segment(world));
-    let resp = client.get(&url).send().await?;
-    let status = resp.status();
-    if !status.is_success() {
-        bail!("GET {url} returned HTTP {}", status.as_u16());
-    }
-    let body: serde_json::Value = resp.json().await.context("parsing the world permissions")?;
+    let body = get_json(&client, &url, "parsing the world permissions".to_string()).await?;
     if matches!(
         deployment_permission_in_doc(&body, address),
         DocAnswer::Granted
@@ -687,15 +769,7 @@ async fn check_world_deployment_permission(
         encode_segment(world),
         address.to_lowercase()
     );
-    let resp = client.get(&url).send().await?;
-    let status = resp.status();
-    if !status.is_success() {
-        bail!("GET {url} returned HTTP {}", status.as_u16());
-    }
-    let parcel_body: serde_json::Value = resp
-        .json()
-        .await
-        .context("parsing the parcel permissions")?;
+    let parcel_body = get_json(&client, &url, "parsing the parcel permissions".to_string()).await?;
     let denied_parcels = denied_parcels_in(&parcel_body, deploying);
     Ok(PermissionCheck {
         allowed: denied_parcels.is_empty(),
@@ -704,7 +778,7 @@ async fn check_world_deployment_permission(
     })
 }
 
-pub async fn enforce_world_permission(
+async fn enforce_world_permission(
     target: &str,
     world: &str,
     address: &str,
@@ -726,7 +800,7 @@ pub async fn enforce_world_permission(
             let owner = check
                 .doc
                 .get("owner")
-                .and_then(|o| o.as_str())
+                .and_then(Value::as_str)
                 .unwrap_or("(unknown)");
             Err(UserError::new(
                 format!(
@@ -789,31 +863,23 @@ pub(super) async fn confirm_world_overwrite(
     tracing::warn!(
         "Replacing the world: this DELETES all its other scenes first (--replace-world-scenes)."
     );
-    if opts.yes {
-        return Ok(true);
-    }
-    if opts.ci || !std::io::stdin().is_terminal() {
-        return Err(UserError::new(
-            format!(
-                "this deploy would delete {} existing scene(s) in {world}",
-                others.len()
-            ),
-            TrySteps::one(
-                "drop --replace-world-scenes to deploy alongside them (additive, the default)",
+    confirm(
+        TargetConsent::from_opts(opts),
+        || {
+            UserError::new(
+                format!(
+                    "this deploy would delete {} existing scene(s) in {world}",
+                    others.len()
+                ),
+                TrySteps::one(
+                    "drop --replace-world-scenes to deploy alongside them (additive, the default)",
+                )
+                .and("or pass --yes to confirm the deletion non-interactively"),
             )
-            .and("or pass --yes to confirm the deletion non-interactively"),
-        )
-        .into());
-    }
-    if prompt_continue()? {
-        Ok(true)
-    } else {
-        Err(UserError::new(
-            "deployment cancelled",
-            TrySteps::one("drop --replace-world-scenes to deploy alongside the existing scenes"),
-        )
-        .into())
-    }
+        },
+        "drop --replace-world-scenes to deploy alongside the existing scenes",
+    )?;
+    Ok(true)
 }
 
 fn prompt_continue() -> Result<bool> {
@@ -836,7 +902,7 @@ pub fn build_delete_payload(world: &str) -> String {
     .to_lowercase()
 }
 
-pub fn simple_auth_chain(address: &str, payload: &str, signature: &str) -> serde_json::Value {
+pub fn simple_auth_chain(address: &str, payload: &str, signature: &str) -> Value {
     json!([
         { "type": "SIGNER", "payload": address, "signature": "" },
         { "type": "ECDSA_SIGNED_ENTITY", "payload": payload, "signature": signature },
@@ -856,59 +922,51 @@ pub fn encode_segment(s: &str) -> String {
     out
 }
 
-async fn world_delete_request(
-    target: &str,
-    world: &str,
-    chain: &serde_json::Value,
-) -> Result<(u16, String)> {
-    let links = chain.as_array().cloned().unwrap_or_default();
-    let payload = links
-        .last()
+async fn world_delete_request(target: &str, world: &str, chain: &Value) -> Result<(u16, String)> {
+    let payload = chain
+        .as_array()
+        .and_then(|links| links.last())
         .and_then(|l| l.get("payload"))
-        .and_then(|p| p.as_str())
-        .unwrap_or_default()
-        .to_string();
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let url = format!("{target}/entities/{}", encode_segment(world));
-    let mut req = upload_client()?.delete(&url);
-    for (name, value) in crate::world::headers_from_chain(&payload, chain) {
-        req = req.header(name, value);
-    }
-    let resp = match req.send().await {
-        Ok(resp) => resp,
-        Err(e) => return Err(unreachable_server(&url, e)),
-    };
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    Ok((status, body))
+    let req = with_headers(
+        upload_client()?.delete(&url),
+        crate::world::headers_from_chain(payload, chain),
+    );
+    send_text(req)
+        .await
+        .map_err(|e| unreachable_server(&url, e))
 }
 
 fn world_delete_refused(world: &str, status: u16, body: &str) -> anyhow::Error {
-    let mut u = UserError::new(
-        format!(
-            "the content server refused to delete the existing scenes in {world} (HTTP {status})"
+    refusal(
+        UserError::new(
+            format!(
+                "the content server refused to delete the existing scenes in {world} (HTTP {status})"
+            ),
+            TrySteps::one(
+                "drop --replace-world-scenes to deploy alongside existing scenes without deleting them",
+            )
+            .and("check the signing wallet has permission on the world"),
         ),
-        TrySteps::one(
-            "drop --replace-world-scenes to deploy alongside existing scenes without deleting them",
-        )
-        .and("check the signing wallet has permission on the world"),
-    );
-    let body = body.trim();
-    if !body.is_empty() {
-        u = u.why(body);
-    }
-    u.into()
+        body,
+    )
 }
 
-pub async fn send_world_delete(target: &str, world: &str, chain: &serde_json::Value) -> Result<()> {
-    let (status, body) = world_delete_request(target, world, chain).await?;
-    if (200..300).contains(&status) {
-        ux::note(format!(
-            "removed the existing scenes in {world} (HTTP {status})"
-        ));
-        Ok(())
-    } else {
-        Err(world_delete_refused(world, status, &body))
+fn world_delete_outcome(world: &str, status: u16, body: &str) -> Result<()> {
+    if !(200..300).contains(&status) {
+        return Err(world_delete_refused(world, status, body));
     }
+    ux::note(format!(
+        "removed the existing scenes in {world} (HTTP {status})"
+    ));
+    Ok(())
+}
+
+pub async fn send_world_delete(target: &str, world: &str, chain: &Value) -> Result<()> {
+    let (status, body) = world_delete_request(target, world, chain).await?;
+    world_delete_outcome(world, status, &body)
 }
 
 pub(super) async fn delete_world_scenes(target: &str, world: &str, wallet: &Wallet) -> Result<()> {
@@ -916,16 +974,10 @@ pub(super) async fn delete_world_scenes(target: &str, world: &str, wallet: &Wall
     let chain = catalyrst_crypto::create_simple_auth_chain(wallet, &payload)
         .context("EIP-191 sign of the scene-removal payload")?;
     let (status, body) = world_delete_request(target, world, &chain).await?;
-    if (200..300).contains(&status) {
-        ux::note(format!(
-            "removed the existing scenes in {world} (HTTP {status})"
-        ));
-        return Ok(());
-    }
     if status == 404 || status == 405 {
         return delete_scenes_per_coord(target, world, wallet).await;
     }
-    Err(world_delete_refused(world, status, &body))
+    world_delete_outcome(world, status, &body)
 }
 
 async fn delete_scenes_per_coord(target: &str, world: &str, wallet: &Wallet) -> Result<()> {
@@ -941,18 +993,12 @@ async fn delete_scenes_per_coord(target: &str, world: &str, wallet: &Wallet) -> 
         let suffix = format!("/world/{}/scenes/{parcel}", encode_segment(world));
         let path = format!("{}{suffix}", url_path(target));
         let url = format!("{target}{suffix}");
-        let mut req = client.delete(&url);
-        for (k, v) in crate::world::signed_headers(wallet, "delete", &path)? {
-            req = req.header(k, v);
-        }
-        let resp = match req.send().await {
-            Ok(resp) => resp,
-            Err(e) => return Err(unreachable_server(&url, e)),
-        };
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(world_delete_refused(world, status.as_u16(), &body));
+        let headers = crate::world::signed_headers(wallet, "delete", &path)?;
+        let (status, body) = send_text(with_headers(client.delete(&url), headers))
+            .await
+            .map_err(|e| unreachable_server(&url, e))?;
+        if !(200..300).contains(&status) {
+            return Err(world_delete_refused(world, status, &body));
         }
         removed += 1;
     }
@@ -962,18 +1008,15 @@ async fn delete_scenes_per_coord(target: &str, world: &str, wallet: &Wallet) -> 
     Ok(())
 }
 
-/// A delegated identity's auth chain: the wallet's SIGNER link, the
-/// ephemeral delegation it signed once (`ECDSA_EPHEMERAL`), and the entity
-/// signed by that ephemeral key. The content server verifies the delegation
-/// and the entity signature against it — the wallet itself never touches
-/// this deploy.
+/// A delegated identity's chain: the wallet's SIGNER link, the ephemeral
+/// delegation it signed once, and the entity signed by that ephemeral key.
 pub fn ephemeral_auth_chain(
     signer: &str,
     delegation_payload: &str,
     delegation_signature: &str,
     entity_id: &str,
     entity_signature: &str,
-) -> serde_json::Value {
+) -> Value {
     json!([
         { "type": "SIGNER", "payload": signer, "signature": "" },
         { "type": "ECDSA_EPHEMERAL", "payload": delegation_payload, "signature": delegation_signature },
@@ -985,7 +1028,7 @@ pub async fn upload_entity(
     target: &str,
     entity_id: &str,
     entity_bytes: Vec<u8>,
-    files: &[(String, String, Vec<u8>)],
+    files: &Files,
     address: &str,
     signature: &str,
 ) -> Result<String> {
@@ -993,16 +1036,14 @@ pub async fn upload_entity(
     upload_entity_with_chain(target, entity_id, entity_bytes, files, address, auth_chain).await
 }
 
-/// Upload with a pre-built auth chain of any length — the multipart
-/// `authChain[i]` fields are derived from the chain, so a two-link wallet
-/// deploy and a three-link ephemeral deploy travel the same path.
+/// Upload with a pre-built auth chain of any length.
 pub async fn upload_entity_with_chain(
     target: &str,
     entity_id: &str,
     entity_bytes: Vec<u8>,
-    files: &[(String, String, Vec<u8>)],
+    files: &Files,
     address: &str,
-    auth_chain: serde_json::Value,
+    auth_chain: Value,
 ) -> Result<String> {
     let url = format!("{}/entities", target.trim_end_matches('/'));
     tracing::info!("uploading to {url} as {address} (entity {entity_id})");
@@ -1015,61 +1056,19 @@ pub async fn upload_entity_with_chain(
     // server before it: a reqwest pre-flight would flag the IP and the upload
     // that follows would inherit the challenge.
     let carried = match node_upload(&url, entity_id, &entity_bytes, files, &auth_chain).await {
-        Some(r) => Some(r),
-        None => curl_upload(&url, entity_id, &entity_bytes, files, &auth_chain).await,
+        Some(r) => r,
+        None => match curl_upload(&url, entity_id, &entity_bytes, files, &auth_chain).await {
+            Some(r) => r,
+            None => reqwest_upload(&url, entity_id, entity_bytes, files, &auth_chain).await,
+        },
     };
-    let (status, body) = match carried {
-        Some(Ok((c, b))) => (c, b),
-        Some(Err(e)) => return Err(e),
-        None => {
-            let mut form = reqwest::multipart::Form::new()
-                .text("entityId", entity_id.to_string())
-                .text("authChain", serde_json::to_string(&auth_chain)?);
-            for (i, link) in auth_chain.as_array().into_iter().flatten().enumerate() {
-                let f = |k: &str| {
-                    link.get(k)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                };
-                form = form
-                    .text(format!("authChain[{i}][type]"), f("type"))
-                    .text(format!("authChain[{i}][payload]"), f("payload"))
-                    .text(format!("authChain[{i}][signature]"), f("signature"));
-            }
-            form = form.part(
-                entity_id.to_string(),
-                reqwest::multipart::Part::bytes(entity_bytes)
-                    .file_name(entity_id.to_string())
-                    .mime_str("application/json")?,
-            );
-            for (_rel, hash, bytes) in files {
-                form = form.part(
-                    hash.clone(),
-                    reqwest::multipart::Part::bytes(bytes.clone()).file_name(hash.clone()),
-                );
-            }
-            let resp = match upload_client()?.post(&url).multipart(form).send().await {
-                Ok(resp) => resp,
-                Err(e) => return Err(unreachable_server(&url, e)),
-            };
-            let s = resp.status().as_u16();
-            (s, resp.text().await.unwrap_or_default())
-        }
-    };
+    let (status, body) = carried?;
 
     if status == 0 {
         // curl reached no server (connection refused, DNS failure, timeout):
         // no HTTP response, so `-w %{http_code}` prints 000. Same sentence
         // the reqwest transport error gives.
-        return Err(UserError::new(
-            "could not reach the content server",
-            TrySteps::one("check the server is running and the URL is right").and(
-                "targets: --target <catalyst-domain>, --target-content <content-server-url> (e.g. a local worlds server on http://127.0.0.1:5142)",
-            ),
-        )
-        .why(format!("no response from {url}"))
-        .into());
+        return Err(cannot_reach(format!("no response from {url}")).into());
     }
     if (200..300).contains(&status) {
         tracing::info!("deployed \u{2713} (HTTP {status}) — server: {body}");
@@ -1090,21 +1089,23 @@ pub fn jump_in_url(world: Option<&str>, base: &str) -> String {
     format!("jump in: {}", play_url(world, base))
 }
 
-pub(crate) fn unreachable_server(url: &str, e: reqwest::Error) -> anyhow::Error {
-    let cause = if e.is_timeout() {
-        "timed out"
-    } else {
-        classify_io(&e)
-    };
+fn cannot_reach(why: String) -> UserError {
     UserError::new(
         "could not reach the content server",
         TrySteps::one("check the server is running and the URL is right").and(
             "targets: --target <catalyst-domain>, --target-content <content-server-url> (e.g. a local worlds server on http://127.0.0.1:5142)",
         ),
     )
-    .why(format!("{cause}: {url}"))
-    .caused_by(e)
-    .into()
+    .why(why)
+}
+
+pub(crate) fn unreachable_server(url: &str, e: reqwest::Error) -> anyhow::Error {
+    let cause = if e.is_timeout() {
+        "timed out"
+    } else {
+        classify_io(&e)
+    };
+    cannot_reach(format!("{cause}: {url}")).caused_by(e).into()
 }
 
 fn classify_io(e: &(dyn std::error::Error + 'static)) -> &'static str {
@@ -1122,27 +1123,26 @@ fn classify_io(e: &(dyn std::error::Error + 'static)) -> &'static str {
     "no response"
 }
 
-/// An HTML challenge page is the EDGE answering, not the content server:
-/// Cloudflare's bot protection intercepts the upload and hands back a
-/// browser puzzle no upload client can solve. Recognising it turns a
-/// screenful of dumped markup into the actual problem and its remedy.
+/// An HTML challenge page is Cloudflare's edge answering, not the content
+/// server: a browser puzzle no upload client can solve.
 fn edge_challenge(body: &str) -> bool {
     let b = body.trim_start();
     (b.starts_with("<!DOCTYPE") || b.starts_with("<html") || b.starts_with("<!--"))
         && (body.contains("Cloudflare") || body.contains("cf-ray") || body.contains("cf_chl"))
 }
 
-/// The content server refused a World because it is a Genesis City catalyst
-/// (ADR-173): worlds and parcels are different destinations, and this scene
-/// went to the wrong one. Almost always a `--target-content` /
-/// `DCL_ONE_SDK_DEFAULT_TARGET` pointed at a Genesis catalyst while the
-/// scene declares a `worldConfiguration`.
+/// A World refused by a Genesis City catalyst (ADR-173): almost always a
+/// `--target-content` / `DCL_ONE_SDK_DEFAULT_TARGET` pointed at the wrong
+/// kind of server.
 fn world_at_genesis(body: &str) -> bool {
     body.contains("ADR-173")
         || (body.contains("worldConfiguration") && body.contains("Genesis City"))
 }
 
-fn rejected(code: u16, body: &str, pointers: &[String]) -> anyhow::Error {
+pub(super) fn rejected(code: u16, body: &str, pointers: &[String]) -> anyhow::Error {
+    if super::world_gate::plain_scene_at_worlds(body) {
+        return super::world_gate::refuse_plain_scene_at_worlds();
+    }
     if world_at_genesis(body) {
         return UserError::new(
             "this scene is a World, but it was sent to a Genesis City content server, which only takes parcel scenes",
@@ -1176,25 +1176,21 @@ fn rejected(code: u16, body: &str, pointers: &[String]) -> anyhow::Error {
         TrySteps::one(format!(
             "check the signing wallet owns or has permission on {what}"
         ))
-        .and("re-run with --verbose for the full response")
+        .and(VERBOSE_HINT)
     } else {
-        TrySteps::one("read the server message above")
-            .and("re-run with --verbose for the full response")
+        read_server_message()
     };
-    let mut u = UserError::new(
-        format!("the content server rejected this deployment (HTTP {code})"),
-        steps,
-    );
-    let body = body.trim();
-    if !body.is_empty() {
-        u = u.why(body);
-    }
-    u.into()
+    refusal(
+        UserError::new(
+            format!("the content server rejected this deployment (HTTP {code})"),
+            steps,
+        ),
+        body,
+    )
 }
 
-/// `DCL_ONE_SDK_DEFAULT_TARGET` is process-global state: every test that sets
-/// it or renders through target resolution serializes on this lock, the
-/// deploy-page tests included.
+/// `DCL_ONE_SDK_DEFAULT_TARGET` is process-global: every test that sets it or
+/// resolves a target serializes on this lock, the deploy-page tests included.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -1202,10 +1198,7 @@ pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_n
 mod tests {
     use super::*;
 
-    /// A delegated deploy carries three links the content server can verify
-    /// without the wallet: the SIGNER names it, the ECDSA_EPHEMERAL is the
-    /// delegation it signed, and the ephemeral key signs the entity. The
-    /// ephemeral signature actually recovers to the ephemeral address.
+    /// The ephemeral signature actually recovers to the ephemeral address.
     #[test]
     fn an_ephemeral_chain_is_signer_delegation_and_entity() {
         let ephemeral = catalyrst_crypto::Wallet::from_hex(
@@ -1230,7 +1223,6 @@ mod tests {
         assert_eq!(links[1]["signature"], "0xdelegationsig");
         assert_eq!(links[2]["type"], "ECDSA_SIGNED_ENTITY");
         assert_eq!(links[2]["payload"], entity_id);
-        // The entity link's signature is the ephemeral's, recoverable to it.
         let recovered = catalyrst_crypto::recover::recover_address(
             entity_id.as_bytes(),
             links[2]["signature"].as_str().unwrap(),
@@ -1239,14 +1231,15 @@ mod tests {
         assert!(recovered.eq_ignore_ascii_case(&ephemeral.address()));
     }
 
-    /// A Cloudflare challenge is the edge talking, not the catalyst: the
-    /// error names the edge and the remedy instead of dumping a screenful
-    /// of browser-challenge HTML, while a real server refusal keeps its
-    /// body — a JSON error from the catalyst is worth reading verbatim.
+    fn rendered(code: u16, body: &str) -> String {
+        crate::ux::render(&rejected(code, body, &[]), false, false)
+    }
+
+    /// A Cloudflare challenge names the edge and the remedy instead of dumping
+    /// markup; a real server refusal keeps its body.
     #[test]
     fn a_cloudflare_challenge_reads_as_the_edge_not_the_server() {
-        let challenge = "<!DOCTYPE html>\n<html><head><title>Attention Required! | Cloudflare</title></head></html>";
-        let e = crate::ux::render(&rejected(403, challenge, &[]), false, false);
+        let e = rendered(403, "<!DOCTYPE html>\n<html><head><title>Attention Required! | Cloudflare</title></head></html>");
         assert!(
             e.contains("the realm's edge challenged this deployment"),
             "{e}"
@@ -1257,21 +1250,19 @@ mod tests {
             "the remedy names the cause: {e}"
         );
 
-        let server = r#"{"error":"address has no permission"}"#;
-        let e = crate::ux::render(&rejected(403, server, &[]), false, false);
+        let e = rendered(403, r#"{"error":"address has no permission"}"#);
         assert!(
             e.contains("the content server rejected") && e.contains("no permission"),
             "a real refusal keeps its body: {e}"
         );
     }
 
-    /// ADR-173 (a World sent to a Genesis catalyst) reads as the routing
-    /// mistake it is — name the two destinations and the fix — not the raw
-    /// server sentence.
     #[test]
     fn a_world_at_a_genesis_catalyst_names_the_routing_fix() {
-        let body = r#"{"errors":["The scene.json contains a worldConfiguration section, which is not allowed for Genesis City scenes (see ADR-173: http://adr.decentraland.org/adr/ADR-173). Please remove it and try again."]}"#;
-        let e = crate::ux::render(&rejected(400, body, &[]), false, false);
+        let e = rendered(
+            400,
+            r#"{"errors":["The scene.json contains a worldConfiguration section, which is not allowed for Genesis City scenes (see ADR-173: http://adr.decentraland.org/adr/ADR-173). Please remove it and try again."]}"#,
+        );
         assert!(e.contains("this scene is a World"), "{e}");
         assert!(
             e.contains("worlds server"),
@@ -1287,21 +1278,29 @@ mod tests {
         );
     }
 
-    async fn resolved(raw: Option<&str>, world: Option<&str>, headless: bool) -> Result<String> {
+    fn set_env(raw: Option<&str>) {
         match raw {
             Some(raw) => std::env::set_var("DCL_ONE_SDK_DEFAULT_TARGET", raw),
             None => std::env::remove_var("DCL_ONE_SDK_DEFAULT_TARGET"),
         }
+    }
+
+    async fn resolved(raw: Option<&str>, world: Option<&str>, headless: bool) -> Result<String> {
+        set_env(raw);
         let out = resolve_target_from(None, None, world, headless, TargetConsent::default()).await;
-        std::env::remove_var("DCL_ONE_SDK_DEFAULT_TARGET");
+        set_env(None);
         out
     }
 
-    /// A blank `DCL_ONE_SDK_DEFAULT_TARGET` used to sanitize to a bare
-    /// "https:" and be deployed to. The landing page already reads a blank
-    /// value as unset when it prints the deploy command, so every reader has
-    /// to fall through the same way or the printed command and the real
-    /// target disagree.
+    fn worlds_resolved(raw: Option<&str>) -> Result<String> {
+        set_env(raw);
+        let out = crate::world::resolve_target(None);
+        set_env(None);
+        out
+    }
+
+    /// The landing page reads a blank value as unset when it prints the
+    /// deploy command; every reader must fall through the same way.
     #[tokio::test]
     async fn a_blank_default_target_env_is_unset_on_worlds_and_land() {
         let _guard = ENV_LOCK.lock().await;
@@ -1320,22 +1319,17 @@ mod tests {
             );
             assert!(err.contains("no deploy target given"), "{raw:?}: {err}");
 
-            std::env::set_var("DCL_ONE_SDK_DEFAULT_TARGET", raw);
-            let worlds_server = crate::world::resolve_target(None);
-            std::env::remove_var("DCL_ONE_SDK_DEFAULT_TARGET");
             assert_eq!(
-                worlds_server.expect("blank env falls through to the worlds default"),
+                worlds_resolved(Some(raw)).expect("blank env falls through to the worlds default"),
                 WORLDS_CONTENT_SERVER,
                 "{raw:?}"
             );
         }
     }
 
-    /// Headless (key-signed) world deploys get the default too: the "never
-    /// pick a server implicitly" rule exists so a key never uploads to an
-    /// arbitrary public catalyst, but a world's canonical server is not
-    /// arbitrary — `worldConfiguration.name` in scene.json already names the
-    /// destination.
+    /// Headless world deploys get the default too: "never pick a server
+    /// implicitly" guards keys against arbitrary catalysts, but
+    /// `worldConfiguration.name` already names the destination.
     #[tokio::test]
     async fn a_world_scene_defaults_to_the_public_worlds_server() {
         let _guard = ENV_LOCK.lock().await;
@@ -1343,11 +1337,7 @@ mod tests {
             let target = resolved(None, Some("gather.dcl.eth"), headless).await;
             assert_eq!(target.unwrap(), WORLDS_CONTENT_SERVER, "{headless}");
         }
-        std::env::remove_var("DCL_ONE_SDK_DEFAULT_TARGET");
-        assert_eq!(
-            crate::world::resolve_target(None).unwrap(),
-            WORLDS_CONTENT_SERVER
-        );
+        assert_eq!(worlds_resolved(None).unwrap(), WORLDS_CONTENT_SERVER);
     }
 
     #[tokio::test]
@@ -1360,7 +1350,7 @@ mod tests {
     #[tokio::test]
     async fn an_explicit_target_content_outranks_the_worlds_default_and_the_env() {
         let _guard = ENV_LOCK.lock().await;
-        std::env::set_var("DCL_ONE_SDK_DEFAULT_TARGET", "http://127.0.0.1:9");
+        set_env(Some("http://127.0.0.1:9"));
         let target = resolve_target_from(
             None,
             Some("https://example.org/"),
@@ -1369,13 +1359,12 @@ mod tests {
             TargetConsent::default(),
         )
         .await;
-        std::env::remove_var("DCL_ONE_SDK_DEFAULT_TARGET");
+        set_env(None);
         assert_eq!(target.unwrap(), "https://example.org");
     }
 
-    /// The exact shape `unpublish.rs` resolves with. Unpublish is land-only —
-    /// a parcel never names a world — so the worlds default must not leak in
-    /// and the key-signed refusal stays.
+    /// The exact shape `unpublish.rs` resolves with: land-only, so the worlds
+    /// default must not leak in.
     #[tokio::test]
     async fn land_unpublish_resolution_still_refuses_without_a_target() {
         let _guard = ENV_LOCK.lock().await;

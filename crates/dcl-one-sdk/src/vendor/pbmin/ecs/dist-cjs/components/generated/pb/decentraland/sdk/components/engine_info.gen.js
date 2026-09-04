@@ -8,7 +8,7 @@ exports.PBEngineInfo = void 0;
 const minimal_1 = __importDefault(require("protobufjs/minimal"));
 const protobufPackageSarasa = "decentraland.sdk.components";
 function createBasePBEngineInfo() {
-    return { frameNumber: 0, totalRuntime: 0, tickNumber: 0 };
+    return { frameNumber: 0, totalRuntime: 0, tickNumber: 0, sceneHidden: false };
 }
 /**
  * @public
@@ -24,6 +24,9 @@ var PBEngineInfo;
         }
         if (message.tickNumber !== 0) {
             writer.uint32(24).uint32(message.tickNumber);
+        }
+        if (message.sceneHidden === true) {
+            writer.uint32(32).bool(message.sceneHidden);
         }
         return writer;
     }
@@ -52,6 +55,12 @@ var PBEngineInfo;
                         break;
                     }
                     message.tickNumber = reader.uint32();
+                    continue;
+                case 4:
+                    if (tag !== 32) {
+                        break;
+                    }
+                    message.sceneHidden = reader.bool();
                     continue;
             }
             if ((tag & 7) === 4 || tag === 0) {

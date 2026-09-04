@@ -1,43 +1,40 @@
-use super::http::{build_scene_entity, entities_for, project_for, scene_id_for};
+use super::http::{build_scene_entity, entities_for, scene_id_for};
+use super::testkit::{self, body_text, project_with, state, Tmp};
 use super::*;
 use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::json;
 
-struct Tmp(PathBuf);
-
-impl Tmp {
-    fn new(tag: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("dcl-one-sdk-startws-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Tmp(dir)
-    }
-}
-
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn member(tmp: &Tmp, name: &str, parcels: &[&str]) -> Project {
-    let root = tmp.0.join(name);
-    std::fs::create_dir_all(root.join("bin")).unwrap();
-    std::fs::write(root.join("bin/index.js"), "module.exports={}").unwrap();
-    let scene_json = json!({
-        "main": "bin/index.js",
-        "runtimeVersion": "7",
-        "scene": { "parcels": parcels, "base": parcels[0] }
-    });
-    std::fs::write(root.join("scene.json"), scene_json.to_string()).unwrap();
-    Project {
-        root: root.canonicalize().unwrap(),
-        scene_json,
-    }
+    testkit::scene(&tmp.0, name, parcels, "module.exports={}")
 }
+
+/// One `scene-a` at `0,0`, and a state serving it.
+fn one_scene(tag: &str) -> (Tmp, Project, Arc<AppState>) {
+    let tmp = Tmp::new(tag);
+    let a = member(&tmp, "scene-a", &["0,0"]);
+    let st = Arc::new(state(vec![a.clone()]));
+    (tmp, a, st)
+}
+
+/// `one_scene` with comms on, so `/about` advertises a ws-room adapter.
+fn online_scene(tag: &str) -> (Tmp, AppState) {
+    let tmp = Tmp::new(tag);
+    let mut st = state(vec![member(&tmp, "scene-a", &["0,0"])]);
+    st.offline_comms = false;
+    (tmp, st)
+}
+
+fn request(uri: &str, headers: &[(&str, &str)]) -> Request {
+    let mut req = Request::builder().uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    req.body(axum::body::Body::empty()).unwrap()
+}
+
+const LOCAL: &[(&str, &str)] = &[("host", "127.0.0.1:8000")];
 
 #[test]
 fn a_deep_link_never_carries_both_ab_forms() {
@@ -52,10 +49,6 @@ fn a_deep_link_never_carries_both_ab_forms() {
         "&local-ab=true"
     );
     assert_eq!(joinblock::deep_link_extra(false, false, None, &[]), "");
-}
-
-fn state(projects: Vec<Project>) -> AppState {
-    testkit::state(projects)
 }
 
 #[test]
@@ -86,33 +79,18 @@ fn entities_filter_by_pointer_returns_only_matches() {
     assert!(miss.is_empty());
 }
 
-#[test]
-fn project_for_maps_paths_to_the_owning_member() {
-    let tmp = Tmp::new("owner");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let b = member(&tmp, "scene-b", &["1,0"]);
-    let st = state(vec![a.clone(), b.clone()]);
-    let inside_b = b.root.join("bin/index.js");
-    assert_eq!(project_for(&st, &inside_b).unwrap().root, b.root);
-    assert_eq!(project_for(&st, &a.root).unwrap().root, a.root);
-    let outside = tmp.0.canonicalize().unwrap();
-    assert!(project_for(&st, &outside).is_none());
-}
-
 #[tokio::test]
 async fn about_honors_x_forwarded_proto_host_prefix() {
-    let tmp = Tmp::new("fwd");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let mut st = state(vec![a]);
-    st.offline_comms = false;
-    let req = axum::extract::Request::builder()
-        .uri("/about")
-        .header("host", "127.0.0.1:8000")
-        .header("x-forwarded-proto", "https")
-        .header("x-forwarded-host", "tunnel.example")
-        .header("x-forwarded-prefix", "/t/abc123defg/")
-        .body(axum::body::Body::empty())
-        .unwrap();
+    let (_tmp, st) = online_scene("fwd");
+    let req = request(
+        "/about",
+        &[
+            ("host", "127.0.0.1:8000"),
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "tunnel.example"),
+            ("x-forwarded-prefix", "/t/abc123defg/"),
+        ],
+    );
     let Json(v) = about(State(Arc::new(st)), req).await;
     assert_eq!(
         v["comms"]["fixedAdapter"],
@@ -134,15 +112,8 @@ async fn about_honors_x_forwarded_proto_host_prefix() {
 
 #[tokio::test]
 async fn about_without_forwarding_headers_stays_plain_http() {
-    let tmp = Tmp::new("nofwd");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let mut st = state(vec![a]);
-    st.offline_comms = false;
-    let req = axum::extract::Request::builder()
-        .uri("/about")
-        .header("host", "10.1.2.20:8000")
-        .body(axum::body::Body::empty())
-        .unwrap();
+    let (_tmp, st) = online_scene("nofwd");
+    let req = request("/about", &[("host", "10.1.2.20:8000")]);
     let Json(v) = about(State(Arc::new(st)), req).await;
     assert_eq!(
         v["comms"]["fixedAdapter"],
@@ -156,30 +127,17 @@ async fn about_without_forwarding_headers_stays_plain_http() {
 
 #[tokio::test]
 async fn root_redirect_honors_forwarded_prefix() {
-    let tmp = Tmp::new("redir");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let st = Arc::new(state(vec![a]));
-    let req = axum::extract::Request::builder()
-        .uri("/")
-        .header("x-forwarded-prefix", "/t/abc123defg")
-        .body(axum::body::Body::empty())
-        .unwrap();
+    let (_tmp, _, st) = one_scene("redir");
+    let req = request("/", &[("x-forwarded-prefix", "/t/abc123defg")]);
     let resp = root(State(st.clone()), req).await;
     assert_eq!(
         resp.headers().get(header::LOCATION).unwrap(),
         "/t/abc123defg/about"
     );
-    let req = axum::extract::Request::builder()
-        .uri("/")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let resp = root(State(st), req).await;
+    let resp = root(State(st), request("/", &[])).await;
     assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/about");
 }
 
-/// The landing page exactly as a browser receives it: through `root`, with
-/// the headers and the query string a visitor would send. Tests that
-/// rebuild the page's strings for themselves prove nothing about the page.
 async fn scene_body(st: &Arc<AppState>, headers: &[(&str, &str)]) -> String {
     let mut h = HeaderMap::new();
     for (k, v) in headers {
@@ -190,14 +148,13 @@ async fn scene_body(st: &Arc<AppState>, headers: &[(&str, &str)]) -> String {
     }
     let resp = super::landing::scene_page(st, &h);
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    String::from_utf8(bytes.to_vec()).unwrap()
+    body_text(resp).await
 }
 
+/// The landing page exactly as a browser receives it: through `root`, with
+/// the headers and the query string a visitor would send.
 async fn landing_body(st: &Arc<AppState>, uri: &str, headers: &[(&str, &str)]) -> String {
-    let mut req = axum::extract::Request::builder()
+    let mut req = Request::builder()
         .uri(uri)
         .header("accept", "text/html,application/xhtml+xml");
     for (k, v) in headers {
@@ -216,26 +173,28 @@ async fn landing_body(st: &Arc<AppState>, uri: &str, headers: &[(&str, &str)]) -
         .to_str()
         .unwrap()
         .starts_with("text/html"));
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    String::from_utf8(body.to_vec()).unwrap()
+    body_text(resp).await
+}
+
+/// Nothing loaded from anywhere, no `javascript:` url, no inline handler.
+fn assert_no_foreign_scripts(lower: &str) {
+    assert!(
+        !lower.contains("<script src"),
+        "no script loads from anywhere"
+    );
+    assert!(!lower.contains("javascript:"), "no javascript: url");
+    assert_no_inline_handlers(lower);
 }
 
 /// `/deploy` holds the landing page's script posture: at most its own one
-/// inline script, nothing loaded from anywhere, no `javascript:` url and
-/// no inline handler beside the button that publishes.
+/// inline script, and every POST carries the token and the payload
+/// fingerprint.
 fn assert_no_javascript(body: &str) {
     let body = body.to_lowercase();
     assert!(
         body.matches("<script").count() <= 1,
         "at most the page's own inline script"
     );
-    assert!(
-        !body.contains("<script src"),
-        "no script loads from anywhere"
-    );
-    assert!(!body.contains("javascript:"), "no javascript: url");
     let posts = body.matches(r#"method="post""#).count();
     if posts > 0 {
         assert!(
@@ -252,13 +211,11 @@ fn assert_no_javascript(body: &str) {
              other than what the page showed"
         );
     }
-    assert_no_inline_handlers(&body);
+    assert_no_foreign_scripts(&body);
 }
 
 /// The landing page ships exactly its own two scripts — the `#edit-data`
-/// JSON blob and the inline editor — and nothing else executable: no third
-/// script however hostile the input, nothing loaded from anywhere, no
-/// `javascript:` url, no inline handler, and exactly one POSTing form (the
+/// JSON blob and the inline editor — and exactly one POSTing form (the
 /// bar's connect button; the scene's mutations stay fetches).
 fn assert_only_the_landing_scripts(body: &str) {
     let lower = body.to_lowercase();
@@ -268,18 +225,13 @@ fn assert_only_the_landing_scripts(body: &str) {
         "the data blob and the editor script, nothing more"
     );
     assert!(body.contains(r#"<script type="application/json" id="edit-data">"#));
-    assert!(
-        !lower.contains("<script src"),
-        "no script loads from anywhere"
-    );
-    assert!(!lower.contains("javascript:"), "no javascript: url");
     assert_eq!(
         lower.matches(r#"method="post""#).count(),
         1,
         "the bar's connect button is this page's one form POST; the scene's \
          mutations stay fetches to the gated routes"
     );
-    assert_no_inline_handlers(&lower);
+    assert_no_foreign_scripts(&lower);
 }
 
 fn assert_no_inline_handlers(lower: &str) {
@@ -298,12 +250,11 @@ fn assert_no_inline_handlers(lower: &str) {
 
 /// A form on any page here must be a GET aimed back at the page that drew
 /// it: a GET carries no side effect, so a page you happen to have open
-/// still cannot make this server do anything, which is what the blanket
-/// no-form rule used to buy. `action` is the whole expected attribute
-/// value, so behind a proxy it has to carry the forwarded prefix. The one
-/// standing exception is the bar's connect button — a POST, but aimed at a
-/// route gated like the publish button and carrying the page token, so an
-/// open page still cannot make this server act cross-origin.
+/// still cannot make this server do anything. `action` is the whole
+/// expected attribute value, so behind a proxy it has to carry the
+/// forwarded prefix. The one standing exception is the bar's connect
+/// button — a POST, but aimed at a route gated like the publish button and
+/// carrying the page token.
 fn assert_forms_are_gets(body: &str, action: &str, count: usize) {
     let mut connects = 0;
     for form in body.match_indices("<form").map(|(i, _)| &body[i..]) {
@@ -340,10 +291,8 @@ fn assert_forms_are_gets(body: &str, action: &str, count: usize) {
 
 #[tokio::test]
 async fn root_serves_a_landing_page_to_browsers() {
-    let tmp = Tmp::new("landing");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let st = Arc::new(state(vec![a]));
-    let body = landing_body(&st, "/", &[("host", "127.0.0.1:8000")]).await;
+    let (_tmp, _, st) = one_scene("landing");
+    let body = landing_body(&st, "/", LOCAL).await;
     assert!(body.contains("dcl-one-sdk"));
     assert!(body.contains("decentraland://realm=http%3A%2F%2F127.0.0.1%3A8000"));
     assert_eq!(
@@ -355,7 +304,7 @@ async fn root_serves_a_landing_page_to_browsers() {
         !body.contains("https://decentraland.org/bevy-web/"),
         "the web target is not the selected one"
     );
-    let web = landing_body(&st, "/?where=web", &[("host", "127.0.0.1:8000")]).await;
+    let web = landing_body(&st, "/?where=web", LOCAL).await;
     assert!(web.contains(
         "https://decentraland.org/bevy-web/?preview=true&amp;realm=http://127.0.0.1:8000"
     ));
@@ -391,7 +340,7 @@ async fn root_serves_a_landing_page_to_browsers() {
         "the request log is the last section"
     );
 
-    let sc = scene_body(&st, &[("host", "127.0.0.1:8000")]).await;
+    let sc = scene_body(&st, LOCAL).await;
     let smust = |needle: &str| {
         sc.find(needle)
             .unwrap_or_else(|| panic!("missing on /scene: {needle}"))
@@ -460,19 +409,12 @@ async fn root_serves_a_landing_page_to_browsers() {
 #[tokio::test]
 async fn landing_page_honors_forwarded_headers_and_escapes_titles() {
     let tmp = Tmp::new("landing-fwd");
-    let root_dir = tmp.0.join("scene-x");
-    std::fs::create_dir_all(root_dir.join("bin")).unwrap();
-    std::fs::write(root_dir.join("bin/index.js"), "module.exports={}").unwrap();
     let scene_json = json!({
         "main": "bin/index.js",
         "display": { "title": "a <script> title" },
         "scene": { "parcels": ["0,0"], "base": "0,0" }
     });
-    std::fs::write(root_dir.join("scene.json"), scene_json.to_string()).unwrap();
-    let project = Project {
-        root: root_dir.canonicalize().unwrap(),
-        scene_json,
-    };
+    let project = project_with(&tmp.0, "scene-x", scene_json, "module.exports={}");
     let st = Arc::new(state(vec![project]));
     let fwd = [
         ("host", "127.0.0.1:8000"),
@@ -507,15 +449,11 @@ async fn landing_page_honors_forwarded_headers_and_escapes_titles() {
 
 /// The landing page ships its editor script, and that is the whole
 /// JavaScript budget: however hostile the query string, nothing else
-/// executable may appear — not a third script, not a handler attribute,
-/// not a `javascript:` href — because everything reflected into the page
-/// is either allowlisted or escaped.
+/// executable may appear, because everything reflected into the page is
+/// either allowlisted or escaped.
 #[tokio::test]
 async fn the_landing_page_ships_only_its_own_script() {
     let tmp = Tmp::new("landing-nojs");
-    let root_dir = tmp.0.join("scene-x");
-    std::fs::create_dir_all(root_dir.join("bin")).unwrap();
-    std::fs::write(root_dir.join("bin/index.js"), "module.exports={}").unwrap();
     let scene_json = json!({
         "main": "bin/index.js",
         "display": { "title": "Plain" },
@@ -524,13 +462,9 @@ async fn the_landing_page_ships_only_its_own_script() {
         "spawnPoints": [{ "name": "spawn", "default": true,
                           "position": { "x": 8, "y": 0, "z": 8 } }]
     });
-    std::fs::write(root_dir.join("scene.json"), scene_json.to_string()).unwrap();
-    let project = Project {
-        root: root_dir.canonicalize().unwrap(),
-        scene_json,
-    };
+    let project = project_with(&tmp.0, "scene-x", scene_json, "module.exports={}");
     let st = Arc::new(state(vec![project]));
-    let body = landing_body(&st, "/", &[("host", "127.0.0.1:8000")]).await;
+    let body = landing_body(&st, "/", LOCAL).await;
     assert_only_the_landing_scripts(&body);
     assert_forms_are_gets(&body, "/", 1);
 
@@ -542,7 +476,7 @@ async fn the_landing_page_ships_only_its_own_script() {
         "&args=--gatekeeper-url%3Dhttps%3A%2F%2Fevil.example",
         "&%3Cscript%3E=%3Cscript%3E",
     );
-    let poisoned = landing_body(&st, hostile, &[("host", "127.0.0.1:8000")]).await;
+    let poisoned = landing_body(&st, hostile, LOCAL).await;
     assert_only_the_landing_scripts(&poisoned);
     assert_forms_are_gets(&poisoned, "/", 1);
     for smuggled in ["alert(1)", "gatekeeper-url", "evil.example", "onerror"] {
@@ -556,21 +490,16 @@ async fn the_landing_page_ships_only_its_own_script() {
 }
 
 /// The request log is the one part of this page built out of strings a
-/// stranger chose: any LAN or tunnel peer puts one in the buffer just by
-/// asking for it. Every `AppState` constructor here starts the buffer
-/// empty, so until this test `id="requests"` was asserted present while
-/// every row was the empty string and the `esc()` on the way in was never
-/// once executed.
+/// stranger chose; the buffer starts empty, so only a seeded one exercises
+/// the escaping.
 #[tokio::test]
 async fn the_request_log_replays_a_hostile_path_escaped_and_newest_first() {
-    let tmp = Tmp::new("reqlog");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let st = Arc::new(state(vec![a]));
+    let (_tmp, _, st) = one_scene("reqlog");
     let method = axum::http::Method::GET;
     record_request(&st, log_line(&method, "/<script>alert(1)</script>"), 404);
     record_request(&st, log_line(&method, "/newest.glb"), 200);
 
-    let body = landing_body(&st, "/", &[("host", "127.0.0.1:8000")]).await;
+    let body = landing_body(&st, "/", LOCAL).await;
     assert!(
         body.contains("GET /&lt;script&gt;alert(1)&lt;/script&gt;"),
         "the path is replayed escaped"
@@ -595,9 +524,7 @@ async fn the_request_log_replays_a_hostile_path_escaped_and_newest_first() {
 /// keeping a long-running preview's page from growing without limit.
 #[test]
 fn the_request_log_forgets_the_oldest_past_its_cap() {
-    let tmp = Tmp::new("reqcap");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let st = state(vec![a]);
+    let (_tmp, _, st) = one_scene("reqcap");
     let method = axum::http::Method::GET;
     for i in 0..RECENT_REQUESTS_CAP + 5 {
         record_request(&st, log_line(&method, &format!("/{i}.glb")), 200);
@@ -615,9 +542,7 @@ fn the_request_log_forgets_the_oldest_past_its_cap() {
     );
 }
 
-/// A path is attacker-chosen, unbounded, retained, and re-rendered into
-/// every response. Cut it on the way in rather than on the way out, so the
-/// unbounded version is never held at all.
+/// Cut on the way in, so the unbounded version is never held at all.
 #[test]
 fn a_path_too_long_to_be_a_path_is_cut_before_it_is_kept() {
     let method = axum::http::Method::GET;
@@ -667,15 +592,17 @@ async fn serve(st: &Arc<AppState>) -> (SocketAddr, tokio::task::JoinHandle<()>) 
     (addr, handle)
 }
 
-/// `/deploy` is registered in the router `start` builds, and every page
-/// this server draws carries a header button pointing at it — but no test
-/// ever fetched it, so deleting the route would have left the suite green
-/// behind a button that 404s. Fetched here through the real router, not by
-/// calling the handler, because the registration is the untested half.
-/// The note has to distinguish a push that landed from one that went
-/// nowhere: with no client attached, `broadcast::send` reports zero
-/// receivers, and a developer staring at "reload issued" while nothing
-/// moves is the exact confusion this line exists to prevent.
+async fn fetch(addr: SocketAddr, path: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("http://{addr}{path}"))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// With no client attached, `broadcast::send` reports zero receivers, and a
+/// developer staring at "reload issued" while nothing moves is the exact
+/// confusion this line exists to prevent.
 #[test]
 fn the_reload_note_says_whether_anything_received_it() {
     assert_eq!(reload_note(1), "reload issued");
@@ -685,19 +612,13 @@ fn the_reload_note_says_whether_anything_received_it() {
     assert!(!none.contains("reload issued"), "{none}");
 }
 
-/// A model save is not a targeted refetch, whatever the frame implies:
-/// the client routes UpdateModel and UpdateScene alike into
-/// TryReloadSceneAsync. Both events must therefore report a reload, and
-/// this pins the pair so a future "only the asset reloaded" claim has to
-/// change a test rather than just the copy.
+/// The client routes UpdateModel and UpdateScene alike into
+/// TryReloadSceneAsync, so both events must report a reload.
 #[tokio::test]
 async fn both_a_scene_and_a_model_change_report_a_reload() {
-    let tmp = Tmp::new("reloadnote");
-    let project = member(&tmp, "scene-a", &["0,0"]);
+    let (_tmp, project, st) = one_scene("reloadnote");
     let root = project.root.clone();
-    let st = Arc::new(state(vec![project]));
-    let (tx, _keep) = broadcast::channel::<ReloadFrame>(8);
-    let mut rx = tx.subscribe();
+    let mut rx = st.reload_tx.subscribe();
 
     for event in [
         ReloadEvent::Scene,
@@ -706,24 +627,20 @@ async fn both_a_scene_and_a_model_change_report_a_reload() {
             removed: false,
         },
     ] {
-        notify_reload(&root, "scene-a", &st, &tx, event);
+        notify_reload(&root, "scene-a", &st, event);
         assert!(rx.try_recv().is_ok(), "text frame");
         assert!(rx.try_recv().is_ok(), "binary frame");
     }
 }
 
+/// Every page carries a header button pointing at `/deploy`; fetched through
+/// the real router because the registration is the untested half.
 #[tokio::test]
 async fn deploy_is_a_page_this_server_actually_serves() {
-    let tmp = Tmp::new("deployroute");
-    let a = member(&tmp, "scene-a", &["0,0"]);
+    let (_tmp, a, st) = one_scene("deployroute");
     let scene_dir = a.root.display().to_string();
-    let st = Arc::new(state(vec![a]));
     let (addr, server) = serve(&st).await;
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/deploy"))
-        .send()
-        .await
-        .unwrap();
+    let resp = fetch(addr, "/deploy").await;
     assert_eq!(resp.status().as_u16(), 200, "the header button leads here");
     assert!(resp
         .headers()
@@ -749,26 +666,14 @@ async fn deploy_is_a_page_this_server_actually_serves() {
     );
 }
 
-/// The publish gates, driven through the real router. Each of the three is
-/// asserted by breaking it and watching the POST be refused — a deploy
-/// that ran here would build and sign a scene, so these are the tests that
-/// keep an unauthenticated port from being a publish button.
+/// The publish gates, each asserted by breaking it and watching the POST be
+/// refused — a deploy that ran here would build and sign a scene.
 #[tokio::test]
 async fn publishing_refuses_a_forged_or_stale_post() {
-    let tmp = Tmp::new("deploypost");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let st = Arc::new(state(vec![a]));
+    let (_tmp, _, st) = one_scene("deploypost");
     let (addr, server) = serve(&st).await;
-    let client = reqwest::Client::new();
 
-    let page = client
-        .get(format!("http://{addr}/deploy"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let page = fetch(addr, "/deploy").await.text().await.unwrap();
     let field = |name: &str| {
         let at = page
             .find(&format!(r#"name="{name}" value=""#))
@@ -816,14 +721,7 @@ async fn publishing_refuses_a_forged_or_stale_post() {
         303,
         "a stale fingerprint redirects rather than publishing"
     );
-    let after = client
-        .get(format!("http://{addr}/deploy"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let after = fetch(addr, "/deploy").await.text().await.unwrap();
     assert!(
         after.contains("Nothing was published"),
         "and it says so: {after:.400}"
@@ -831,21 +729,16 @@ async fn publishing_refuses_a_forged_or_stale_post() {
     server.abort();
 }
 
-/// The editors' write path end to end, through the real router: a
-/// same-origin POST from loopback rewrites scene.json on disk, and every
-/// read surface — the landing page, `/scene.json`, `/about`'s parcel list
-/// — serves the edit at once, because the state behind them was updated
-/// too, not just the file.
+/// A same-origin POST from loopback rewrites scene.json on disk, and every
+/// read surface serves the edit at once: the state was updated, not just
+/// the file.
 #[tokio::test]
 async fn a_scene_edit_reaches_disk_state_and_every_page() {
-    let tmp = Tmp::new("editflow");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let root = a.root.clone();
-    let st = Arc::new(state(vec![a]));
+    let (_tmp, a, st) = one_scene("editflow");
+    let root = a.root;
     let (addr, server) = serve(&st).await;
-    let client = reqwest::Client::new();
 
-    let resp = client
+    let resp = reqwest::Client::new()
         .post(format!("http://{addr}/scene-json"))
         .json(&json!({
             "title": "Renamed Stage",
@@ -871,36 +764,15 @@ async fn a_scene_edit_reaches_disk_state_and_every_page() {
         "untouched keys survive"
     );
 
-    let page = client
-        .get(format!("http://{addr}/scene"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let page = fetch(addr, "/scene").await.text().await.unwrap();
     assert!(page.contains("Renamed Stage"));
     assert!(page.contains("2 parcels"));
     assert!(page.contains("events"));
 
-    let served: Value = client
-        .get(format!("http://{addr}/scene.json"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let served: Value = fetch(addr, "/scene.json").await.json().await.unwrap();
     assert_eq!(served["display"]["title"], json!("Renamed Stage"));
 
-    let about: Value = client
-        .get(format!("http://{addr}/about"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let about: Value = fetch(addr, "/about").await.json().await.unwrap();
     assert_eq!(
         about["configurations"]["localSceneParcels"],
         json!(["0,0", "1,0"]),
@@ -915,11 +787,9 @@ async fn a_scene_edit_reaches_disk_state_and_every_page() {
 /// drew an editor for.
 #[tokio::test]
 async fn a_forged_scene_edit_never_touches_disk() {
-    let tmp = Tmp::new("editforge");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let root = a.root.clone();
+    let (_tmp, a, st) = one_scene("editforge");
+    let root = a.root;
     let before = std::fs::read_to_string(root.join("scene.json")).unwrap();
-    let st = Arc::new(state(vec![a]));
     let (addr, server) = serve(&st).await;
     let client = reqwest::Client::new();
     let post = |headers: Vec<(&'static str, &'static str)>, body: Value| {
@@ -974,22 +844,21 @@ async fn a_forged_scene_edit_never_touches_disk() {
 /// image type they claim.
 #[tokio::test]
 async fn a_thumbnail_upload_lands_in_the_scene_and_scene_json() {
-    let tmp = Tmp::new("editthumb");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let root = a.root.clone();
-    let st = Arc::new(state(vec![a]));
+    let (_tmp, a, st) = one_scene("editthumb");
+    let root = a.root;
     let (addr, server) = serve(&st).await;
     let client = reqwest::Client::new();
+    let upload = |bytes: Vec<u8>| {
+        client
+            .post(format!("http://{addr}/scene-thumbnail"))
+            .header("content-type", "image/png")
+            .body(bytes)
+            .send()
+    };
 
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     png.extend_from_slice(&[0u8; 24]);
-    let resp = client
-        .post(format!("http://{addr}/scene-thumbnail"))
-        .header("content-type", "image/png")
-        .body(png.clone())
-        .send()
-        .await
-        .unwrap();
+    let resp = upload(png.clone()).await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let answer: Value = resp.json().await.unwrap();
     assert_eq!(answer["navmapThumbnail"], json!("scene-thumbnail.png"));
@@ -1004,13 +873,7 @@ async fn a_thumbnail_upload_lands_in_the_scene_and_scene_json() {
         json!("scene-thumbnail.png")
     );
 
-    let forged = client
-        .post(format!("http://{addr}/scene-thumbnail"))
-        .header("content-type", "image/png")
-        .body(b"GIF89a not a png".to_vec())
-        .send()
-        .await
-        .unwrap();
+    let forged = upload(b"GIF89a not a png".to_vec()).await.unwrap();
     assert_eq!(
         forged.status().as_u16(),
         415,
@@ -1019,20 +882,15 @@ async fn a_thumbnail_upload_lands_in_the_scene_and_scene_json() {
     server.abort();
 }
 
-/// `access_log` is a layer, so every test that calls a handler directly
-/// walks straight past it. Drive the real server and look at what it
-/// retained: the buffer is unauthenticated, attacker-writable state that
-/// every page re-renders.
+/// `access_log` is a layer, so a test that calls a handler directly walks
+/// straight past it.
 #[tokio::test]
 async fn the_access_log_keeps_one_bounded_line_per_request() {
-    let tmp = Tmp::new("accesslog");
-    let a = member(&tmp, "scene-a", &["0,0"]);
-    let st = Arc::new(state(vec![a]));
+    let (_tmp, _, st) = one_scene("accesslog");
     let (addr, server) = serve(&st).await;
-    let client = reqwest::Client::new();
     let long = format!("/{}", "a".repeat(4000));
-    client.get(format!("http://{addr}{long}")).send().await.ok();
-    client.get(format!("http://{addr}/about")).send().await.ok();
+    fetch(addr, &long).await;
+    fetch(addr, "/about").await;
     server.abort();
 
     let recent: Vec<(String, u16)> = st
@@ -1053,10 +911,8 @@ async fn the_access_log_keeps_one_bounded_line_per_request() {
     assert_eq!(recent[1], ("GET /about".to_string(), 200));
 }
 
-/// `--mcp` is on by default and its default port is 8123, so
-/// `start --port 8123` aimed the scene-log poller at this very server: a
-/// 404 POST to itself several times a second, which fills a 200-entry
-/// request log in about seven minutes and buries every real client.
+/// `start --port 8123` (the default MCP port) once aimed the scene-log
+/// poller at this very server.
 #[test]
 fn the_scene_log_reader_never_polls_this_server() {
     let mcp = crate::joinblock::DEFAULT_EXPLORER_MCP_PORT;
@@ -1079,50 +935,37 @@ fn the_scene_log_reader_never_polls_this_server() {
     assert!(said.contains("--no-mcp"), "and a way to silence it: {said}");
 }
 
-fn state_with_data_layer(public_dir: PathBuf) -> AppState {
+fn state_with_data_layer(public_dir: PathBuf) -> Arc<AppState> {
     let (_tx, port_rx) = tokio::sync::watch::channel(1234u16);
     std::mem::forget(_tx);
-    let mut st = testkit::state(vec![]);
+    let mut st = state(vec![]);
     st.data_layer = Some(DataLayerState {
         port_rx,
         public_dir: Some(public_dir),
     });
-    st
+    Arc::new(st)
+}
+
+async fn get_asset(st: &Arc<AppState>, path: &str, headers: HeaderMap) -> Response {
+    inspector_asset(State(st.clone()), AxPath(path.to_string()), headers).await
 }
 
 #[tokio::test]
 async fn contents_refuses_dclignored_files() {
-    let tmp = Tmp::new("dclignore");
-    let a = member(&tmp, "scene-a", &["0,0"]);
+    let (_tmp, a, st) = one_scene("dclignore");
     std::fs::write(a.root.join("package.json"), "{\"secret\":\"key\"}").unwrap();
-    let st = Arc::new(state(vec![a.clone()]));
-
-    let pub_hash = b64_hash(
-        &a.root.join("bin/index.js").display().to_string(),
-        "test-machine",
-    );
-    let ok = contents(
-        axum::http::Method::GET,
-        State(st.clone()),
-        AxPath(pub_hash),
-        HeaderMap::new(),
-    )
-    .await;
-    assert_eq!(ok.status(), StatusCode::OK);
-
-    let ignored_hash = b64_hash(
-        &a.root.join("package.json").display().to_string(),
-        "test-machine",
-    );
-    let refused = contents(
-        axum::http::Method::GET,
-        State(st),
-        AxPath(ignored_hash),
-        HeaderMap::new(),
-    )
-    .await;
+    let get = |rel: &str| {
+        let hash = b64_hash(&a.root.join(rel).display().to_string(), "test-machine");
+        contents(
+            axum::http::Method::GET,
+            State(st.clone()),
+            AxPath(hash),
+            HeaderMap::new(),
+        )
+    };
+    assert_eq!(get("bin/index.js").await.status(), StatusCode::OK);
     assert_eq!(
-        refused.status(),
+        get("package.json").await.status(),
         StatusCode::NOT_FOUND,
         "a .dclignored file must not be byte-served via /content/contents"
     );
@@ -1136,30 +979,20 @@ async fn inspector_asset_refuses_absolute_and_dotdot_paths() {
     std::fs::write(public.join("app.js"), "console.log(1)").unwrap();
     let secret = tmp.0.join("secret.txt");
     std::fs::write(&secret, "top secret").unwrap();
-    let st = Arc::new(state_with_data_layer(public.clone()));
+    let st = state_with_data_layer(public.clone());
 
-    let ok = inspector_asset(
-        State(st.clone()),
-        AxPath("app.js".to_string()),
-        HeaderMap::new(),
-    )
-    .await;
+    let ok = get_asset(&st, "app.js", HeaderMap::new()).await;
     assert_eq!(ok.status(), StatusCode::OK);
 
     let abs = secret.canonicalize().unwrap().display().to_string();
-    let escaped = inspector_asset(State(st.clone()), AxPath(abs), HeaderMap::new()).await;
+    let escaped = get_asset(&st, &abs, HeaderMap::new()).await;
     assert_eq!(
         escaped.status(),
         StatusCode::NOT_FOUND,
         "an absolute path outside public_dir must be refused"
     );
 
-    let dotdot = inspector_asset(
-        State(st),
-        AxPath("../secret.txt".to_string()),
-        HeaderMap::new(),
-    )
-    .await;
+    let dotdot = get_asset(&st, "../secret.txt", HeaderMap::new()).await;
     assert_eq!(dotdot.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1173,16 +1006,11 @@ async fn inspector_serves_the_gzipped_bundle_both_ways() {
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     enc.write_all(&plain).unwrap();
     std::fs::write(public.join("bundle.js.gz"), enc.finish().unwrap()).unwrap();
-    let st = Arc::new(state_with_data_layer(public.clone()));
+    let st = state_with_data_layer(public.clone());
 
     let mut gz_headers = HeaderMap::new();
     gz_headers.insert(header::ACCEPT_ENCODING, "gzip, deflate".parse().unwrap());
-    let compressed = inspector_asset(
-        State(st.clone()),
-        AxPath("bundle.js".to_string()),
-        gz_headers,
-    )
-    .await;
+    let compressed = get_asset(&st, "bundle.js", gz_headers).await;
     assert_eq!(compressed.status(), StatusCode::OK);
     assert_eq!(
         compressed.headers().get(header::CONTENT_ENCODING).unwrap(),
@@ -1199,8 +1027,7 @@ async fn inspector_serves_the_gzipped_bundle_both_ways() {
     assert!(body.len() < plain.len());
     assert_eq!(crate::data_layer::gunzip(&body).unwrap(), plain);
 
-    let expanded =
-        inspector_asset(State(st), AxPath("bundle.js".to_string()), HeaderMap::new()).await;
+    let expanded = get_asset(&st, "bundle.js", HeaderMap::new()).await;
     assert_eq!(expanded.status(), StatusCode::OK);
     assert!(expanded.headers().get(header::CONTENT_ENCODING).is_none());
     let body = axum::body::to_bytes(expanded.into_body(), usize::MAX)
@@ -1211,34 +1038,40 @@ async fn inspector_serves_the_gzipped_bundle_both_ways() {
 
 #[test]
 fn data_layer_origin_gate_allows_same_origin_and_native_rejects_cross() {
-    let empty = HeaderMap::new();
+    let headers = |pairs: &[(header::HeaderName, &str)]| {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(k.clone(), v.parse().unwrap());
+        }
+        h
+    };
     assert!(
-        data_layer_origin_allowed(&empty),
+        data_layer_origin_allowed(&HeaderMap::new()),
         "native clients send no Origin"
     );
-
-    let mut null_origin = HeaderMap::new();
-    null_origin.insert(header::ORIGIN, "null".parse().unwrap());
     assert!(
-        data_layer_origin_allowed(&null_origin),
+        data_layer_origin_allowed(&headers(&[(header::ORIGIN, "null")])),
         "null Origin is native"
     );
-
-    let mut same = HeaderMap::new();
-    same.insert(header::HOST, "127.0.0.1:8000".parse().unwrap());
-    same.insert(header::ORIGIN, "http://127.0.0.1:8000".parse().unwrap());
-    assert!(data_layer_origin_allowed(&same));
-
-    let mut fwd = HeaderMap::new();
-    fwd.insert("x-forwarded-host", "tunnel.example".parse().unwrap());
-    fwd.insert(header::HOST, "127.0.0.1:8000".parse().unwrap());
-    fwd.insert(header::ORIGIN, "https://tunnel.example".parse().unwrap());
-    assert!(data_layer_origin_allowed(&fwd), "same-origin behind nginx");
-
-    let mut cross = HeaderMap::new();
-    cross.insert(header::HOST, "127.0.0.1:8000".parse().unwrap());
-    cross.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
-    assert!(!data_layer_origin_allowed(&cross));
+    assert!(data_layer_origin_allowed(&headers(&[
+        (header::HOST, "127.0.0.1:8000"),
+        (header::ORIGIN, "http://127.0.0.1:8000"),
+    ])));
+    assert!(
+        data_layer_origin_allowed(&headers(&[
+            (
+                header::HeaderName::from_static("x-forwarded-host"),
+                "tunnel.example"
+            ),
+            (header::HOST, "127.0.0.1:8000"),
+            (header::ORIGIN, "https://tunnel.example"),
+        ])),
+        "same-origin behind nginx"
+    );
+    assert!(!data_layer_origin_allowed(&headers(&[
+        (header::HOST, "127.0.0.1:8000"),
+        (header::ORIGIN, "https://evil.example"),
+    ])));
 }
 
 #[test]

@@ -8,6 +8,7 @@ import { createPointerEventsSystem } from '../../systems/events';
 import { createInputSystem } from './../../engine/input';
 import { createRaycastSystem } from '../../systems/raycast';
 import { createVideoEventsSystem } from '../../systems/videoEvents';
+import { createAudioEventsSystem } from '../../systems/audioEvents';
 import { createAssetLoadLoadingStateSystem } from '../../systems/assetLoad';
 import { createTweenSystem } from '../../systems/tween';
 import { pointerEventColliderChecker } from '../../systems/pointer-event-collider-checker';
@@ -52,6 +53,11 @@ export const raycastSystem = /* @__PURE__ */ createRaycastSystem(engine);
  * Register callback functions to a particular entity on video events.
  */
 export const videoEventsSystem = /* @__PURE__ */ createVideoEventsSystem(engine);
+/**
+ * @public
+ * Register callback functions to a particular entity on audio events.
+ */
+export const audioEventsSystem = /* @__PURE__ */ createAudioEventsSystem(engine);
 /**
  * @public
  * Register callback functions to a particular entity on asset pre-load events.

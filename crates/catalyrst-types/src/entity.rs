@@ -130,15 +130,6 @@ pub enum DeploymentField {
     AuditInfo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Pagination {
-    pub offset: i64,
-    pub limit: i64,
-    pub page_size: i64,
-    pub page_num: i64,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusProbeResult {
     pub name: String,

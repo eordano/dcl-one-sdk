@@ -17,6 +17,7 @@ import { defineInputModifierComponent } from './extended/InputModifier';
 import { defineLightSourceComponent } from './extended/LightSource';
 import { defineTriggerAreaComponent } from './extended/TriggerArea';
 import { defineParticleSystemComponent } from './extended/ParticleSystem';
+import { defineTouchScreenControlsComponent } from './extended/TouchScreenControls';
 import defineTagsComponent from './manual/Tags';
 export * from './generated/index.gen';
 /* @__PURE__ */
@@ -47,6 +48,8 @@ export const LightSource = (engine) => defineLightSourceComponent(engine);
 export const TriggerArea = (engine) => defineTriggerAreaComponent(engine);
 /* @__PURE__ */
 export const ParticleSystem = (engine) => defineParticleSystemComponent(engine);
+/* @__PURE__ */
+export const TouchScreenControls = (engine) => defineTouchScreenControlsComponent(engine);
 /**
  * @alpha
  */

@@ -1,13 +1,11 @@
-//! Native `main.crdt` generation from `.composite` files.
+//! Native `main.crdt` generation from `.composite` files: composites are
+//! parsed in Rust and instanced into PUT_COMPONENT messages byte-identical to
+//! the node + `@dcl/inspector` toolchain's, which stays as the fallback.
 //!
-//! Replaces the node + `@dcl/inspector` fallback in the build path: composites
-//! are parsed in Rust and instanced into PUT_COMPONENT messages byte-identical
-//! to the upstream toolchain's.
-//!
-//! A composite needs *two* serializers, because @dcl/ecs has two: core
-//! components (`core::Foo`) are protobuf, encoded here against the vendored
-//! @dcl/protocol descriptors (see build.rs); everything else is encoded by
-//! [`crate::schema_crdt`] against the `jsonSchema` the composite carries.
+//! Core components (`core::Foo`) are protobuf, encoded here against the
+//! vendored @dcl/protocol descriptors (see build.rs); everything else is
+//! encoded by [`crate::schema_crdt`] against the `jsonSchema` the composite
+//! carries.
 //!
 //! ts-proto writer semantics reproduced deliberately (verified against
 //! main.crdt files produced by @dcl/ecs 7.24.5):
@@ -47,8 +45,8 @@ pub(crate) struct FieldDef {
     pub oneof: Option<&'static str>,
 }
 
-/// The whole proto3 scalar set. The vendored descriptors happen to use none of
-/// the sint/fixed/sfixed variants today, hence the allow.
+/// The whole proto3 scalar set; the vendored descriptors use none of the
+/// sint/fixed/sfixed variants today, hence the allow.
 #[derive(Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub(crate) enum FieldKind {
@@ -91,9 +89,8 @@ const COMPOSITE_ROOT: &str = "composite::root";
 
 #[derive(Debug)]
 pub enum GenError {
-    /// The scene uses something the native path does not cover (custom
-    /// jsonSchema components, unknown component names); the node data-layer
-    /// fallback may still handle it.
+    /// The scene uses something the native path does not cover; the node
+    /// data-layer fallback may still handle it.
     Unsupported(String),
     /// The composite itself is malformed; no toolchain can instance it.
     Invalid(String),
@@ -207,13 +204,10 @@ fn component_by_name(name: &str) -> Option<&'static ComponentDef> {
     COMPONENTS.iter().find(|c| c.name == name)
 }
 
-/// A `composite::root` entry naming another composite means the scene needs
-/// nested instancing, which the native path does not do.
-///
-/// A `binary` entry counts: only the `json` form spells `src` out, but node
-/// deserializes the binary one and instances it just the same, so reading only
-/// `json.src` would let a binary root through and emit a scene quietly missing
-/// everything the nested composite contributes.
+/// A `composite::root` entry naming another composite means nested instancing,
+/// which the native path does not do. A `binary` entry counts: node
+/// deserializes and instances it just the same, so reading only `json.src`
+/// would emit a scene quietly missing everything the nested composite adds.
 fn references_nested_composite(comp: &Value) -> bool {
     comp.get("data")
         .and_then(|d| d.as_object())
@@ -292,10 +286,8 @@ fn encode_component(
     Ok((schema_crdt::component_number_from_name(name), bytes))
 }
 
-/// Describe the first difference between two main.crdt streams in terms
-/// somebody can act on. A byte offset into the file is unactionable: the file is
-/// a run of length-prefixed messages, so one extra byte early renames every
-/// offset after it.
+/// Describe the first difference between two main.crdt streams per message
+/// rather than by file offset: one extra byte early renames every offset after it.
 pub fn describe_difference(native: &[u8], reference: &[u8], root: &Path) -> Option<String> {
     if native == reference {
         return None;
@@ -678,33 +670,43 @@ fn encode_msg(def: &'static MsgDef, json: &Value, out: &mut Vec<u8>) -> Result<(
     Ok(())
 }
 
+/// A fresh scratch directory named after `tag` (keep tags unique across the
+/// crate: tests share one process), removed on drop.
+#[cfg(test)]
+pub(crate) struct TestDir(pub std::path::PathBuf);
+
+#[cfg(test)]
+impl TestDir {
+    pub fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("dcl-one-sdk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TestDir(dir)
+    }
+
+    pub fn write(&self, rel: &str, contents: impl AsRef<[u8]>) {
+        let p = self.0.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, contents).unwrap();
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    struct Tmp(std::path::PathBuf);
-
-    impl Tmp {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("dcl-one-sdk-crdtgen-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Tmp(dir)
-        }
-    }
-
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     /// Every golden here was regenerated through the node data-layer
-    /// (`data-layer-host.mjs <scene> dump-crdt`, @dcl/ecs 7.26.0) at the moment
-    /// it was committed — a scene's checked-in main.crdt is not trustworthy as a
-    /// reference, it can predate its own composite.
+    /// (`data-layer-host.mjs <scene> dump-crdt`, @dcl/ecs 7.26.0; still
+    /// byte-identical under 7.27.0) when committed — a scene's checked-in
+    /// main.crdt can predate its own composite, so it is not a reference.
     #[test]
     fn real_scene_fixtures_are_byte_identical_to_the_upstream_toolchain() {
         let cases: [(&str, &str, &[u8]); 4] = [
@@ -730,9 +732,8 @@ mod tests {
             ),
         ];
         for (name, composite, expected) in cases {
-            let tmp = Tmp::new(name);
-            std::fs::create_dir_all(tmp.0.join("assets/scene")).unwrap();
-            std::fs::write(tmp.0.join("assets/scene/main.composite"), composite).unwrap();
+            let tmp = TestDir::new(&format!("crdtgen-{name}"));
+            tmp.write("assets/scene/main.composite", composite);
             let generated = generate(&tmp.0).unwrap().unwrap();
             assert_eq!(generated.composites, 1);
             assert_eq!(
@@ -744,20 +745,27 @@ mod tests {
 
     #[test]
     fn no_composites_yields_none() {
-        let tmp = Tmp::new("empty");
+        let tmp = TestDir::new("crdtgen-empty");
         assert!(generate(&tmp.0).unwrap().is_none());
     }
 
     fn generate_from(tag: &str, composite: Value) -> Result<Option<Generated>, GenError> {
-        let tmp = Tmp::new(tag);
-        std::fs::write(tmp.0.join("main.composite"), composite.to_string()).unwrap();
+        let tmp = TestDir::new(tag);
+        tmp.write("main.composite", composite.to_string());
         generate(&tmp.0)
+    }
+
+    fn expect_unsupported(result: Result<Option<Generated>, GenError>, needle: &str) {
+        match result {
+            Err(GenError::Unsupported(why)) => assert!(why.contains(needle), "{why}"),
+            other => panic!("expected Unsupported, got {:?}", other.map(|_| ())),
+        }
     }
 
     #[test]
     fn a_custom_jsonschema_component_encodes_against_its_own_schema() {
         let generated = generate_from(
-            "custom",
+            "crdtgen-custom",
             json!({
                 "version": 1,
                 "components": [{
@@ -784,40 +792,40 @@ mod tests {
 
     #[test]
     fn a_component_with_neither_a_schema_nor_a_descriptor_stays_unsupported() {
-        match generate_from(
-            "no-schema",
-            json!({
-                "version": 1,
-                "components": [{
-                    "name": "inspector::Scene",
-                    "data": { "0": { "json": {} } }
-                }]
-            }),
-        ) {
-            Err(GenError::Unsupported(why)) => assert!(why.contains("inspector::Scene")),
-            other => panic!("expected Unsupported, got {:?}", other.map(|_| ())),
-        }
+        expect_unsupported(
+            generate_from(
+                "crdtgen-no-schema",
+                json!({
+                    "version": 1,
+                    "components": [{
+                        "name": "inspector::Scene",
+                        "data": { "0": { "json": {} } }
+                    }]
+                }),
+            ),
+            "inspector::Scene",
+        );
     }
 
     #[test]
     fn an_unknown_core_component_points_at_the_vendored_descriptors() {
-        match generate_from(
-            "unknown-core",
-            json!({
-                "version": 1,
-                "components": [{
-                    "name": "core::BrandNew",
-                    "jsonSchema": {
-                        "serializationType": "protocol-buffer",
-                        "protocolBuffer": "PBBrandNew"
-                    },
-                    "data": { "512": { "json": {} } }
-                }]
-            }),
-        ) {
-            Err(GenError::Unsupported(why)) => assert!(why.contains("@dcl/protocol")),
-            other => panic!("expected Unsupported, got {:?}", other.map(|_| ())),
-        }
+        expect_unsupported(
+            generate_from(
+                "crdtgen-unknown-core",
+                json!({
+                    "version": 1,
+                    "components": [{
+                        "name": "core::BrandNew",
+                        "jsonSchema": {
+                            "serializationType": "protocol-buffer",
+                            "protocolBuffer": "PBBrandNew"
+                        },
+                        "data": { "512": { "json": {} } }
+                    }]
+                }),
+            ),
+            "@dcl/protocol",
+        );
     }
 
     #[test]
@@ -838,15 +846,15 @@ mod tests {
                 }]
             })
         };
-        assert!(generate_from("root-empty", root(""))
+        assert!(generate_from("crdtgen-root-empty", root(""))
             .unwrap()
             .unwrap()
             .bytes
             .is_empty());
-        match generate_from("root-nested", root("other.composite")) {
-            Err(GenError::Unsupported(why)) => assert!(why.contains("nested composite")),
-            other => panic!("expected Unsupported, got {:?}", other.map(|_| ())),
-        }
+        expect_unsupported(
+            generate_from("crdtgen-root-nested", root("other.composite")),
+            "nested composite",
+        );
     }
 
     fn encode_by_name(name: &str, json: &Value) -> Vec<u8> {
@@ -907,7 +915,7 @@ mod tests {
 
     #[test]
     fn later_composites_override_earlier_entities() {
-        let tmp = Tmp::new("override");
+        let tmp = TestDir::new("crdtgen-override");
         let transform = |y: f64| {
             json!({
                 "version": 1,
@@ -917,8 +925,8 @@ mod tests {
                 }]
             })
         };
-        std::fs::write(tmp.0.join("a.composite"), transform(1.0).to_string()).unwrap();
-        std::fs::write(tmp.0.join("b.composite"), transform(2.0).to_string()).unwrap();
+        tmp.write("a.composite", transform(1.0).to_string());
+        tmp.write("b.composite", transform(2.0).to_string());
         let generated = generate(&tmp.0).unwrap().unwrap();
         assert_eq!(generated.composites, 2);
         assert_eq!(generated.bytes.len(), 24 + 44);

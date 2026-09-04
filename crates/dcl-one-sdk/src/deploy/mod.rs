@@ -1,22 +1,24 @@
 mod net;
 mod run;
 mod unpublish;
+mod world_gate;
 
 #[cfg(test)]
 pub(crate) use net::ENV_LOCK;
 
 pub use net::{
-    build_delete_payload, encode_segment, enforce_world_permission, env_default_target,
-    jump_in_url, non_upstream_note, play_url, sanitize_catalyst_url, scenes_on_other_parcels,
-    send_world_delete, simple_auth_chain, sticky_default_target, upload_entity, WorldScene,
-    WORLDS_CONTENT_SERVER,
+    build_delete_payload, encode_segment, env_default_target, jump_in_url, non_upstream_note,
+    play_url, sanitize_catalyst_url, scenes_on_other_parcels, send_world_delete, simple_auth_chain,
+    sticky_default_target, upload_entity, PermissionGate, WorldScene, WORLDS_CONTENT_SERVER,
 };
 pub(crate) use net::{
     client, denied_parcels_in, deployment_permission_in_doc, entity_content_hashes, entity_title,
-    host_of, parse_world_scenes, unreachable_server, DocAnswer,
+    host_of, parse_world_scenes, read_server_message, refusal, send_text, unreachable_server,
+    with_headers, DocAnswer, VERBOSE_HINT,
 };
 pub use run::{deploy, load_signer};
 pub use unpublish::{unpublish, UnpublishOptions};
+pub use world_gate::{nameless_world_section, refuse_nameless_world};
 
 use crate::jsjson::{self, JsValue};
 use crate::scene::Project;
@@ -38,40 +40,34 @@ pub struct DeployOptions {
     pub timestamp: Option<i64>,
     pub entity_out: Option<PathBuf>,
     pub multi_scene: bool,
+    /// Ask the worlds server whether the wallet may publish before uploading;
+    /// see [`PermissionGate`] for why it is opt-in.
+    pub check_permissions: bool,
     pub yes: bool,
     pub no_browser: bool,
     pub ci: bool,
     pub port: Option<u16>,
-    /// A caller that hosts the signing routes on its own server — the preview
-    /// server's `/deploy/sign/` — so a page-driven deploy binds no second
-    /// listener. `None` (the CLI) serves the signing page itself.
+    /// A caller hosting the signing routes on its own server (the preview
+    /// server's `/deploy/sign/`); `None` (the CLI) serves the page itself.
     pub host_signer: Option<crate::linker::HostSigner>,
-    /// No terminal narration — build steps, file listing, target note, jump
-    /// link. A page-driven publish tells its whole story on the page, and its
-    /// prints would land in the preview terminal as noise. Errors still print.
+    /// No terminal narration: a page-driven publish tells its story on the
+    /// page. Errors still print.
     pub quiet: bool,
-    /// A delegated identity that signs this deploy with no wallet prompt: the
-    /// ephemeral key the Connect-with-DCL flow minted, kept in memory. When
-    /// set (and unexpired), the deploy signs headlessly with it instead of
-    /// hosting a browser signing page.
+    /// A delegated identity that signs headlessly instead of hosting a
+    /// browser signing page, while unexpired.
     pub identity: Option<DeployIdentity>,
 }
 
-/// The in-memory delegated identity: a throwaway key the wallet authorized
-/// once, and the proof it did. It signs deploys as the wallet until the
-/// delegation expires — the wallet itself is not asked again.
+/// A throwaway key the wallet authorized once, and the proof it did; signs
+/// deploys as the wallet until the delegation expires.
 #[derive(Clone)]
 pub struct DeployIdentity {
-    /// The wallet the deploy publishes as.
     pub signer: String,
-    /// The ephemeral private key, hex. In memory only — never written.
+    /// Hex; in memory only, never written.
     pub ephemeral_key: String,
     /// The exact `Decentraland Login\n…` text the wallet signed.
     pub delegation_payload: String,
-    /// The wallet's signature over that text.
     pub delegation_signature: String,
-    /// When the delegation lapses (ms). Past it, the identity is dropped and
-    /// the deploy falls back to the wallet.
     pub expiration_ms: i64,
 }
 
@@ -83,9 +79,8 @@ impl DeployIdentity {
 
 const MAX_FILE_SIZE_BYTES: usize = 50_000_000;
 
-/// The hosts that make up the public Genesis City network: both the classifier
-/// behind `non_upstream_note` and the rotation `deploy` falls back to, because
-/// publishing a scene there is what this CLI is for.
+/// The public Genesis City network: the classifier behind `non_upstream_note`
+/// and the rotation `deploy` falls back to.
 pub const UPSTREAM_CATALYST_HOSTS: [&str; 8] = [
     "https://interconnected.online",
     "https://peer-ec2.decentraland.org",
@@ -98,8 +93,8 @@ pub const UPSTREAM_CATALYST_HOSTS: [&str; 8] = [
 ];
 
 /// The rotation named by DCL_ONE_SDK_CATALYST_ROTATION (comma-separated), or
-/// `None` when the caller never named one. Callers that must not reach a
-/// public catalyst on their own read this rather than `catalyst_rotation`.
+/// `None`. Callers that must not reach a public catalyst on their own read
+/// this rather than `catalyst_rotation`.
 pub fn configured_catalyst_rotation() -> Option<Vec<String>> {
     let rotation: Vec<String> = std::env::var("DCL_ONE_SDK_CATALYST_ROTATION")
         .unwrap_or_default()
@@ -110,9 +105,8 @@ pub fn configured_catalyst_rotation() -> Option<Vec<String>> {
     (!rotation.is_empty()).then_some(rotation)
 }
 
-/// Catalysts `deploy` picks from when given no target. Defaults to the public
-/// network; the implicit choice is announced and confirmed at the call site,
-/// so it is never silent.
+/// Catalysts `deploy` picks from when given no target; the implicit choice
+/// is announced and confirmed at the call site.
 pub fn catalyst_rotation() -> Vec<String> {
     configured_catalyst_rotation().unwrap_or_else(|| {
         UPSTREAM_CATALYST_HOSTS
@@ -133,8 +127,6 @@ const DEFAULT_DCL_IGNORE: [&str; 27] = [
     "tslint.json",
     "node_modules",
     "dclcontext",
-    // The SDK's own AI-context install and its skill docs — never scene
-    // runtime, and their prose/markup is upload bloat at best.
     "sdk-skills",
     "**/*.ts",
     "**/*.tsx",
@@ -169,44 +161,39 @@ const EXTRA_DCL_IGNORE: [&str; 6] = [
 ];
 
 pub fn dcl_ignore_patterns(root: &Path) -> Vec<String> {
-    let user = std::fs::read_to_string(root.join(".dclignore")).ok();
+    let user = std::fs::read_to_string(root.join(".dclignore")).unwrap_or_default();
     let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    let user_lines = user.as_deref().map(|s| s.split('\n').collect::<Vec<_>>());
-    for p in user_lines
-        .unwrap_or_default()
-        .into_iter()
+    user.split('\n')
         .chain(DEFAULT_DCL_IGNORE)
         .chain(EXTRA_DCL_IGNORE)
-    {
-        if !p.is_empty() && seen.insert(p.to_string()) {
-            out.push(p.to_string());
-        }
-    }
-    out
+        .filter(|p| !p.is_empty() && seen.insert(p.to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A `map_err` closure: the user-facing error wrapping the underlying cause.
+pub(crate) fn caused<E>(what: impl Into<String>, steps: TrySteps) -> impl FnOnce(E) -> anyhow::Error
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+{
+    move |e| UserError::new(what, steps).caused_by(e).into()
 }
 
 fn build_matcher(root: &Path) -> Result<Gitignore> {
     let mut b = GitignoreBuilder::new(root);
     b.case_insensitive(true).context("matcher options")?;
     for p in dcl_ignore_patterns(root) {
-        b.add_line(None, &p).map_err(|e| {
-            anyhow::Error::from(
-                UserError::new(
-                    format!(".dclignore line {p:?} is not a valid pattern"),
-                    TrySteps::one("fix or delete that line (gitignore syntax)"),
-                )
-                .caused_by(e),
-            )
-        })?;
+        b.add_line(None, &p).map_err(caused(
+            format!(".dclignore line {p:?} is not a valid pattern"),
+            TrySteps::one("fix or delete that line (gitignore syntax)"),
+        ))?;
     }
     b.build().context("building ignore matcher")
 }
 
-/// `readdir` already answered this on every platform this ships to, so the
-/// stat behind `Path::is_dir` is only paid for the entries where `d_type` is
-/// genuinely unknown — and for symlinks, whose own type says nothing about
-/// what they point at (a symlinked directory has always been descended into).
+/// `readdir` already answered this, so the stat behind `Path::is_dir` is only
+/// paid where `d_type` is unknown — and for symlinks, whose own type says
+/// nothing about the target (a symlinked directory is descended into).
 fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
     match entry.file_type() {
         Ok(ft) if !ft.is_symlink() => ft.is_dir(),
@@ -214,19 +201,12 @@ fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
     }
 }
 
-/// One walk, two lists: what a deploy would upload and what `.dclignore` kept
-/// out of it. They are produced together because they are the same decision
-/// read in both directions — a second, hand-inverted walk drifts the moment
-/// this one gains a rule, and silently reports a partition that is not one.
-///
+/// One walk, two lists: what a deploy uploads and what `.dclignore` kept out.
 /// An ignored DIRECTORY is not descended into, so nothing under it lands in
-/// either list. Dot-entries are skipped outright: they are never publishable,
-/// so calling them "excluded by .dclignore" would report a decision nobody
-/// made.
+/// either list; dot-entries are never publishable and skipped outright.
 fn walk(dir: &Path, root: &Path, gi: &Gitignore, out: &mut Vec<String>, ignored: &mut Vec<String>) {
-    let rd = match std::fs::read_dir(dir) {
-        Ok(x) => x,
-        Err(_) => return,
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
     };
     let mut files: Vec<(String, String)> = Vec::new();
     let mut dirs: Vec<(String, PathBuf)> = Vec::new();
@@ -236,10 +216,10 @@ fn walk(dir: &Path, root: &Path, gi: &Gitignore, out: &mut Vec<String>, ignored:
             continue;
         }
         let path = entry.path();
-        let rel = match path.strip_prefix(root) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
         };
+        let rel = rel.to_string_lossy().replace('\\', "/");
         let is_dir = entry_is_dir(&entry, &path);
         if gi.matched(&rel, is_dir).is_ignore() {
             if !is_dir {
@@ -254,9 +234,7 @@ fn walk(dir: &Path, root: &Path, gi: &Gitignore, out: &mut Vec<String>, ignored:
     }
     files.sort_by(|a, b| b.0.cmp(&a.0));
     dirs.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, rel) in files {
-        out.push(rel);
-    }
+    out.extend(files.into_iter().map(|(_, rel)| rel));
     for (_, path) in dirs {
         walk(&path, root, gi, out, ignored);
     }
@@ -266,7 +244,6 @@ pub fn collect_publishable_files(root: &Path) -> Result<Vec<String>> {
     Ok(collect_files(root)?.0)
 }
 
-/// The publishable files and the ignored ones, from a single walk.
 fn collect_files(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let gi = build_matcher(root)?;
     let (mut out, mut ignored) = (Vec::new(), Vec::new());
@@ -274,62 +251,42 @@ fn collect_files(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     Ok((out, ignored))
 }
 
-/// What a deploy would upload, answered without reading a byte of it.
-///
-/// [`prepare`] reads and hashes every file, which is the right thing when the
-/// bytes are about to be signed and sent, and the wrong thing for a page that
-/// renders on every refresh: a scene with a few hundred megabytes of GLBs
-/// would re-hash all of it. The walk and the `.dclignore` rules here are the
-/// same ones `prepare` uses, so the file list matches; only the sizes are
-/// taken from the directory entry instead.
+/// What a deploy would upload, without reading a byte: the same walk and
+/// `.dclignore` rules as [`prepare`], with sizes from the directory entry, so
+/// a page can render it on every refresh.
 pub struct DeployPreview {
-    /// Publishable files, largest first. The size is `None` when the directory
-    /// entry could not be stat'd — see [`DeployPreview::unreadable`].
+    /// Publishable files, largest first; `None` when the entry could not be
+    /// stat'd (see `unreadable`).
     pub files: Vec<(String, Option<u64>)>,
-    /// The sum of the sizes that could be read. Files in `unreadable`
-    /// contribute nothing, because nothing about them is known.
     pub total_bytes: u64,
-    /// Files `.dclignore` keeps out of the upload, from directories that are
-    /// themselves published. An ignored DIRECTORY is not descended into, so
-    /// this counts the texture somebody excluded by accident and not the
-    /// seventeen thousand files under node_modules — a number that is true,
-    /// useless, and alarming.
+    /// Files `.dclignore` keeps out, from directories that are themselves
+    /// published — the texture excluded by accident, not the seventeen
+    /// thousand files under node_modules.
     pub ignored: Vec<String>,
-    /// Files over the per-file limit, which `prepare` would refuse. Named here
-    /// so the answer arrives before the wallet prompt rather than after it.
+    /// Over the per-file limit; `prepare` would refuse them.
     pub oversize: Vec<String>,
-    /// Publishable files whose size could not be read — most often a dangling
-    /// symlink, which the walk sees as a non-directory and therefore publishes.
-    /// `prepare` reads every file, so these abort the deploy *after* the wallet
-    /// prompt: reporting them as 0 bytes would hide the exact failure this page
-    /// exists to move earlier.
+    /// Most often a dangling symlink: `prepare` reads every file, so these
+    /// abort the deploy *after* the wallet prompt unless named here.
     pub unreadable: Vec<String>,
-    /// Whether the bundle `prepare` refuses to deploy without is in the walk.
     pub main: MainBundle,
-    /// Pairs that differ only in case. A content server treats names
-    /// case-insensitively, so `prepare` refuses them.
+    /// Pairs differing only in case; content servers are case-insensitive.
     pub collisions: Vec<(String, String)>,
+    pub nameless_world: bool,
 }
 
-/// The state of the one file a scene cannot be published without — the
-/// `prepare` refusal a real deploy hits most often, because "I have not run
-/// build yet" is the most common reason a deploy fails.
+/// The one file a scene cannot be published without.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MainBundle {
-    /// Declared by scene.json and present in the payload.
     Present(String),
-    /// Declared, but the walk did not find it: not built, or `.dclignore`
-    /// excludes it.
+    /// Not built, or `.dclignore` excludes it.
     Missing(String),
     /// scene.json's `"main"` is itself unusable; the string says why.
     Unusable(String),
 }
 
-/// Names a content server would read as one file, paired with the name they
-/// collide with — the same refusal `prepare` raises, which is only actionable
-/// once you know which two files it means. Kept off the filesystem on purpose:
-/// the pair cannot even exist on a case-insensitive volume, where this would
-/// otherwise be untestable.
+/// Names a content server would read as one file, paired with the first name
+/// they collide with. Over names, not the filesystem: the pair cannot exist
+/// on a case-insensitive volume.
 fn case_collisions(rels: &[String]) -> Vec<(String, String)> {
     let mut seen: HashMap<String, String> = HashMap::new();
     let mut out = Vec::new();
@@ -355,21 +312,24 @@ pub fn preview(project: &Project) -> Result<DeployPreview> {
     let collisions = case_collisions(&publishable);
     let mut files: Vec<(String, Option<u64>)> = publishable
         .iter()
-        .map(|rel| (rel.clone(), std::fs::metadata(root.join(rel)).ok()))
-        .map(|(rel, meta)| (rel, meta.map(|m| m.len())))
+        .map(|rel| {
+            let len = std::fs::metadata(root.join(rel)).ok().map(|m| m.len());
+            (rel.clone(), len)
+        })
         .collect();
     files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let total_bytes = files.iter().filter_map(|(_, len)| *len).sum();
-    let oversize = files
-        .iter()
-        .filter(|(_, len)| len.is_some_and(|l| l > MAX_FILE_SIZE_BYTES as u64))
-        .map(|(rel, _)| rel.clone())
-        .collect();
-    let unreadable = files
-        .iter()
-        .filter(|(_, len)| len.is_none())
-        .map(|(rel, _)| rel.clone())
-        .collect();
+    let named = |keep: fn(Option<u64>) -> bool| -> Vec<String> {
+        files
+            .iter()
+            .filter(|(_, len)| keep(*len))
+            .map(|(rel, _)| rel.clone())
+            .collect()
+    };
+    let oversize = named(|len| len.is_some_and(|l| l > MAX_FILE_SIZE_BYTES as u64));
+    let unreadable = named(|len| len.is_none());
+    let nameless_world = project.scene_json.get("worldConfiguration").is_some()
+        && crate::joinblock::world_name(&project.scene_json).is_none();
     Ok(DeployPreview {
         ignored,
         files,
@@ -378,6 +338,7 @@ pub fn preview(project: &Project) -> Result<DeployPreview> {
         unreadable,
         main,
         collisions,
+        nameless_world,
     })
 }
 
@@ -394,11 +355,7 @@ fn resolve_sdk_version(root: &Path) -> String {
         if let Ok(raw) = std::fs::read_to_string(&pkg) {
             return serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
-                .and_then(|v| {
-                    v.get("version")
-                        .and_then(|x| x.as_str())
-                        .map(str::to_string)
-                })
+                .and_then(|v| v.get("version")?.as_str().map(str::to_string))
                 .unwrap_or_else(|| "unknown".to_string());
         }
         dir = d.parent();
@@ -473,6 +430,8 @@ pub fn world_name(metadata: &JsValue) -> Option<String> {
         .get("worldConfiguration")
         .and_then(|w| w.get("name"))
         .and_then(|n| n.as_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
         .map(str::to_string)
 }
 
@@ -495,9 +454,8 @@ pub fn base_parcel(metadata: &JsValue, pointers: &[String]) -> String {
         .unwrap_or_else(|| "0,0".to_string())
 }
 
-/// Every file under the release artifact root, as scene-relative paths. The
-/// dir holds only what a release build wrote (bundle chunks under `bin/`),
-/// so the walk is a handful of entries and needs none of `.dclignore`.
+/// Every file under the release artifact root, as scene-relative paths. It
+/// holds only what a release build wrote, so `.dclignore` is not consulted.
 fn release_rel_files(release_root: &Path) -> Vec<String> {
     fn descend(dir: &Path, base: &Path, out: &mut Vec<String>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
@@ -540,21 +498,15 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
         )
         .into());
     }
-
-    let mut seen_lower = HashSet::new();
-    for rel in &rel_paths {
-        if !seen_lower.insert(rel.to_lowercase()) {
-            return Err(UserError::new(
-                format!("the file {rel} collides case-insensitively with another content file"),
-                TrySteps::one(
-                    "rename one of the two files \u{2014} content servers treat names case-insensitively",
-                ),
-            )
-            .into());
-        }
+    if let Some((rel, _)) = case_collisions(&rel_paths).first() {
+        return Err(UserError::new(
+            format!("the file {rel} collides case-insensitively with another content file"),
+            TrySteps::one(
+                "rename one of the two files \u{2014} content servers treat names case-insensitively",
+            ),
+        )
+        .into());
     }
-    // Read+hash in parallel; results stay in rel_paths order, so the first
-    // failing file (by that order) is still the one reported.
     let hashed = crate::scene::parallel_map(&rel_paths, |rel| -> Result<_> {
         let release = release_root.join(rel);
         let p = match release.is_file() {
@@ -577,14 +529,9 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
         let hash = hash_bytes_v1(&bytes);
         Ok((rel.clone(), hash, bytes))
     });
-    let mut files = Vec::with_capacity(hashed.len());
-    for entry in hashed {
-        files.push(entry?);
-    }
-
+    let files = hashed.into_iter().collect::<Result<Vec<_>>>()?;
     let metadata = build_metadata(project)?;
     let pointers = extract_pointers(&metadata)?;
-
     Ok(Prepared {
         files,
         pointers,
@@ -593,26 +540,19 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
 }
 
 pub fn build_entity(p: &Prepared, timestamp: i64) -> Result<(String, Vec<u8>)> {
+    let s = |v: &str| JsValue::String(v.to_string());
     let content = JsValue::Array(
         p.files
             .iter()
             .map(|(f, h, _)| {
-                JsValue::Object(vec![
-                    ("file".to_string(), JsValue::String(f.clone())),
-                    ("hash".to_string(), JsValue::String(h.clone())),
-                ])
+                JsValue::Object(vec![("file".to_string(), s(f)), ("hash".to_string(), s(h))])
             })
             .collect(),
     );
-    let pointers = JsValue::Array(
-        p.pointers
-            .iter()
-            .map(|s| JsValue::String(s.clone()))
-            .collect(),
-    );
+    let pointers = JsValue::Array(p.pointers.iter().map(|v| s(v)).collect());
     let entity = JsValue::Object(vec![
-        ("version".to_string(), JsValue::String("v3".to_string())),
-        ("type".to_string(), JsValue::String("scene".to_string())),
+        ("version".to_string(), s("v3")),
+        ("type".to_string(), s("scene")),
         ("pointers".to_string(), pointers),
         ("timestamp".to_string(), JsValue::Number(timestamp as f64)),
         ("content".to_string(), content),
@@ -635,9 +575,8 @@ pub fn build_entity(p: &Prepared, timestamp: i64) -> Result<(String, Vec<u8>)> {
     Ok((entity_id, entity_bytes))
 }
 
-/// The one size formatter every page and printout shares — a payload must
-/// read as the same number on the sign panel, the /deploy hint and the
-/// /target datum. Decimal units, one decimal, no six-digit byte counts.
+/// The one size formatter every page and printout shares, so a payload reads
+/// as the same number everywhere. Decimal units, one decimal.
 pub fn human_size(bytes: u64) -> String {
     const MB: f64 = 1_000_000.0;
     const KB: f64 = 1_000.0;
@@ -657,44 +596,56 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// A per-test scratch directory, removed on drop.
+#[cfg(test)]
+pub(crate) struct TempTree(pub PathBuf);
+
+#[cfg(test)]
+impl TempTree {
+    pub fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "dcl-one-sdk-deploy-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TempTree(dir)
+    }
+
+    pub fn write(&self, rel: &str, contents: &str) {
+        let p = self.0.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, contents).unwrap();
+    }
+
+    pub fn write_all(&self, rels: &[&str]) {
+        for rel in rels {
+            self.write(rel, "x");
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ux;
     use catalyrst_crypto::Wallet;
 
-    struct TempTree(PathBuf);
-
-    impl TempTree {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "dcl-one-sdk-deploy-test-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            TempTree(dir)
-        }
-
-        fn write(&self, rel: &str, contents: &str) {
-            let p = self.0.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, contents).unwrap();
-        }
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
     fn glob9_order_files_desc_then_dirs_desc_depth_first() {
         let t = TempTree::new("order1");
-        for f in ["zz.png", "z/1.png", "mid.png", "AA.png", "a/2.png"] {
-            t.write(f, "x");
-        }
+        t.write_all(&["zz.png", "z/1.png", "mid.png", "AA.png", "a/2.png"]);
         let got = collect_publishable_files(&t.0).unwrap();
         assert_eq!(
             got,
@@ -702,9 +653,7 @@ mod tests {
         );
 
         let t2 = TempTree::new("order2");
-        for f in ["top.png", "c/m.png", "b/z.png", "b/a.png", "b/inner/q.png"] {
-            t2.write(f, "x");
-        }
+        t2.write_all(&["top.png", "c/m.png", "b/z.png", "b/a.png", "b/inner/q.png"]);
         let got2 = collect_publishable_files(&t2.0).unwrap();
         assert_eq!(
             got2,
@@ -713,15 +662,12 @@ mod tests {
     }
 
     /// Every non-dot file the walk reaches is in exactly one of the two lists.
-    /// The lists used to come from two walks — one written forwards and one by
-    /// hand backwards — with nothing holding them to the same tree, so a rule
-    /// added to one and not the other would have made the page quietly lie.
-    /// The check below is deliberately independent of `walk`: it enumerates
-    /// the tree with no rules at all and asks the matcher directly.
+    /// The check is deliberately independent of `walk`: it enumerates the
+    /// tree with no rules at all and asks the matcher directly.
     #[test]
     fn one_walk_partitions_the_tree_into_published_and_ignored() {
         let t = TempTree::new("partition");
-        for f in [
+        t.write_all(&[
             "scene.json",
             "bin/index.js",
             "bin/index.js.map",
@@ -734,10 +680,8 @@ mod tests {
             "node_modules/pkg/a.js",
             "node_modules/pkg/b.js",
             "thumbnails/t.png",
-        ] {
-            t.write(f, "x");
-        }
-        t.write(".hidden/x.png", "x");
+            ".hidden/x.png",
+        ]);
 
         fn every_file(dir: &Path, root: &Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
@@ -784,9 +728,8 @@ mod tests {
         );
     }
 
-    /// `entry.file_type()` answers "directory?" from readdir, but it answers
-    /// it about the LINK, and a symlinked directory has always been walked
-    /// into. Deleting that fallback loses whole subtrees silently.
+    /// `entry.file_type()` answers about the LINK; deleting the `is_dir`
+    /// fallback loses whole subtrees silently.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_directory_is_still_walked_into() {
@@ -799,45 +742,43 @@ mod tests {
         assert!(got.contains(&"real/tex.png".to_string()), "{got:?}");
     }
 
-    /// A content server matches names case-insensitively, so these two are one
-    /// file to it and `prepare` refuses them. They cannot both exist on a
-    /// case-insensitive volume, which is why the check is over names.
     #[test]
     fn names_that_differ_only_in_case_are_paired_up() {
-        let rels = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            case_collisions(&rels(&["a/X.png", "b.js", "a/x.png", "a/x.PNG"])),
+            case_collisions(&strings(&["a/X.png", "b.js", "a/x.png", "a/x.PNG"])),
             vec![
                 ("a/x.png".to_string(), "a/X.png".to_string()),
                 ("a/x.PNG".to_string(), "a/x.png".to_string()),
             ]
         );
-        assert!(case_collisions(&rels(&["a/x.png", "b/x.png"])).is_empty());
+        assert!(case_collisions(&strings(&["a/x.png", "b/x.png"])).is_empty());
     }
 
     #[test]
     fn default_ignore_semantics() {
         let t = TempTree::new("ignore1");
         t.write("scene.json", "{}");
-        t.write("bin/index.js", "x");
-        t.write("bin/index.js.map", "x");
-        t.write("yarn.lock", "x");
-        t.write("builder.json", "x");
-        t.write("package.json", "x");
-        t.write("package-lock.json", "x");
-        t.write("README.md", "x");
-        t.write("Readme.MD", "x");
-        t.write("notes.md", "x");
-        t.write("src/game.ts", "x");
-        t.write("src/tex.png", "x");
-        t.write("node_modules/foo/bar.js", "x");
-        t.write("sub/node_modules/baz.js", "x");
-        t.write("thumbnails/t.png", "x");
-        t.write("dclcontext/c.json", "x");
-        t.write("assets/model.fbx", "x");
-        t.write("assets/model.glb", "x");
-        t.write(".dclignore-not-really/x.png", "x");
-        t.write(".hidden.png", "x");
+        t.write_all(&[
+            "bin/index.js",
+            "bin/index.js.map",
+            "yarn.lock",
+            "builder.json",
+            "package.json",
+            "package-lock.json",
+            "README.md",
+            "Readme.MD",
+            "notes.md",
+            "src/game.ts",
+            "src/tex.png",
+            "node_modules/foo/bar.js",
+            "sub/node_modules/baz.js",
+            "thumbnails/t.png",
+            "dclcontext/c.json",
+            "assets/model.fbx",
+            "assets/model.glb",
+            ".dclignore-not-really/x.png",
+            ".hidden.png",
+        ]);
         let got = collect_publishable_files(&t.0).unwrap();
         assert_eq!(
             got,
@@ -857,10 +798,12 @@ mod tests {
         let t = TempTree::new("ignore2");
         t.write(".dclignore", "ignored-dir\n*.secret\n\n");
         t.write("scene.json", "{}");
-        t.write("bin/index.js", "x");
-        t.write("ignored-dir/x.txt", "x");
-        t.write("top.secret", "x");
-        t.write("keep.txt", "x");
+        t.write_all(&[
+            "bin/index.js",
+            "ignored-dir/x.txt",
+            "top.secret",
+            "keep.txt",
+        ]);
         let got = collect_publishable_files(&t.0).unwrap();
         assert_eq!(got, vec!["scene.json", "keep.txt", "bin/index.js"]);
     }
@@ -944,6 +887,10 @@ mod tests {
         assert_eq!(world_name(&bare), None);
         assert_eq!(scene_title(&bare), "Untitled");
         assert_eq!(base_parcel(&bare, &["9,9".to_string()]), "9,9");
+        let blank = jsjson::parse("{\"worldConfiguration\":{\"name\":\"\"}}").unwrap();
+        assert_eq!(world_name(&blank), None);
+        let padded = jsjson::parse("{\"worldConfiguration\":{\"name\":\" x.dcl.eth \"}}").unwrap();
+        assert_eq!(world_name(&padded).as_deref(), Some("x.dcl.eth"));
     }
 
     #[test]
@@ -959,10 +906,7 @@ mod tests {
 
     #[test]
     fn rotation_defaults_to_the_public_network_and_yields_to_the_env() {
-        let public: Vec<String> = UPSTREAM_CATALYST_HOSTS
-            .iter()
-            .map(|h| h.to_string())
-            .collect();
+        let public = strings(&UPSTREAM_CATALYST_HOSTS);
 
         std::env::remove_var("DCL_ONE_SDK_CATALYST_ROTATION");
         assert_eq!(configured_catalyst_rotation(), None);
@@ -975,10 +919,7 @@ mod tests {
         let configured = configured_catalyst_rotation().unwrap();
         assert_eq!(
             configured,
-            vec![
-                "https://catalyst.example.com".to_string(),
-                "https://second.example.com".to_string()
-            ]
+            strings(&["https://catalyst.example.com", "https://second.example.com"])
         );
         assert_eq!(catalyst_rotation(), configured);
 
@@ -1030,24 +971,15 @@ mod tests {
 
     #[test]
     fn other_parcel_scenes_are_detected() {
-        let existing = vec![
-            WorldScene {
-                title: "same".into(),
-                parcels: vec!["0,0".into(), "0,1".into()],
-                timestamp: None,
-                content_hashes: vec![],
-                size: None,
-            },
-            WorldScene {
-                title: "other".into(),
-                parcels: vec!["5,5".into()],
-                timestamp: None,
-                content_hashes: vec![],
-                size: None,
-            },
-        ];
-        let deploying = vec!["0,0".to_string(), "0,1".to_string()];
-        let others = scenes_on_other_parcels(&existing, &deploying);
+        let scene = |title: &str, parcels: &[&str]| WorldScene {
+            title: title.into(),
+            parcels: strings(parcels),
+            timestamp: None,
+            content_hashes: vec![],
+            size: None,
+        };
+        let existing = vec![scene("same", &["0,0", "0,1"]), scene("other", &["5,5"])];
+        let others = scenes_on_other_parcels(&existing, &strings(&["0,0", "0,1"]));
         assert_eq!(others.len(), 1);
         assert_eq!(others[0].title, "other");
     }
@@ -1085,9 +1017,8 @@ mod tests {
         assert_eq!(picked_flag_only.address(), addr_flag);
     }
 
-    /// rustc-style profiles: a release artifact shadows its dev-tree twin in
-    /// the payload, a release-only chunk still ships, and everything without
-    /// a release copy reads from the tree as ever.
+    /// A release artifact shadows its dev-tree twin, a release-only chunk
+    /// still ships, and everything else reads from the tree.
     #[test]
     fn release_artifacts_shadow_the_dev_tree_in_prepare() {
         let t = TempTree::new("release");

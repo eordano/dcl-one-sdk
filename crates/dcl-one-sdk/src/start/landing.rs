@@ -1,16 +1,17 @@
 //! The landing page at `/`: server-rendered, one GET form, plus [`SCRIPT`]
-//! which turns the page into scene.json's editor. Progressive: the server
-//! ships every editor control inert and the script enables them, so no-JS
-//! degrades to a read-only page. All mutations are fetch POSTs to the
-//! `edit.rs` routes (outside the CORS layer, loopback + same-origin gated);
-//! nothing here POSTs as a form.
+//! which turns the page into scene.json's editor. The server ships every
+//! editor control inert and the script enables them, so no-JS degrades to a
+//! read-only page. All mutations are fetch POSTs to the `edit.rs` routes
+//! (outside the CORS layer, loopback + same-origin gated); nothing here POSTs
+//! as a form.
 
 #[path = "join_card.rs"]
 mod join_card;
 #[path = "layout_card.rs"]
 mod layout_card;
 
-use super::chrome::{document, esc, html};
+use super::chrome::{document, esc, html, Nav};
+use super::deploy_page::{known_account, nav_badge, token};
 use super::{forwarded_host, forwarded_prefix, forwarded_proto, AppState};
 use crate::joinblock::{self, desktop_deep_link, mobile_deep_link, scene_title, web_join_url};
 use crate::netinfo;
@@ -29,75 +30,67 @@ use serde_json::Value;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// The `where` knob's choices, as the values that ride in the query string.
-/// Stable names rather than indices, so a link keeps pointing at the target it
-/// named even when the LAN row is missing.
-/// How many of the buffered requests the drawer draws. The buffer holds
-/// hundreds so the tail covers a whole scene load; a dozen is what someone
-/// opening the drawer actually reads, and the rest was a thousand pixels of
-/// dev-server log under a page whose subject is a launch button.
+/// The buffer holds hundreds of requests; a dozen is what someone opening the
+/// drawer actually reads.
 const RECENT_REQUESTS_SHOWN: usize = 12;
 
-/// The names this scene gives its spawn points, which is the only thing
-/// `spawnpoint` may be set to — the client matches on the name, and a name the
-/// scene does not define would land the player at the default anyway.
-fn spawn_names(scene_json: &Value) -> Vec<String> {
-    scene_json
-        .get("spawnPoints")
-        .and_then(|s| s.as_array())
-        .map(|spawns| {
-            spawns
-                .iter()
-                .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+fn spawn_points(scene_json: &Value) -> &[Value] {
+    match scene_json.get("spawnPoints").and_then(Value::as_array) {
+        Some(spawns) => spawns,
+        None => &[],
+    }
 }
 
-/// A value worth recomputing occasionally but not on every render, kept behind
-/// a coarse TTL: the caller pays for a stale answer only for `ttl` after the
-/// world changes, and pays nothing the rest of the time.
+/// The only values `spawnpoint` may take: the client matches on the name.
+fn spawn_names(scene_json: &Value) -> Vec<String> {
+    spawn_points(scene_json)
+        .iter()
+        .filter_map(|s| s.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Reuse the cached value while `fresh` holds for its key, else recompute and
+/// store it under `key()`.
+fn memo<K, T: Clone>(
+    cell: &Mutex<Option<(K, T)>>,
+    fresh: impl FnOnce(&K) -> bool,
+    key: impl FnOnce() -> K,
+    compute: impl FnOnce() -> T,
+) -> T {
+    let Ok(mut slot) = cell.lock() else {
+        return compute();
+    };
+    if let Some((k, value)) = slot.as_ref() {
+        if fresh(k) {
+            return value.clone();
+        }
+    }
+    let value = compute();
+    *slot = Some((key(), value.clone()));
+    value
+}
+
+/// A value recomputed at most once per `ttl`.
 fn memoised<T: Clone>(
     cell: &Mutex<Option<(Instant, T)>>,
     ttl: Duration,
     compute: impl FnOnce() -> T,
 ) -> T {
-    let Ok(mut slot) = cell.lock() else {
-        return compute();
-    };
-    if let Some((at, value)) = slot.as_ref() {
-        if at.elapsed() < ttl {
-            return value.clone();
-        }
-    }
-    let value = compute();
-    *slot = Some((Instant::now(), value.clone()));
-    value
+    memo(cell, |at| at.elapsed() < ttl, Instant::now, compute)
 }
 
-/// The same, for a value whose only input is one string: hold the last answer
-/// and the key that produced it, so a repeat render is a string compare.
+/// A value recomputed only when its one string input changes.
 fn memoised_by<T: Clone>(
     cell: &Mutex<Option<(String, T)>>,
     key: &str,
     compute: impl FnOnce() -> T,
 ) -> T {
-    let Ok(mut slot) = cell.lock() else {
-        return compute();
-    };
-    if let Some((cached, value)) = slot.as_ref() {
-        if cached == key {
-            return value.clone();
-        }
-    }
-    let value = compute();
-    *slot = Some((key.to_string(), value.clone()));
-    value
+    memo(cell, |cached| cached == key, || key.to_string(), compute)
 }
 
-/// `getifaddrs` is a syscall per render and the interfaces of a laptop change
-/// on the scale of minutes, not requests.
+/// `getifaddrs` is a syscall per render; a laptop's interfaces change on the
+/// scale of minutes.
 fn share_ip() -> Option<std::net::Ipv4Addr> {
     static IFACES: Mutex<Option<(Instant, Option<std::net::Ipv4Addr>)>> = Mutex::new(None);
     memoised(&IFACES, Duration::from_secs(10), || {
@@ -106,8 +99,7 @@ fn share_ip() -> Option<std::net::Ipv4Addr> {
 }
 
 /// Encoding the QR is the most expensive thing on this page by a wide margin,
-/// and its input is one link that only moves when the Host header or the
-/// scene's base parcel does.
+/// and its input only moves when the Host header or the base parcel does.
 fn qr_data_url(link: &str) -> Option<String> {
     static QR: Mutex<Option<(String, Option<String>)>> = Mutex::new(None);
     memoised_by(&QR, link, || joinblock::qr_svg_data_url(link))
@@ -149,7 +141,7 @@ fn thumbnail(project: Option<&Project>, machine: &str, prefix: &str) -> Option<S
         .scene_json
         .get("display")
         .and_then(|d| d.get("navmapThumbnail"))
-        .and_then(|t| t.as_str())?;
+        .and_then(Value::as_str)?;
     let abs = project.root.join(rel);
     if !abs.is_file() {
         return None;
@@ -158,16 +150,15 @@ fn thumbnail(project: Option<&Project>, machine: &str, prefix: &str) -> Option<S
     Some(format!("{prefix}/content/contents/{hash}"))
 }
 
-/// The page's behaviour, inlined like the stylesheet. Everything it writes
-/// goes through `/scene-json` and `/scene-thumbnail`; its state rides in the
-/// `#edit-data` JSON blob the page renders beside it.
+/// Inlined like the stylesheet; it writes through `/scene-json` and
+/// `/scene-thumbnail` and reads its state from the `#edit-data` blob.
 const SCRIPT: &str = concat!(
     include_str!("page_common.js"),
     include_str!("landing_edit.js")
 );
 
-/// The scene hero: cover (the thumbnail editor's click target), title,
-/// position line, description and tags — every piece an editor target.
+/// The scene hero: cover, title, position line, description and tags — every
+/// piece an editor target.
 fn scene_card(
     project: Option<&Project>,
     machine: &str,
@@ -187,14 +178,14 @@ fn scene_card(
     let description = scene_json
         .get("display")
         .and_then(|d| d.get("description"))
-        .and_then(|d| d.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("");
     let tags: String = scene_json
         .get("tags")
-        .and_then(|t| t.as_array())
+        .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str())
+                .filter_map(Value::as_str)
                 .map(|t| format!(r#"<span class="tag">{}</span>"#, esc(t)))
                 .collect()
         })
@@ -243,7 +234,6 @@ fn launch_targets(
         joinblock::deep_link_extra(st.local_ab, mcp, mcp.then_some(st.mcp_port), &params)
     };
     let mobile = mobile_deep_link(mobile_realm, position);
-    // 17 KB of data url, encoded only when the phone tab shows it.
     let qr_img = match knobs.where_key == WHERE_PHONE {
         true => qr_data_url(&mobile)
             .map(|qr| {
@@ -254,14 +244,13 @@ fn launch_targets(
     };
 
     let this_machine = realm_carry(realm);
-    let mut targets = vec![Target {
-        key: WHERE_DESKTOP,
-        label: "This machine",
-        hint: "Opens the installed desktop explorer on this machine, in this realm".to_string(),
-        url: desktop_deep_link(realm, position, ab, &extra(this_machine)),
-        qr: String::new(),
-        carry: this_machine,
-    }];
+    let mut targets = vec![Target::new(
+        WHERE_DESKTOP,
+        "This machine",
+        "Opens the installed desktop explorer on this machine, in this realm",
+        desktop_deep_link(realm, position, ab, &extra(this_machine)),
+        this_machine,
+    )];
     if let Some(lan) = lan_realm {
         let lan_host = lan
             .trim_start_matches("http://")
@@ -270,57 +259,48 @@ fn launch_targets(
             .unwrap_or(lan);
         let lan_assets = ab.map(|u| joinblock::swap_url_host(u, lan_host));
         let carry = realm_carry(lan);
-        targets.push(Target {
-            key: WHERE_LAN,
-            label: "Another device",
-            hint: "Opens the desktop explorer on another device on this wi-fi".to_string(),
-            url: desktop_deep_link(lan, position, lan_assets.as_deref(), &extra(carry)),
-            qr: String::new(),
+        targets.push(Target::new(
+            WHERE_LAN,
+            "Another device",
+            "Opens the desktop explorer on another device on this wi-fi",
+            desktop_deep_link(lan, position, lan_assets.as_deref(), &extra(carry)),
             carry,
-        });
+        ));
     }
-    targets.push(Target {
-        key: WHERE_WEB,
-        label: "Web explorer",
-        hint: "Opens the web explorer in this browser — no install".to_string(),
-        url: web_join_url(&joinblock::web_explorer_base(), realm, position),
-        qr: String::new(),
-        carry: Carry::Nothing,
-    });
-    targets.push(Target {
-        key: WHERE_PHONE,
-        label: "Phone",
-        hint: "Scan with the phone camera to open this preview there".to_string(),
-        url: mobile,
-        qr: qr_img,
-        carry: Carry::Nothing,
-    });
+    targets.push(Target::new(
+        WHERE_WEB,
+        "Web explorer",
+        "Opens the web explorer in this browser — no install",
+        web_join_url(&joinblock::web_explorer_base(), realm, position),
+        Carry::Nothing,
+    ));
+    let mut phone = Target::new(
+        WHERE_PHONE,
+        "Phone",
+        "Scan with the phone camera to open this preview there",
+        mobile,
+        Carry::Nothing,
+    );
+    phone.qr = qr_img;
+    targets.push(phone);
     targets
 }
 
-/// The request drawer's count and rows. Only the dozen drawn rows are cloned
-/// and escaped; the buffer holds up to 200 attacker-influenced lines and the
-/// rest are just counted.
+/// The request drawer's count and rows. Only the dozen drawn rows are
+/// escaped; the buffer holds up to 200 attacker-influenced lines and the rest
+/// are just counted.
 fn requests_drawer(st: &AppState) -> (usize, String) {
-    let (count, recent): (usize, Vec<(String, u16, Instant)>) = match st.recent_requests.lock() {
-        Ok(buffer) => {
-            let shown: Vec<_> = buffer
-                .iter()
-                .rev()
-                .filter(|(line, _, _)| !line.ends_with("/favicon.ico"))
-                .take(RECENT_REQUESTS_SHOWN)
-                .cloned()
-                .collect();
-            let count = buffer
-                .iter()
-                .filter(|(line, _, _)| !line.ends_with("/favicon.ico"))
-                .count();
-            (count, shown)
-        }
-        Err(_) => (0, Vec::new()),
+    let Ok(buffer) = st.recent_requests.lock() else {
+        return (0, String::new());
     };
-    let rows = recent
+    let lines: Vec<_> = buffer
         .iter()
+        .filter(|(line, ..)| !line.ends_with("/favicon.ico"))
+        .collect();
+    let rows = lines
+        .iter()
+        .rev()
+        .take(RECENT_REQUESTS_SHOWN)
         .map(|(line, status, at)| {
             let secs = at.elapsed().as_secs();
             let ago = if secs < 60 {
@@ -339,7 +319,7 @@ fn requests_drawer(st: &AppState) -> (usize, String) {
             )
         })
         .collect();
-    (count, rows)
+    (lines.len(), rows)
 }
 
 /// The other scenes this realm serves, folded into a drawer.
@@ -389,31 +369,86 @@ fn route_links(st: &AppState, prefix: &str, has_lan: bool) -> String {
 
 /// The one blob the script reads its state from. `<` is escaped so a scene
 /// string can never close this tag and open one of its own.
-fn edit_data_blob(
-    prefix: &str,
-    scene_json: &Value,
-    grid_parcels: &[(i64, i64)],
-    base: (i64, i64),
-    spawns: &[Value],
-) -> String {
-    let (gx0, gy0, gx1, gy1, _) = grid_bounds(grid_parcels);
+fn edit_data_blob(prefix: &str, scene: &SceneData) -> String {
+    let (gx0, gy0, gx1, gy1, _) = grid_bounds(&scene.grid);
+    let list = |key: &str| {
+        scene
+            .json
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]))
+    };
     serde_json::json!({
         "prefix": prefix,
-        "tags": scene_json.get("tags").cloned().unwrap_or_else(|| Value::Array(vec![])),
-        "parcels": grid_parcels
-            .iter()
-            .map(|(x, y)| format!("{x},{y}"))
-            .collect::<Vec<_>>(),
-        "base": format!("{},{}", base.0, base.1),
+        "tags": list("tags"),
+        "parcels": scene.grid.iter().map(|(x, y)| format!("{x},{y}")).collect::<Vec<_>>(),
+        "base": format!("{},{}", scene.base.0, scene.base.1),
         "grid": { "x0": gx0, "y0": gy0, "x1": gx1, "y1": gy1, "gap": 3 },
-        "permissions": scene_json
-            .get("requiredPermissions")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(vec![])),
-        "spawnPoints": spawns,
+        "permissions": list("requiredPermissions"),
+        "spawnPoints": scene.spawns,
     })
     .to_string()
     .replace('<', "\\u003c")
+}
+
+/// What both pages read out of the first project's scene.json.
+struct SceneData<'a> {
+    json: &'a Value,
+    title: String,
+    parcels: Vec<(i64, i64)>,
+    base: (i64, i64),
+    spawns: &'a [Value],
+    /// A scene with no parcel list still draws a one-cell grid around its base.
+    grid: Vec<(i64, i64)>,
+}
+
+fn scene_data(projects: &[Project]) -> SceneData<'_> {
+    static EMPTY: Value = Value::Null;
+    let json = projects.first().map_or(&EMPTY, |p| &p.scene_json);
+    let (parcels, base) = parse_parcels(json);
+    let grid = if parcels.is_empty() {
+        vec![base]
+    } else {
+        parcels.clone()
+    };
+    SceneData {
+        json,
+        title: scene_title(json),
+        parcels,
+        base,
+        spawns: spawn_points(json),
+        grid,
+    }
+}
+
+fn dash(sections: &str, edit_data: &str) -> String {
+    format!(
+        r##"<main class="dash">
+{sections}
+</main>
+<script type="application/json" id="edit-data">{edit_data}</script>
+<script>{SCRIPT}</script>
+"##
+    )
+}
+
+fn shell(
+    st: &AppState,
+    scene: &SceneData,
+    prefix: &str,
+    skip: (&str, &str),
+    active: &str,
+    host: &str,
+    body: &str,
+) -> String {
+    let nav = Nav {
+        active,
+        badge: nav_badge(st),
+        host,
+        account: known_account(st),
+        token: token(st),
+    };
+    document(&scene.title, prefix, "", skip.0, skip.1, Some(&nav), body)
 }
 
 fn render(
@@ -425,24 +460,17 @@ fn render(
     knobs: &Knobs,
 ) -> String {
     let projects = st.projects();
-    let empty = Value::Null;
-    let scene_json: &Value = projects.first().map(|p| &p.scene_json).unwrap_or(&empty);
-    let title = scene_title(scene_json);
-    let (parcels, base) = parse_parcels(scene_json);
-    let spawns: Vec<Value> = scene_json
-        .get("spawnPoints")
-        .and_then(|s| s.as_array())
-        .cloned()
-        .unwrap_or_default();
-    // A scene with no parcel list still draws a one-cell grid around its base.
-    let grid_parcels = if parcels.is_empty() {
-        vec![base]
-    } else {
-        parcels.clone()
-    };
+    let scene = scene_data(&projects);
     let mcp_on = knobs.mcp.unwrap_or(st.mcp);
-
-    let targets = launch_targets(st, knobs, realm, lan_realm, mobile_realm, base, mcp_on);
+    let targets = launch_targets(
+        st,
+        knobs,
+        realm,
+        lan_realm,
+        mobile_realm,
+        scene.base,
+        mcp_on,
+    );
     let selected = targets
         .iter()
         .position(|t| t.key == knobs.where_key)
@@ -453,9 +481,8 @@ fn render(
     // is /deploy, a page publish signs on /deploy — `/` is the preview, and
     // a wallet prompt on it would be a surprise wherever the visitor came
     // from.
-    let body = format!(
-        r##"<main class="dash">
-  <section id="join" class="sec">
+    let sections = format!(
+        r##"  <section id="join" class="sec">
     {join_control}
   </section>
 
@@ -463,89 +490,60 @@ fn render(
     <details class="drawer"><summary>Recent requests · {request_count}</summary>
       <div class="drawer__body"><div class="reqs">{request_rows}</div></div></details>
     <div class="routes">{route_links}</div>
-  </section>
-</main>
-<script type="application/json" id="edit-data">{edit_data}</script>
-<script>{SCRIPT}</script>
-"##,
-        join_control = join_control(&targets, selected, st.mcp, mcp_on, knobs, &spawns, prefix),
+  </section>"##,
+        join_control = join_control(
+            &targets,
+            selected,
+            st.mcp,
+            mcp_on,
+            knobs,
+            scene.spawns,
+            prefix
+        ),
         route_links = route_links(st, prefix, lan_realm.is_some()),
-        edit_data = edit_data_blob(prefix, scene_json, &grid_parcels, base, &spawns),
     );
-    document(
-        &title,
+    shell(
+        st,
+        &scene,
         prefix,
-        "",
-        "#launch",
-        "Skip to the launch button",
-        Some(&super::chrome::Nav {
-            active: "preview",
-            badge: super::deploy_page::nav_badge(st),
-            host: host_label(realm),
-            account: super::deploy_page::known_account(st),
-            token: super::deploy_page::token(st),
-        }),
-        &body,
+        ("#launch", "Skip to the launch button"),
+        "preview",
+        host_label(realm),
+        &dash(&sections, &edit_data_blob(prefix, &scene)),
     )
 }
 
-/// `/scene` — the scene section: the layout card grown an Info tab that holds
-/// what used to be the landing hero (cover, title, description, tags), so
+/// `/scene` — the layout card with an Info tab holding the scene hero, so
 /// every fact about the scene edits in one card under one sub-navigation.
 pub(super) fn scene_page(st: &AppState, headers: &HeaderMap) -> Response {
     let prefix = forwarded_prefix(headers);
     let projects = st.projects();
-    let empty = Value::Null;
-    let scene_json: &Value = projects.first().map(|p| &p.scene_json).unwrap_or(&empty);
-    let title = scene_title(scene_json);
-    let (parcels, base) = parse_parcels(scene_json);
-    let spawns: Vec<Value> = scene_json
-        .get("spawnPoints")
-        .and_then(|s| s.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let grid_parcels = if parcels.is_empty() {
-        vec![base]
-    } else {
-        parcels.clone()
-    };
+    let scene = scene_data(&projects);
     let info = scene_card(
         projects.first(),
         &st.machine,
         &prefix,
-        scene_json,
-        &title,
-        base,
-        parcels.len().max(1),
+        scene.json,
+        &scene.title,
+        scene.base,
+        scene.parcels.len().max(1),
     );
-    let body = format!(
-        r##"<main class="dash">
-  <section id="scene" class="sec">
+    let sections = format!(
+        r##"  <section id="scene" class="sec">
     {layout_card}
     {more_scenes}
-  </section>
-</main>
-<script type="application/json" id="edit-data">{edit_data}</script>
-<script>{SCRIPT}</script>
-"##,
-        layout_card = scene_layout_card(scene_json, &grid_parcels, base, &spawns, &info),
+  </section>"##,
+        layout_card = scene_layout_card(scene.json, &scene.grid, scene.base, scene.spawns, &info),
         more_scenes = more_scenes_chips(projects.get(1..).unwrap_or_default()),
-        edit_data = edit_data_blob(&prefix, scene_json, &grid_parcels, base, &spawns),
     );
-    html(document(
-        &title,
+    html(shell(
+        st,
+        &scene,
         &prefix,
-        "",
-        "#scene",
-        "Skip to the scene",
-        Some(&super::chrome::Nav {
-            active: "scene",
-            badge: super::deploy_page::nav_badge(st),
-            host: &format!("127.0.0.1:{}", st.port),
-            account: super::deploy_page::known_account(st),
-            token: super::deploy_page::token(st),
-        }),
-        &body,
+        ("#scene", "Skip to the scene"),
+        "scene",
+        &format!("127.0.0.1:{}", st.port),
+        &dash(&sections, &edit_data_blob(&prefix, &scene)),
     ))
 }
 

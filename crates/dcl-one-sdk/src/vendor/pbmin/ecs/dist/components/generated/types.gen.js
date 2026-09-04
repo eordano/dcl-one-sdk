@@ -5,6 +5,8 @@ export * from './pb/decentraland/sdk/components/common/camera_transition.gen';
 // export { PbCameraTransition }
 export * from './pb/decentraland/sdk/components/common/camera_type.gen';
 // export { PbCameraType }
+export * from './pb/decentraland/sdk/components/common/explorer_ui.gen';
+// export { PbExplorerUi }
 export * from './pb/decentraland/sdk/components/common/input_action.gen';
 // export { PbInputAction }
 export * from './pb/decentraland/sdk/components/common/loading_state.gen';

@@ -3,12 +3,32 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PBAvatarEmoteCommand = void 0;
+exports.PBAvatarEmoteCommand = exports.EmoteState = void 0;
 /* eslint-disable */
 const minimal_1 = __importDefault(require("protobufjs/minimal"));
 const protobufPackageSarasa = "decentraland.sdk.components";
+/** EmoteState describes the lifecycle state of an emote playback. */
+/**
+ * @public
+ */
+var EmoteState;
+(function (EmoteState) {
+    /**
+     * ES_STARTED - ES_STARTED indicates the emote started playing.
+     * This is the zero value and is used for backward compatibility — entries
+     * written by older explorers (field absent) read as "started".
+     */
+    EmoteState[EmoteState["ES_STARTED"] = 0] = "ES_STARTED";
+    /** ES_FINISHED - ES_FINISHED indicates a non-looping emote completed naturally. */
+    EmoteState[EmoteState["ES_FINISHED"] = 1] = "ES_FINISHED";
+    /**
+     * ES_INTERRUPTED - ES_INTERRUPTED indicates playback was cancelled (movement, teleport,
+     * another emote superseding it, explicit stop, or scene change).
+     */
+    EmoteState[EmoteState["ES_INTERRUPTED"] = 2] = "ES_INTERRUPTED";
+})(EmoteState = exports.EmoteState || (exports.EmoteState = {}));
 function createBasePBAvatarEmoteCommand() {
-    return { emoteUrn: "", loop: false, timestamp: 0, mask: undefined };
+    return { emoteUrn: "", loop: false, timestamp: 0, mask: undefined, state: undefined };
 }
 /**
  * @public
@@ -27,6 +47,9 @@ var PBAvatarEmoteCommand;
         }
         if (message.mask !== undefined) {
             writer.uint32(32).int32(message.mask);
+        }
+        if (message.state !== undefined) {
+            writer.uint32(40).int32(message.state);
         }
         return writer;
     }
@@ -61,6 +84,12 @@ var PBAvatarEmoteCommand;
                         break;
                     }
                     message.mask = reader.int32();
+                    continue;
+                case 5:
+                    if (tag !== 40) {
+                        break;
+                    }
+                    message.state = reader.int32();
                     continue;
             }
             if ((tag & 7) === 4 || tag === 0) {

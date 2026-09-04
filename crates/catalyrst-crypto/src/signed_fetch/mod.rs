@@ -37,6 +37,30 @@
 //! plus the metadata gates; a WS/RPC path migrating off the legacy payload
 //! moves to those, not to a new window.
 //!
+//! ## Payload shapes
+//!
+//! Signers are split across the two payload shapes (bevy-explorer mints 6.x,
+//! the js signers still mint legacy), so the plain entry points here -
+//! `try_extract_signer`, `verify_signed_fetch`, `verify_signed_fetch_meta` and
+//! `validate_signature_either_payload` under them - try the 6.x payload first
+//! and fall back to the legacy one on a signature mismatch: the accept set is
+//! the union, and a legacy-signed request answers exactly as it did before.
+//! `handshake::verify_handshake`, `handshake::require_signer` and
+//! `handshake::optional_signer` are the same union over the header-bag frame,
+//! through `handshake::validate_signature_either_payload`; so are the
+//! service-local verifiers that rebuild the payload themselves (market's
+//! `require_signer` and its trades/activity/picks handlers, scene-state's
+//! `verify_auth_frame`, comms' `verify_signed_fetch_gated`, quests through
+//! the handshake twins).
+//!
+//! Only `verify_signed_fetch_meta_with_policy`, its `_with_legacy_fallback`
+//! twins and the `handshake::*_v6` twins keep the guarded posture: the legacy
+//! attempt is made only behind a non-empty `canonical_metadata_keys`, and an
+//! empty slice is 6.x-only. That is where a surface moves once it names the
+//! metadata keys it authorizes on (server's `require_verified`, worlds'
+//! explorer and permissions routes, the social-service WS handshake with an
+//! empty list); it never falls back to the union.
+//!
 //! ## Services that recover an address WITHOUT this module
 //!
 //! These re-implement extraction and/or freshness. Listed here because the
@@ -182,10 +206,18 @@ pub fn default_eip1654_validator() -> Option<&'static Arc<dyn Eip1654Validator>>
 }
 
 /// The pre-6.0.0 signed-fetch payload: the whole joined string folded, metadata
-/// included. Every in-tree signer (bevy-explorer, ui3, dcl-one-sdk, the
-/// scene-state js runtime, the deploy signer) still mints this shape, so it
-/// stays what `build_payload` returns; deployed wasm clients cannot be updated
-/// atomically with a server.
+/// included. bevy-explorer mints the 6.x shape now (`wallet::sign_request`
+/// folds only method and path); ui3, dcl-one-sdk, the scene-state js runtime
+/// and the deploy signer still mint this one, so it stays what `build_payload`
+/// returns for the signing call sites until they migrate. The plain verifiers
+/// (`try_extract_signer`, `verify_signed_fetch`, `verify_signed_fetch_meta`,
+/// `validate_signature_either_payload`, `handshake::verify_handshake`,
+/// `handshake::require_signer`, `handshake::optional_signer`) accept the union
+/// of both shapes, so the two populations can coexist while deployed wasm
+/// clients cannot be updated atomically with a server; the guarded verifiers
+/// (`verify_signed_fetch_meta_with_policy`, the `_with_legacy_fallback` twins,
+/// `handshake::*_v6`) accept this shape only behind a non-empty
+/// `canonical_metadata_keys` and are 6.x-only on an empty slice.
 pub fn build_legacy_payload(method: &str, path: &str, timestamp: &str, metadata: &str) -> String {
     format!("{}:{}:{}:{}", method, path, timestamp, metadata).to_lowercase()
 }
@@ -330,7 +362,7 @@ pub async fn validate_signature_with(
     now: i64,
     validator: Option<&dyn Eip1654Validator>,
 ) -> Result<Signer, AuthChainError> {
-    assert_within_window(signed_at_secs(timestamp)?, now, expiration_secs)?;
+    check_symmetric_skew(timestamp, now, expiration_secs)?;
 
     let crypto_chain = to_crypto_chain(chain);
     verify_auth_chain_async(&crypto_chain, payload, Some(now * 1000), validator)
@@ -348,7 +380,18 @@ fn signed_at_secs(timestamp: &str) -> Result<i64, AuthChainError> {
         .map_err(|_| AuthChainError::InvalidTimestamp(timestamp.to_string()))
 }
 
-fn assert_within_window(signed_at: i64, now: i64, window_secs: i64) -> Result<(), AuthChainError> {
+/// The one freshness rule behind every window in the table above: a millisecond
+/// timestamp header is fresh when `(now - signed_at).abs() <= window_secs`, so
+/// the budget is symmetric and a non-numeric timestamp is rejected rather than
+/// skipping the window. Services that recover addresses without this module
+/// (world-storage's `check_freshness`, pulse's skew bound) should call this
+/// instead of copying the `.abs()` comparison.
+pub fn check_symmetric_skew(
+    timestamp: &str,
+    now: i64,
+    window_secs: i64,
+) -> Result<(), AuthChainError> {
+    let signed_at = signed_at_secs(timestamp)?;
     if (now - signed_at).abs() > window_secs {
         return Err(AuthChainError::Expired {
             signed_at,
@@ -401,9 +444,8 @@ pub async fn try_extract_signer(
     let metadata = header_str(headers, AUTH_METADATA_HEADER)
         .unwrap_or("{}")
         .to_string();
-    let payload = build_payload(method, path, &ts, &metadata);
     let now = chrono::Utc::now().timestamp();
-    validate_signature(&chain, &payload, &ts, tolerance_secs, now)
+    validate_signature_either_payload(&chain, method, path, &ts, &metadata, tolerance_secs, now)
         .await
         .ok()
 }
@@ -423,9 +465,9 @@ pub async fn verify_signed_fetch(
     let metadata = header_str(headers, AUTH_METADATA_HEADER)
         .unwrap_or("{}")
         .to_string();
-    let payload = build_payload(method, path, &ts, &metadata);
     let now = chrono::Utc::now().timestamp();
-    validate_signature(&chain, &payload, &ts, tolerance_secs, now).await
+    validate_signature_either_payload(&chain, method, path, &ts, &metadata, tolerance_secs, now)
+        .await
 }
 
 pub async fn verify_signed_fetch_meta(
@@ -443,9 +485,17 @@ pub async fn verify_signed_fetch_meta(
     let metadata_raw = header_str(headers, AUTH_METADATA_HEADER)
         .unwrap_or("{}")
         .to_string();
-    let payload = build_payload(method, path, &ts, &metadata_raw);
     let now = chrono::Utc::now().timestamp();
-    let signer = validate_signature(&chain, &payload, &ts, tolerance_secs, now).await?;
+    let signer = validate_signature_either_payload(
+        &chain,
+        method,
+        path,
+        &ts,
+        &metadata_raw,
+        tolerance_secs,
+        now,
+    )
+    .await?;
 
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_raw).unwrap_or(serde_json::Value::Null);
@@ -469,32 +519,195 @@ fn parse_metadata(raw: &str) -> Result<serde_json::Value, AuthChainError> {
     }
 }
 
-/// Verifies against the 6.x payload and, only for a caller that named the
-/// metadata keys it authorizes on, falls back to the legacy payload.
+/// Which payload shape a caller that named canonical keys tries first.
 ///
-/// `canonical_metadata_keys` doubles as the switch deliberately: there is no
-/// way to accept the legacy payload without naming the fields that make doing
-/// so safe. An empty slice is new-format-only, which is the posture every
-/// caller should keep unless its signers cannot be shipped ahead of it.
+/// The verdict does not depend on it. Both orders accept exactly the requests
+/// upstream's 6.x-first `verify()` accepts and refuse the rest with the same
+/// error class: the legacy attempt is only ever made behind the key guard, and
+/// when the guard refuses, its 400 is what answers a failed 6.x signature - the
+/// 6.x verdict never supersedes it. What depends on the order is the attempt a
+/// request pays for and discards. Signatures are checked against each link's
+/// own payload, so a discarded attempt repeats that check and fails only the
+/// final comparison: one redundant local recovery on an ECDSA chain, and on an
+/// EIP-1654 chain the same `isValidSignature` question asked again - a
+/// `ValidationCache` hit when one is configured, otherwise one RPC call for a
+/// signature the wallet accepts and two for one it refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttemptOrder {
+    /// Upstream's order, and the posture for every caller whose signers mint
+    /// the 6.x payload: the ordinary request then settles on one attempt.
+    #[default]
+    V6First,
+    /// For a service whose signers still mint the folded payload, so the
+    /// ordinary request settles on one attempt and a 6.x-signed one pays for
+    /// the discarded legacy attempt instead. Flip back once they mint 6.x.
+    LegacyFirst,
+}
+
+/// The per-surface half of the signed-fetch contract.
 ///
+/// `canonical_metadata_keys` doubles as the legacy switch deliberately: there
+/// is no way to accept the legacy payload without naming the fields that make
+/// doing so safe. An empty slice is 6.x-only in either order, which is the
+/// posture every caller should keep unless its signers cannot be shipped ahead
+/// of it.
+#[derive(Debug, Clone, Copy)]
+pub struct SignedFetchPolicy<'a> {
+    pub canonical_metadata_keys: &'a [&'a str],
+    pub metadata_gate: Option<&'a SignerGate>,
+    pub attempt_order: AttemptOrder,
+}
+
+impl<'a> SignedFetchPolicy<'a> {
+    pub fn new(
+        canonical_metadata_keys: &'a [&'a str],
+        metadata_gate: Option<&'a SignerGate>,
+    ) -> Self {
+        Self {
+            canonical_metadata_keys,
+            metadata_gate,
+            attempt_order: AttemptOrder::default(),
+        }
+    }
+
+    pub fn attempt_order(self, attempt_order: AttemptOrder) -> Self {
+        Self {
+            attempt_order,
+            ..self
+        }
+    }
+}
+
+struct PayloadAttempts<'a> {
+    chain: &'a AuthChain,
+    legacy: String,
+    v6: String,
+    timestamp: &'a str,
+    tolerance_secs: i64,
+    now: i64,
+    validator: Option<&'a dyn Eip1654Validator>,
+}
+
+impl PayloadAttempts<'_> {
+    async fn validate(&self, payload: &str) -> Result<Signer, AuthChainError> {
+        validate_signature_with(
+            self.chain,
+            payload,
+            self.timestamp,
+            self.tolerance_secs,
+            self.now,
+            self.validator,
+        )
+        .await
+    }
+
+    /// Only `InvalidSignature` crosses from one attempt to the other: every
+    /// other failure is deterministic in the payload shape, so retrying it
+    /// would change nothing. Byte-identical payloads - every request whose
+    /// metadata is already folded, `{}` included - are attempted once, since
+    /// a second attempt could only repeat the first verdict.
+    ///
+    /// A guard refusal removes the legacy attempt, never the 6.x one: the 6.x
+    /// payload signs the metadata bytes, so a re-spelled key it verifies is
+    /// what the client signed and upstream serves it. That is reachable with
+    /// identical payloads whenever a declared key carries an uppercase letter
+    /// (`sceneId` delivered as `sceneid`), so the refusal is never returned
+    /// before the 6.x attempt has failed.
+    async fn verify(
+        &self,
+        metadata: &serde_json::Value,
+        canonical_metadata_keys: &[&str],
+        order: AttemptOrder,
+    ) -> Result<Signer, AuthChainError> {
+        if canonical_metadata_keys.is_empty() {
+            return self.validate(&self.v6).await;
+        }
+        match order {
+            AttemptOrder::V6First => match self.validate(&self.v6).await {
+                Err(AuthChainError::InvalidSignature(detail)) => {
+                    assert_legacy_metadata_keys(metadata, canonical_metadata_keys)?;
+                    if self.legacy == self.v6 {
+                        return Err(AuthChainError::InvalidSignature(detail));
+                    }
+                    self.validate(&self.legacy).await
+                }
+                settled => settled,
+            },
+            AttemptOrder::LegacyFirst => {
+                match assert_legacy_metadata_keys(metadata, canonical_metadata_keys) {
+                    Ok(()) => match self.validate(&self.legacy).await {
+                        Err(AuthChainError::InvalidSignature(_)) if self.legacy != self.v6 => {
+                            self.validate(&self.v6).await
+                        }
+                        settled => settled,
+                    },
+                    Err(refused) => match self.validate(&self.v6).await {
+                        Err(AuthChainError::InvalidSignature(_)) => Err(refused),
+                        settled => settled,
+                    },
+                }
+            }
+        }
+    }
+
+    /// The [`AttemptOrder::V6First`] sequence with no key guard in front of
+    /// the legacy attempt: the accept set is the plain union of the two
+    /// shapes, and the verdict for a request that fails both is the legacy
+    /// attempt's, which is what a legacy-only verifier answered.
+    async fn verify_either(&self) -> Result<Signer, AuthChainError> {
+        match self.validate(&self.v6).await {
+            Err(AuthChainError::InvalidSignature(_)) if self.legacy != self.v6 => {
+                self.validate(&self.legacy).await
+            }
+            settled => settled,
+        }
+    }
+}
+
+/// `validate_signature` over both payload shapes: the 6.x payload first, the
+/// legacy one only when the 6.x signature comparison fails and the two
+/// payloads differ. This is the transitional posture for a caller that has not
+/// named the metadata keys it authorizes on - it accepts every request the
+/// legacy-only check accepted, plus every 6.x-signed one, and refuses the rest
+/// with the same error class as before. A surface that reads metadata keys to
+/// authorize should move to `verify_signed_fetch_meta_with_policy`, which puts
+/// the key guard in front of the legacy attempt.
+pub async fn validate_signature_either_payload(
+    chain: &AuthChain,
+    method: &str,
+    path: &str,
+    timestamp: &str,
+    metadata: &str,
+    expiration_secs: i64,
+    now: i64,
+) -> Result<Signer, AuthChainError> {
+    let attempts = PayloadAttempts {
+        chain,
+        legacy: build_legacy_payload(method, path, timestamp, metadata),
+        v6: build_payload_v6(method, path, timestamp, metadata),
+        timestamp,
+        tolerance_secs: expiration_secs,
+        now,
+        validator: default_eip1654_validator().map(|v| &**v),
+    };
+    attempts.verify_either().await
+}
+
 /// Stage order matches upstream `verify()`: chain extraction, timestamp,
 /// expiration, metadata parse, `metadata_gate`, signature. Freshness first so a
-/// replayed or stale request answers 401 Expired without running the gate; the
-/// gate then answers before either signature check, so a refused request pays
-/// no catalyst round-trip for an EIP-1654 chain, and it guards both payload
-/// shapes.
-///
-/// The fallback is reached only on `InvalidSignature`: every other failure is
-/// deterministic in the payload shape, so retrying it would change nothing.
-pub async fn verify_signed_fetch_meta_with_legacy_fallback(
+/// replayed or stale request answers 401 Expired without parsing the metadata
+/// or running the gate; the gate then answers before either signature check,
+/// so a refused request pays for no signature work, and it guards both payload
+/// shapes in either order.
+pub async fn verify_signed_fetch_meta_with_policy(
     headers: &HeaderMap,
     method: &str,
     path: &str,
     tolerance_secs: i64,
-    canonical_metadata_keys: &[&str],
-    metadata_gate: Option<&SignerGate>,
+    policy: SignedFetchPolicy<'_>,
+    validator: Option<&dyn Eip1654Validator>,
 ) -> Result<(Signer, serde_json::Value), AuthChainError> {
-    assert_canonical_metadata_keys(canonical_metadata_keys)?;
+    assert_canonical_metadata_keys(policy.canonical_metadata_keys)?;
     let path = signed_fetch_path(headers, path);
     let path = path.as_ref();
     let chain = extract_auth_chain(headers)?;
@@ -502,14 +715,14 @@ pub async fn verify_signed_fetch_meta_with_legacy_fallback(
         .ok_or(AuthChainError::MissingTimestamp)?
         .to_string();
     let now = chrono::Utc::now().timestamp();
-    assert_within_window(signed_at_secs(&ts)?, now, tolerance_secs)?;
+    check_symmetric_skew(&ts, now, tolerance_secs)?;
 
     let metadata_raw = header_str(headers, AUTH_METADATA_HEADER)
         .unwrap_or("{}")
         .to_string();
     let metadata = parse_metadata(&metadata_raw)?;
 
-    if let Some(gate) = metadata_gate {
+    if let Some(gate) = policy.metadata_gate {
         if !gate.permits(&metadata) {
             return Err(AuthChainError::MalformedChain {
                 detail: format!(
@@ -520,18 +733,46 @@ pub async fn verify_signed_fetch_meta_with_legacy_fallback(
         }
     }
 
-    let payload = build_payload_v6(method, path, &ts, &metadata_raw);
-    let signer = match validate_signature(&chain, &payload, &ts, tolerance_secs, now).await {
-        Ok(signer) => signer,
-        Err(AuthChainError::InvalidSignature(_)) if !canonical_metadata_keys.is_empty() => {
-            assert_legacy_metadata_keys(&metadata, canonical_metadata_keys)?;
-            let legacy = build_legacy_payload(method, path, &ts, &metadata_raw);
-            validate_signature(&chain, &legacy, &ts, tolerance_secs, now).await?
-        }
-        Err(err) => return Err(err),
+    let attempts = PayloadAttempts {
+        chain: &chain,
+        legacy: build_legacy_payload(method, path, &ts, &metadata_raw),
+        v6: build_payload_v6(method, path, &ts, &metadata_raw),
+        timestamp: &ts,
+        tolerance_secs,
+        now,
+        validator,
     };
+    let signer = attempts
+        .verify(
+            &metadata,
+            policy.canonical_metadata_keys,
+            policy.attempt_order,
+        )
+        .await?;
 
     Ok((signer, metadata))
+}
+
+/// Verifies against the 6.x payload and, only for a caller that named the
+/// metadata keys it authorizes on, falls back to the legacy payload: the
+/// [`AttemptOrder::V6First`] policy over the default EIP-1654 validator.
+pub async fn verify_signed_fetch_meta_with_legacy_fallback(
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+    tolerance_secs: i64,
+    canonical_metadata_keys: &[&str],
+    metadata_gate: Option<&SignerGate>,
+) -> Result<(Signer, serde_json::Value), AuthChainError> {
+    verify_signed_fetch_meta_with_policy(
+        headers,
+        method,
+        path,
+        tolerance_secs,
+        SignedFetchPolicy::new(canonical_metadata_keys, metadata_gate),
+        default_eip1654_validator().map(|v| &**v),
+    )
+    .await
 }
 
 pub async fn verify_signed_fetch_with_legacy_fallback(

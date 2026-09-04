@@ -94,7 +94,7 @@ function createRaycastSystem(engine) {
         entitiesCallbackResultMap.delete(entity);
     }
     // @internal
-    engine.addSystem(function EventSystem() {
+    engine.addSystem(function RaycastEventSystem() {
         for (const addMissingRaycast of nextTickRaycasts) {
             addMissingRaycast();
         }

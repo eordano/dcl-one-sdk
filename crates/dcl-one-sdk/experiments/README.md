@@ -10,7 +10,7 @@ A dependency-free drop-in for the `protobufjs/minimal` runtime that `@dcl/ecs`
 uses for the CRDT wire format — 45 KB, 1,352 lines, replicating `Reader`,
 `Writer`, `util.Long` and `configure()`.
 
-**It ships.** `add_pbmin()` in `scripts/build-base-blob.py` writes `index.js`
+**It ships.** `add_pbmin()` in `scripts/blob_overlays.py` writes `index.js`
 and `LICENSE` from this directory into the blob as `node_modules/protobufjs`,
 and no upstream protobufjs file is shipped at all. This directory is therefore
 *source*, not an experiment — treat an edit to `index.js` as an edit to shipped

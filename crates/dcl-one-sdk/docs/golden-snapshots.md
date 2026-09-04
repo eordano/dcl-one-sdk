@@ -105,7 +105,7 @@ The same leak is why every size and hash above strips the map first. Production
 artifacts *are* path-independent: the cube fixture built at two paths of
 different length produces identical `bin/scene.js` and `bin/index.js` hashes.
 
-**No numeric comparability with upstream.** Different bundler (rolldown 1.2.4 vs
+**No numeric comparability with upstream.** Different bundler (rolldown 1.2.6 vs
 esbuild ^0.18.17), a split three-chunk layout instead of one bundle, and a
 prebuilt scene-independent SDK chunk copied out of the blob rather than
 re-bundled. Comparability here is structural: identical line names so a human

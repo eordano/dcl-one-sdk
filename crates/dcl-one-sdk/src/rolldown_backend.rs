@@ -84,17 +84,12 @@ fn aliases(list: &[(String, PathBuf)]) -> Vec<(String, Vec<Option<String>>)> {
 }
 
 fn externals(extra: &[String]) -> Result<IsExternal> {
-    let mut patterns = vec![
-        "~system/*".to_string(),
-        "@dcl/inspector".to_string(),
-        "@dcl/inspector/*".to_string(),
-    ];
-    patterns.extend(extra.iter().cloned());
-    let mut out = Vec::with_capacity(patterns.len());
-    for p in &patterns {
-        out.push(external_pattern(p)?);
-    }
-    Ok(IsExternal::StringOrRegex(out))
+    ["~system/*", "@dcl/inspector", "@dcl/inspector/*"]
+        .into_iter()
+        .chain(extra.iter().map(String::as_str))
+        .map(external_pattern)
+        .collect::<Result<Vec<_>>>()
+        .map(IsExternal::StringOrRegex)
 }
 
 fn external_pattern(pattern: &str) -> Result<StringOrRegex> {
@@ -118,16 +113,18 @@ fn external_pattern(pattern: &str) -> Result<StringOrRegex> {
 }
 
 fn defines(production: bool) -> FxIndexMap<String, String> {
-    let mut m = FxIndexMap::default();
-    m.insert("document".to_string(), "undefined".to_string());
-    m.insert("window".to_string(), "undefined".to_string());
-    let (debug, env) = if production {
-        ("false", "\"production\"")
-    } else {
-        ("true", "\"development\"")
+    let (debug, env) = match production {
+        true => ("false", "\"production\""),
+        false => ("true", "\"development\""),
     };
-    m.insert("DEBUG".to_string(), debug.to_string());
-    m.insert("globalThis.DEBUG".to_string(), debug.to_string());
-    m.insert("process.env.NODE_ENV".to_string(), env.to_string());
-    m
+    [
+        ("document", "undefined"),
+        ("window", "undefined"),
+        ("DEBUG", debug),
+        ("globalThis.DEBUG", debug),
+        ("process.env.NODE_ENV", env),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }

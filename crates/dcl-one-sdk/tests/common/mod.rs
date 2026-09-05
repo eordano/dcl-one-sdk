@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod testgate;
+
 use catalyrst_crypto::Wallet;
 use dcl_one_sdk::comms::proto::{ws_packet, WsIdentification, WsPacket, WsSignedChallenge};
 use futures::{SinkExt, StreamExt};

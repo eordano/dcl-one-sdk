@@ -1,6 +1,6 @@
 use std::fmt;
 
-use catalyrst_types::EthAddress;
+use catalyrst_auth_chain::EthAddress;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Signer(EthAddress);

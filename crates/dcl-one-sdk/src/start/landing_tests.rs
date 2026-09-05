@@ -6,6 +6,8 @@ use crate::start::chrome::STYLE;
 use serde_json::json;
 use std::sync::Mutex;
 
+const LOCAL: &str = "http://127.0.0.1:8000";
+
 async fn scene_html(st: &AppState) -> String {
     let resp = scene_page(st, &axum::http::HeaderMap::new());
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -21,15 +23,44 @@ fn landing_state(projects: Vec<Project>) -> AppState {
     st
 }
 
+fn scene_state(scene_json: Value) -> AppState {
+    landing_state(vec![Project {
+        root: std::path::PathBuf::from("/tmp/scene"),
+        scene_json,
+    }])
+}
+
+/// "Gather", with one named spawn point.
+fn gather_state() -> AppState {
+    scene_state(json!({
+        "display": { "title": "Gather" },
+        "spawnPoints": [{ "name": "entrance", "position": { "x": 8, "y": 0, "z": 8 } }]
+    }))
+}
+
+fn gather_knobs(query: &str) -> Knobs {
+    knobs(Some(query), &["entrance".to_string()])
+}
+
+fn render_local(st: &AppState, lan: Option<&str>, knobs: &Knobs) -> String {
+    render(st, LOCAL, "", LOCAL, lan, knobs)
+}
+
 fn target(key: &'static str, label: &'static str, url: &str, carry: Carry) -> Target {
-    Target {
-        key,
-        label,
-        hint: String::new(),
-        url: url.into(),
-        qr: String::new(),
-        carry,
-    }
+    Target::new(key, label, "", url.into(), carry)
+}
+
+fn desktop() -> Target {
+    target(
+        WHERE_DESKTOP,
+        "this machine",
+        "decentraland://a",
+        Carry::Loopback,
+    )
+}
+
+fn card(targets: &[Target], selected: usize, mcp: bool) -> String {
+    join_control(targets, selected, mcp, mcp, &Knobs::default(), &[], "")
 }
 
 /// The page is one launch card, and every knob is a control inside the one
@@ -37,12 +68,7 @@ fn target(key: &'static str, label: &'static str, url: &str, carry: Carry) -> Ta
 #[test]
 fn the_page_renders_one_card_and_submits_every_knob() {
     let targets = vec![
-        target(
-            WHERE_DESKTOP,
-            "this machine",
-            "decentraland://a",
-            Carry::Loopback,
-        ),
+        desktop(),
         target(
             WHERE_LAN,
             "another device",
@@ -50,7 +76,7 @@ fn the_page_renders_one_card_and_submits_every_knob() {
             Carry::Routable,
         ),
     ];
-    let html = join_control(&targets, 0, true, true, &Knobs::default(), &[], "");
+    let html = card(&targets, 0, true);
     assert_eq!(
         html.matches(r#"<div class="jn "#).count() + html.matches(r#"<div class="jn">"#).count(),
         1,
@@ -58,9 +84,7 @@ fn the_page_renders_one_card_and_submits_every_knob() {
     );
     assert!(html.contains("decentraland://a") && !html.contains("decentraland://b"));
     assert_eq!(
-        join_control(&targets, 1, true, true, &Knobs::default(), &[], "",)
-            .matches("decentraland://b")
-            .count(),
+        card(&targets, 1, true).matches("decentraland://b").count(),
         2,
         "picking the second target renders its card — the href and the url line"
     );
@@ -80,8 +104,7 @@ fn the_page_renders_one_card_and_submits_every_knob() {
     assert!(html.contains(r#"value="desktop" checked"#));
     assert!(html.contains(r#"value="on" checked"#), "mcp on by default");
     assert!(
-        join_control(&targets, 0, false, false, &Knobs::default(), &[], "",)
-            .contains(r#"value="off" checked"#),
+        card(&targets, 0, false).contains(r#"value="off" checked"#),
         "--no-mcp starts the knob off, since nothing would read the port"
     );
     assert!(!html.contains("<script"), "the knobs cost no javascript");
@@ -107,18 +130,10 @@ fn the_page_renders_one_card_and_submits_every_knob() {
 fn the_qr_rides_the_phone_card_only() {
     let mut phone = target(WHERE_PHONE, "phone", "decentraland://open", Carry::Nothing);
     phone.qr = r#"<span class="qr"><img src="data:image/svg+xml,QRQR"></span>"#.into();
-    let targets = vec![
-        target(
-            WHERE_DESKTOP,
-            "this machine",
-            "decentraland://a",
-            Carry::Loopback,
-        ),
-        phone,
-    ];
-    let desktop = join_control(&targets, 0, true, true, &Knobs::default(), &[], "");
+    let targets = vec![desktop(), phone];
+    let desktop = card(&targets, 0, true);
     assert!(!desktop.contains("QRQR"), "no QR on a card that has none");
-    let phone = join_control(&targets, 1, true, true, &Knobs::default(), &[], "");
+    let phone = card(&targets, 1, true);
     assert_eq!(phone.matches("QRQR").count(), 1, "the QR is emitted once");
 }
 
@@ -134,17 +149,8 @@ fn launch_href(html: &str) -> String {
 /// to put a flag of one's own choosing into this page's launch button.
 #[test]
 fn page_knobs_reach_the_link_but_cannot_repoint_it() {
-    let st = landing_state(vec![Project {
-        root: std::path::PathBuf::from("/tmp/scene"),
-        scene_json: json!({
-            "display": { "title": "Gather" },
-            "spawnPoints": [{ "name": "entrance", "position": { "x": 8, "y": 0, "z": 8 } }]
-        }),
-    }]);
-    let knobs = knobs(
-        Some("opt=multi-instance&spawn=entrance&args=--gatekeeper-url%3Dhttps%3A%2F%2Fevil.example&realm=http%3A%2F%2Fevil.example"),
-        &["entrance".to_string()],
-    );
+    let st = gather_state();
+    let knobs = gather_knobs("opt=multi-instance&spawn=entrance&args=--gatekeeper-url%3Dhttps%3A%2F%2Fevil.example&realm=http%3A%2F%2Fevil.example");
     assert_eq!(
         knobs.tokens(Carry::Loopback),
         [
@@ -154,14 +160,7 @@ fn page_knobs_reach_the_link_but_cannot_repoint_it() {
         ],
         "only the knobs the page draws become tokens"
     );
-    let html = render(
-        &st,
-        "http://127.0.0.1:8000",
-        "",
-        "http://127.0.0.1:8000",
-        None,
-        &knobs,
-    );
+    let html = render_local(&st, None, &knobs);
     let link = launch_href(&html);
     assert!(link.contains("multi-instance=true"), "{link}");
     assert!(link.contains("spawnpoint=entrance"), "{link}");
@@ -191,20 +190,8 @@ fn page_knobs_reach_the_link_but_cannot_repoint_it() {
 /// comes from the Explorer's own default, so neither end has to be told.
 #[test]
 fn the_mcp_knob_adds_exactly_the_mcp_pair() {
-    let st = landing_state(vec![Project {
-        root: std::path::PathBuf::from("/tmp/scene"),
-        scene_json: json!({ "display": { "title": "Gather" } }),
-    }]);
-    let link = |query: &str| {
-        launch_href(&render(
-            &st,
-            "http://127.0.0.1:8000",
-            "",
-            "http://127.0.0.1:8000",
-            None,
-            &knobs(Some(query), &[]),
-        ))
-    };
+    let st = scene_state(json!({ "display": { "title": "Gather" } }));
+    let link = |query: &str| launch_href(&render_local(&st, None, &knobs(Some(query), &[])));
     let (off, on) = (link("mcp=off"), link("mcp=on"));
     assert_eq!(
         on.replace(
@@ -312,25 +299,13 @@ fn realm_carry_calls_only_loopback_loopback() {
 /// that cannot use them, and must not claim they do anything.
 #[test]
 fn the_lan_target_drops_the_knobs_its_client_would_throw_away() {
-    let st = landing_state(vec![Project {
-        root: std::path::PathBuf::from("/tmp/scene"),
-        scene_json: json!({
-            "display": { "title": "Gather" },
-            "spawnPoints": [{ "name": "entrance", "position": { "x": 8, "y": 0, "z": 8 } }]
-        }),
-    }]);
+    let st = gather_state();
     let query = "opt=multi-instance&opt=hub&opt=force-open-backpack&spawn=entrance&mcp=on";
     let page = |where_key: &str| {
-        render(
+        render_local(
             &st,
-            "http://127.0.0.1:8000",
-            "",
-            "http://127.0.0.1:8000",
             Some("http://192.168.1.9:8000"),
-            &knobs(
-                Some(&format!("{query}&where={where_key}")),
-                &["entrance".to_string()],
-            ),
+            &gather_knobs(&format!("{query}&where={where_key}")),
         )
     };
     let desktop = page(WHERE_DESKTOP);
@@ -382,24 +357,12 @@ fn the_lan_target_drops_the_knobs_its_client_would_throw_away() {
 /// is inert for them — including the spawn point, which is a param too.
 #[test]
 fn the_targets_that_read_no_params_grey_out_every_knob() {
-    let st = landing_state(vec![Project {
-        root: std::path::PathBuf::from("/tmp/scene"),
-        scene_json: json!({
-            "display": { "title": "Gather" },
-            "spawnPoints": [{ "name": "entrance", "position": { "x": 8, "y": 0, "z": 8 } }]
-        }),
-    }]);
+    let st = gather_state();
     for where_key in [WHERE_WEB, WHERE_PHONE] {
-        let html = render(
+        let html = render_local(
             &st,
-            "http://127.0.0.1:8000",
-            "",
-            "http://127.0.0.1:8000",
             None,
-            &knobs(
-                Some(&format!("opt=hub&spawn=entrance&where={where_key}")),
-                &["entrance".to_string()],
-            ),
+            &gather_knobs(&format!("opt=hub&spawn=entrance&where={where_key}")),
         );
         let link = launch_href(&html);
         assert!(
@@ -432,21 +395,7 @@ fn the_targets_that_read_no_params_grey_out_every_knob() {
 /// aria-label on this page that has to.
 #[test]
 fn every_control_is_named_by_the_text_beside_it() {
-    let st = landing_state(vec![Project {
-        root: std::path::PathBuf::from("/tmp/scene"),
-        scene_json: json!({
-            "display": { "title": "Gather" },
-            "spawnPoints": [{ "name": "entrance", "position": { "x": 8, "y": 0, "z": 8 } }]
-        }),
-    }]);
-    let html = render(
-        &st,
-        "http://127.0.0.1:8000",
-        "",
-        "http://127.0.0.1:8000",
-        None,
-        &Knobs::default(),
-    );
+    let html = render_local(&gather_state(), None, &Knobs::default());
     assert_eq!(
         html.matches("<form").count(),
         2,
@@ -549,48 +498,36 @@ fn the_knob_copy_clears_aa_in_both_schemes() {
         let mix = |i: f64, b: f64| i * a + b * (1.0 - a);
         contrast((mix(ink.0, bg.0), mix(ink.1, bg.1), mix(ink.2, bg.2)), bg)
     };
-    let light = over(
-        (22.0, 21.0, 24.0),
-        alpha("--ink-6: rgba(22"),
-        (255.0, 255.0, 255.0),
-    );
+    let (black, white) = ((22.0, 21.0, 24.0), (255.0, 255.0, 255.0));
+    let light = over(black, alpha("--ink-6: rgba(22"), white);
     assert!(light >= 4.5, "light --ink-6 is {light:.2}:1, under AA");
-    let dark = over(
-        (255.0, 255.0, 255.0),
-        alpha("--ink-6: rgba(255"),
-        (22.0, 21.0, 24.0),
-    );
+    let dark = over(white, alpha("--ink-6: rgba(255"), black);
     assert!(dark >= 7.0, "dark --ink-6 regressed to {dark:.2}:1");
     let page_light = (243.0, 242.0, 245.0);
     let page_dark = (14.0, 13.0, 16.0);
     for (name, ink, decl, bg) in [
-        (
-            "light --ink-7 on --panel",
-            (22.0, 21.0, 24.0),
-            "--ink-7: rgba(22",
-            (255.0, 255.0, 255.0),
-        ),
+        ("light --ink-7 on --panel", black, "--ink-7: rgba(22", white),
         (
             "light --ink-7 on --page",
-            (22.0, 21.0, 24.0),
+            black,
             "--ink-7: rgba(22",
             page_light,
         ),
         (
             "light --ink-6 on --page",
-            (22.0, 21.0, 24.0),
+            black,
             "--ink-6: rgba(22",
             page_light,
         ),
         (
             "dark --ink-7 on --page",
-            (255.0, 255.0, 255.0),
+            white,
             "--ink-7: rgba(255",
             page_dark,
         ),
         (
             "dark --ink-6 on --page",
-            (255.0, 255.0, 255.0),
+            white,
             "--ink-6: rgba(255",
             page_dark,
         ),
@@ -601,13 +538,10 @@ fn the_knob_copy_clears_aa_in_both_schemes() {
     let hex = |name: &str| {
         let at = STYLE.find(name).unwrap_or_else(|| panic!("no {name}"));
         let h = &STYLE[at + name.len()..][..6];
-        (
-            u8::from_str_radix(&h[0..2], 16).unwrap() as f64,
-            u8::from_str_radix(&h[2..4], 16).unwrap() as f64,
-            u8::from_str_radix(&h[4..6], 16).unwrap() as f64,
-        )
+        let ch = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap() as f64;
+        (ch(0), ch(2), ch(4))
     };
-    let label = contrast((255.0, 255.0, 255.0), hex("--brand-cta: #"));
+    let label = contrast(white, hex("--brand-cta: #"));
     assert!(
         label >= 4.5,
         "white on --brand-cta is {label:.2}:1, under AA"
@@ -631,8 +565,6 @@ fn the_only_shouts_are_the_launch_button_and_the_knob_captions() {
         let open = STYLE[at..].find('{').unwrap() + at;
         &STYLE[open..][..STYLE[open..].find('}').unwrap()]
     };
-    // A caption's traits now come from grouped selector lists, so every rule
-    // whose selector list names the caption is checked, not one lone rule.
     for caption in [".datum__cap", ".kv .k", ".chk__k", ".bar__mark"] {
         let mut at = 0;
         let mut seen = 0;
@@ -692,20 +624,7 @@ fn esc_neutralizes_html() {
 /// reveals it.
 #[test]
 fn the_deep_link_is_shown_not_toggled() {
-    let card = join_control(
-        &[target(
-            WHERE_DESKTOP,
-            "this machine",
-            "decentraland://a",
-            Carry::Loopback,
-        )],
-        0,
-        true,
-        true,
-        &Knobs::default(),
-        &[],
-        "",
-    );
+    let card = card(&[desktop()], 0, true);
     assert!(
         !card.contains("<details"),
         "no disclosure left on the card: {card}"
@@ -730,13 +649,10 @@ fn the_deep_link_is_shown_not_toggled() {
 /// the read-only page it used to be, promising no click it cannot honour.
 #[tokio::test]
 async fn the_scene_card_ships_its_editors_inert_for_the_script_to_enable() {
-    let st = landing_state(vec![Project {
-        root: std::path::PathBuf::from("/tmp/scene"),
-        scene_json: json!({
-            "display": { "title": "Gather" },
-            "spawnPoints": [{ "name": "s", "position": { "x": 1, "y": 0, "z": 1 } }]
-        }),
-    }]);
+    let st = scene_state(json!({
+        "display": { "title": "Gather" },
+        "spawnPoints": [{ "name": "s", "position": { "x": 1, "y": 0, "z": 1 } }]
+    }));
     let html = scene_html(&st).await;
     assert!(html.contains(r#"<h1 class="scene__title" id="edit-title">"#));
     assert!(
@@ -785,21 +701,11 @@ async fn the_scene_card_ships_its_editors_inert_for_the_script_to_enable() {
 /// close the tag and hand the rest of the document to the scene.
 #[test]
 fn the_edit_data_blob_cannot_be_closed_by_a_scene_string() {
-    let st = landing_state(vec![Project {
-        root: std::path::PathBuf::from("/tmp/scene"),
-        scene_json: json!({
-            "display": { "title": "Gather" },
-            "tags": ["a</script><script>b"]
-        }),
-    }]);
-    let html = render(
-        &st,
-        "http://127.0.0.1:8000",
-        "",
-        "http://127.0.0.1:8000",
-        None,
-        &Knobs::default(),
-    );
+    let st = scene_state(json!({
+        "display": { "title": "Gather" },
+        "tags": ["a</script><script>b"]
+    }));
+    let html = render_local(&st, None, &Knobs::default());
     const OPEN: &str = r#"<script type="application/json" id="edit-data">"#;
     let at = html.find(OPEN).expect("the blob is on the page") + OPEN.len();
     let blob = &html[at..][..html[at..].find("</script>").unwrap()];

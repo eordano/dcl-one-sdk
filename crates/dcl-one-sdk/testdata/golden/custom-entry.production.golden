@@ -1,9 +1,9 @@
 (dcl-one-sdk golden v1 custom-entry production)
-TOOLCHAIN sdk=7.26.0 ecs=7.26.0 bundler=rolldown-1.2.4 blob=sha256:bfba3692f31514bd
-SCENE_COMPILED_JS_SIZE_PROD=483.4k bytes
+TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:46b04264e3081841
+SCENE_COMPILED_JS_SIZE_PROD=483.9k bytes
   ARTIFACT bin/index.js               8412 sha256=b840f24417b922a6
   ARTIFACT bin/scene.js                384 sha256=dfb79cecd045b151
-  ARTIFACT bin/sdk-runtime.js       474613 sha256=33bab9f0f499ea4a
+  ARTIFACT bin/sdk-runtime.js       475139 sha256=a24a18dc0fb8472f
 LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=0
 ENTRYPOINT .dcl-one/entrypoint.ts main=custom-entry composites=0 script-utils=-
   ;"use strict";export * from "<SCENE>/src/index.ts"
@@ -11,9 +11,9 @@ ENTRYPOINT .dcl-one/entrypoint.ts main=custom-entry composites=0 script-utils=-
   REQUIRE(scene): @dcl/sdk/ecs
   REQUIRE(scene): @dcl/sdk/math
 MAIN_CRDT none (no composite)
-DEPLOY entity=bafkreifeyed2o67bvps5cwnmye6qhxzbulddvyomrlep6ziklk5uozx7tq files=4 total=483.6k bytes
+DEPLOY entity=bafkreiadxadcrxjyzfvonjfksvrffp2ur4ptlnv2dp25zxgpleucbm3a2u files=4 total=484.1k bytes
   bafkreia4himidyowso3qby3obwuctihv3do6stzzw66cqholyd4crqnqce scene.json 169 bytes
-  bafybeiagimmlavww7momge3jfpkxtniibletbghzk6eybyv4jov777wvl4 bin/sdk-runtime.js 474613 bytes
+  bafybeigkpkto7l6n5vqmzghvxtlz5hkv3q3xhemjoinawudcqkgamd3lfi bin/sdk-runtime.js 475139 bytes
   bafkreig7w6oozucfwfirut6usylphfhtkbpzekfmr4gee57o5uxbelstne bin/scene.js 384 bytes
   bafkreifyidzeif5zektj4omp43xyhnjo6vdfd6gqagznzzndnyae3yd6i4 bin/index.js 8412 bytes
 EVAL bin/index.js

@@ -242,8 +242,8 @@ fn verify_chain_inner(
 }
 
 fn decode_hex_signature(hex_str: &str) -> Result<Vec<u8>, AuthError> {
-    use catalyrst_types::HexDecodeError;
-    catalyrst_types::decode_hex_0x(hex_str).map_err(|e| match e {
+    use catalyrst_auth_chain::HexDecodeError;
+    catalyrst_auth_chain::decode_hex_0x(hex_str).map_err(|e| match e {
         HexDecodeError::OddLength => AuthError::RecoveryFailed("Odd-length signature hex".into()),
         HexDecodeError::InvalidChar { c, .. } if !c.is_ascii() => {
             AuthError::RecoveryFailed("Non-ASCII signature hex".into())

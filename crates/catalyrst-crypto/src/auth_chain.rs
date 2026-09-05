@@ -1,6 +1,6 @@
-pub use catalyrst_types::{AuthChain, AuthLink, AuthLinkType, MAX_AUTH_CHAIN_LINKS};
+pub use catalyrst_auth_chain::{AuthChain, AuthLink, AuthLinkType, MAX_AUTH_CHAIN_LINKS};
 
-use catalyrst_types::is_eth_address;
+use catalyrst_auth_chain::is_eth_address;
 
 pub const MAX_AUTH_LINK_FIELD_LEN: usize = 100_000;
 

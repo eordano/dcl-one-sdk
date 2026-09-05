@@ -1,3 +1,4 @@
+use crate::esbuild::EsbuildOptions;
 use crate::ux::{self, TrySteps, UserError};
 use crate::workspace::Workspace;
 use crate::{entrypoint, esbuild, prebuilt, scene::Project, split};
@@ -12,22 +13,17 @@ pub struct BuildOptions {
     pub ignore_composite: bool,
     pub custom_entry_point: bool,
     pub skip_type_check: bool,
-    /// Where the bundle artifacts land. `None` builds in place — the dev
-    /// tree the watcher owns. A deploy builds into [`RELEASE_OUT`] instead:
-    /// the debug/release split rustc keeps, so the two profiles stop
-    /// clobbering one file and a publish stops rewriting the very tree it
-    /// just fingerprinted.
+    /// `None` builds in place (the dev tree the watcher owns); a deploy builds
+    /// into [`RELEASE_OUT`] so the two profiles never clobber one file and a
+    /// publish never rewrites the tree it just fingerprinted.
     pub out_root: Option<PathBuf>,
-    /// No progress narration: for a build whose story a page already tells
-    /// (a page-driven publish). Errors and warnings still print.
+    /// No progress narration (a page-driven publish tells its own story);
+    /// errors and warnings still print.
     pub quiet: bool,
 }
 
-/// The release profile's artifact root, relative to the scene: where a
-/// deploy's production bundle lands, and the first place `deploy::prepare`
-/// reads a payload file from. Stale only when `--skip-build` skips the
-/// rebuild that normally refreshes it — the same hazard a stale in-tree
-/// bundle always had.
+/// The release profile's artifact root, relative to the scene: where a deploy's
+/// production bundle lands. Stale only when `--skip-build` skips the rebuild.
 pub const RELEASE_OUT: &str = ".dcl-one/release";
 
 /// `"" / "s"`, so a count and its noun agree.
@@ -39,12 +35,7 @@ pub fn plural(n: u64) -> &'static str {
 }
 
 /// `<what> saved <path> (<elapsed>)`, the shape every emitted-chunk step uses.
-pub fn saved(
-    what: &str,
-    root: &std::path::Path,
-    out: &std::path::Path,
-    started: Instant,
-) -> String {
+pub fn saved(what: &str, root: &Path, out: &Path, started: Instant) -> String {
     format!(
         "{what} saved {} ({})",
         ux::rel_to(root, out),
@@ -64,7 +55,6 @@ pub fn member_options(opts: &BuildOptions, project: &Project) -> BuildOptions {
         ignore_composite: opts.ignore_composite,
         custom_entry_point: opts.custom_entry_point,
         skip_type_check: opts.skip_type_check,
-        // Each member's release artifacts land under its own root.
         out_root: opts
             .out_root
             .as_ref()
@@ -83,10 +73,105 @@ pub async fn build_workspace(ws: &Workspace, opts: &BuildOptions) -> Result<()> 
     Ok(())
 }
 
+/// What a build needs once the entrypoint is generated: computed once per
+/// build, or once per watch session.
+pub struct Staged {
+    pub generated: entrypoint::Generated,
+    pub prebuilt: Option<prebuilt::Prebuilt>,
+    pub sdk_opts: EsbuildOptions,
+    pub scene_opts: EsbuildOptions,
+    pub loader: split::Loader,
+}
+
+/// Generate the entrypoint and the runtime-chunk entry under `.dcl-one/`, and
+/// resolve where every artifact lands under `art_root`.
+pub fn stage(project: &Project, opts: &BuildOptions, art_root: &Path) -> Result<Staged> {
+    let main = project.main_output()?;
+    let tsconfig = project.tsconfig()?;
+    let paths = split::ChunkPaths::of(&main);
+    let generated = entrypoint::generate(
+        project,
+        opts.ignore_composite,
+        opts.custom_entry_point,
+        true,
+    )?;
+    split::write_generated(project, &generated.dir)?;
+    split::write_marker(&generated.dir)?;
+    let sdk_opts = sdk_chunk_options(
+        project,
+        &generated,
+        art_root.join(&paths.sdk),
+        &tsconfig,
+        opts,
+    )?;
+    let scene_opts = EsbuildOptions {
+        production: opts.production,
+        entrypoint: generated.entrypoint.clone(),
+        outfile: art_root.join(&paths.scene),
+        tsconfig,
+        aliases: vec![],
+        externals: split::scene_externals(project),
+    };
+    let loader = split::Loader {
+        outfile: art_root.join(&main),
+        paths,
+        smart_installed: false,
+        max_composite_entity: generated.max_composite_entity,
+        mp: entrypoint::authoritative_multiplayer(project),
+    };
+    Ok(Staged {
+        generated,
+        prebuilt: prebuilt::locate(project),
+        sdk_opts,
+        scene_opts,
+        loader,
+    })
+}
+
+/// The SDK chunk (installed prebuilt, or bundled from source), the scene chunk,
+/// then the optional smart-item chunk: true when the loader should name it.
+pub async fn emit_chunks(
+    project: &Project,
+    staged: &Staged,
+    art_root: &Path,
+    steps: &mut ux::Steps,
+) -> Result<bool> {
+    let paths = &staged.loader.paths;
+    match &staged.prebuilt {
+        Some(chunks) => {
+            prebuilt::install(&chunks.core, &art_root.join(&paths.sdk))?;
+            tracing::info!("prebuilt sdk chunk installed {}", paths.sdk);
+            steps.done(format!("SDK chunk installed {} (prebuilt)", paths.sdk));
+        }
+        None => bundle_step("SDK chunk", project, &staged.sdk_opts, steps).await?,
+    }
+    bundle_step("Scene chunk", project, &staged.scene_opts, steps).await?;
+    install_smart_chunk(
+        project,
+        staged.prebuilt.as_ref(),
+        art_root,
+        &paths.scene,
+        &paths.smart,
+    )
+}
+
+async fn bundle_step(
+    what: &str,
+    project: &Project,
+    opts: &EsbuildOptions,
+    steps: &mut ux::Steps,
+) -> Result<()> {
+    let started = Instant::now();
+    esbuild::bundle(project, opts).await?;
+    tracing::info!("{} saved {}", what.to_lowercase(), opts.outfile.display());
+    steps.done(saved(what, &project.root, &opts.outfile, started));
+    Ok(())
+}
+
 pub async fn build(opts: &BuildOptions) -> Result<Built> {
     let project = Project::load(&opts.dir)?;
     let main = project.main_output()?;
-    let tsconfig = project.tsconfig()?;
+    project.tsconfig()?;
     let art_root = opts
         .out_root
         .clone()
@@ -96,8 +181,6 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let (sdk_rel, scene_rel) = split::chunk_rel_paths(&main);
-    let smart_rel = split::smart_chunk_rel_path(&main);
     let entity_names = if opts.ignore_composite {
         Default::default()
     } else {
@@ -109,14 +192,7 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
         false => ux::Steps::new(base_steps + usize::from(!entity_names.is_empty())),
     };
 
-    let generated = entrypoint::generate(
-        &project,
-        opts.ignore_composite,
-        opts.custom_entry_point,
-        true,
-    )?;
-    split::write_generated(&project, &generated.dir)?;
-    split::write_marker(&generated.dir)?;
+    let mut staged = stage(&project, opts, &art_root)?;
 
     let entity_names_written = match opts.ignore_composite {
         true => Ok(None),
@@ -134,74 +210,12 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
         }
     };
 
-    let started = Instant::now();
-    let prebuilt = prebuilt::locate(&project);
-    match &prebuilt {
-        Some(chunks) => {
-            prebuilt::install(&chunks.core, &art_root.join(&sdk_rel))?;
-            tracing::info!("prebuilt sdk chunk installed {sdk_rel}");
-            steps.done(format!("SDK chunk installed {sdk_rel} (prebuilt)"));
-        }
-        None => {
-            let sdk_opts = sdk_chunk_options(
-                &project,
-                &generated,
-                art_root.join(&sdk_rel),
-                &tsconfig,
-                opts,
-            )?;
-            esbuild::bundle(&project, &sdk_opts).await?;
-            tracing::info!("sdk chunk saved {}", sdk_opts.outfile.display());
-            steps.done(saved(
-                "SDK chunk",
-                &project.root,
-                &sdk_opts.outfile,
-                started,
-            ));
-        }
-    }
-
-    let scene_opts = esbuild::EsbuildOptions {
-        production: opts.production,
-        entrypoint: generated.entrypoint.clone(),
-        outfile: art_root.join(&scene_rel),
-        tsconfig,
-        aliases: vec![],
-        externals: split::scene_externals(&project),
-    };
-    let started = Instant::now();
-    esbuild::bundle(&project, &scene_opts).await?;
-    tracing::info!("scene chunk saved {}", scene_opts.outfile.display());
-    steps.done(saved(
-        "Scene chunk",
-        &project.root,
-        &scene_opts.outfile,
-        started,
-    ));
-
-    let smart_installed = install_smart_chunk(
-        &project,
-        prebuilt.as_ref(),
-        &art_root,
-        &scene_rel,
-        &smart_rel,
-    )?;
-    split::write_loader_stub(
-        &outfile,
-        &sdk_rel,
-        smart_installed.then_some(smart_rel.as_str()),
-        &scene_rel,
-        generated.max_composite_entity,
-        crate::entrypoint::authoritative_multiplayer(&project),
-    )?;
-    tracing::info!("loader stub saved {}", outfile.display());
-    steps.done(if smart_installed {
-        format!(
-            "Loader stub saved {} (core + smart-item chunks)",
-            ux::rel_to(&project.root, &outfile)
-        )
-    } else {
-        format!("Loader stub saved {}", ux::rel_to(&project.root, &outfile))
+    staged.loader.smart_installed = emit_chunks(&project, &staged, &art_root, &mut steps).await?;
+    staged.loader.write()?;
+    let shown = ux::rel_to(&project.root, &outfile);
+    steps.done(match staged.loader.smart_installed {
+        true => format!("Loader stub saved {shown} (core + smart-item chunks)"),
+        false => format!("Loader stub saved {shown}"),
     });
 
     match entity_names_written {
@@ -243,12 +257,14 @@ pub async fn build(opts: &BuildOptions) -> Result<Built> {
             if let Some(progress) = progress {
                 progress.finish();
             }
-            checked?;
+            let checked = checked?;
             tracing::info!("type checking completed without errors");
-            steps.done(format!(
-                "Type check passed ({})",
-                ux::fmt_elapsed_tinted(took, "")
-            ));
+            steps.done(match checked {
+                Checked::Ran => format!("Type check passed ({})", ux::fmt_elapsed_tinted(took, "")),
+                Checked::Unchanged => {
+                    "Type check passed (unchanged since the last pass)".to_string()
+                }
+            });
         }
     }
 
@@ -261,9 +277,9 @@ pub fn sdk_chunk_options(
     project: &Project,
     generated: &entrypoint::Generated,
     outfile: PathBuf,
-    tsconfig: &std::path::Path,
+    tsconfig: &Path,
     opts: &BuildOptions,
-) -> Result<esbuild::EsbuildOptions> {
+) -> Result<EsbuildOptions> {
     let mut aliases = esbuild::resolve_aliases(project)?;
     aliases.push((
         "~sdk/all-composites".to_string(),
@@ -273,7 +289,7 @@ pub fn sdk_chunk_options(
         "~sdk/script-utils".to_string(),
         generated.dir.join("script-utils.js"),
     ));
-    Ok(esbuild::EsbuildOptions {
+    Ok(EsbuildOptions {
         production: opts.production,
         entrypoint: generated.dir.join("sdk-runtime-entry.js"),
         outfile,
@@ -331,43 +347,51 @@ pub fn install_smart_chunk(
 #[derive(Default)]
 pub struct BackgroundCheck {
     running: Option<tokio::task::JoinHandle<()>>,
-    /// Did the last check that ran to completion report errors? Lets a recovery
-    /// retract the failure still on screen. Only a COMPLETED check writes it —
-    /// an aborted one proves nothing about the newer edit.
+    /// Did the last COMPLETED check report errors? An aborted one proves
+    /// nothing about the newer edit, so only a completed one writes it.
     failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BackgroundCheck {
     pub fn restart(&mut self, project: Project) {
-        if let Some(previous) = self.running.take() {
-            previous.abort();
-        }
+        self.abort();
         let failing = self.failing.clone();
         self.running = Some(tokio::spawn(async move {
             use std::sync::atomic::Ordering;
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             match type_check(&project, Reloaded::Yes).await {
-                Ok(()) => {
+                Ok(_) => {
                     let was_failing = failing.swap(false, Ordering::Relaxed);
                     if let Some(line) = pass_note(was_failing, started.elapsed()) {
                         match was_failing {
-                            true => crate::ux::note_good(line),
-                            false => crate::ux::note_arrow(line),
+                            true => ux::note_good(line),
+                            false => ux::note_arrow(line),
                         }
                     }
                 }
                 Err(e) => {
                     failing.store(true, Ordering::Relaxed);
-                    crate::ux::report_watch(&e);
+                    ux::report_watch(&e);
                 }
             }
         }));
     }
+
+    fn abort(&mut self) {
+        if let Some(running) = self.running.take() {
+            running.abort();
+        }
+    }
 }
 
-/// The first thing to try under a failed check. Under a watcher the errors land
-/// a second AFTER the reload they describe, which reads as "my edit was
-/// rejected" — so say outright that it was not.
+impl Drop for BackgroundCheck {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
+/// Under a watcher the errors land a second AFTER the reload they describe,
+/// which reads as "my edit was rejected" — so say outright that it was not.
 fn fix_step(reloaded: Reloaded) -> &'static str {
     match reloaded {
         Reloaded::Yes => {
@@ -377,9 +401,8 @@ fn fix_step(reloaded: Reloaded) -> &'static str {
     }
 }
 
-/// The `--skip-type-check` escape hatch, offered once per process: under
-/// `start` it would otherwise repeat under every save, padding the errors with
-/// advice already declined. `build` exits on its first failure, so it sees it.
+/// Offered once per process: under `start` it would otherwise repeat under
+/// every save, padding the errors with advice already declined.
 fn skip_type_check_hint() -> Option<&'static str> {
     static OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     match OFFERED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -394,12 +417,11 @@ fn skip_type_check_hint() -> Option<&'static str> {
 /// speaks, since nothing else retracts the errors still on screen.
 fn pass_note(was_failing: bool, elapsed: std::time::Duration) -> Option<String> {
     pass_note_text(was_failing, elapsed, |d| {
-        crate::ux::fmt_elapsed_tinted(d, crate::ux::RESTORE_DIM)
+        ux::fmt_elapsed_tinted(d, ux::RESTORE_DIM)
     })
 }
 
-/// The formatter is injected so the text can be asserted without depending on
-/// whether the test harness happens to own a terminal.
+/// The formatter is injected so the text can be asserted without a terminal.
 fn pass_note_text(
     was_failing: bool,
     elapsed: std::time::Duration,
@@ -408,24 +430,10 @@ fn pass_note_text(
     let took = fmt(elapsed);
     match was_failing {
         true => Some(format!("type errors fixed ({took})")),
-        false if crate::ux::elapsed_is_notable(elapsed) => {
-            Some(format!("type check passed ({took})"))
-        }
+        false if ux::elapsed_is_notable(elapsed) => Some(format!("type check passed ({took})")),
         false => None,
     }
 }
-
-impl Drop for BackgroundCheck {
-    fn drop(&mut self) {
-        if let Some(running) = self.running.take() {
-            running.abort();
-        }
-    }
-}
-
-/// Where tsc keeps what it learned last run. Under a dot-dir so the watcher
-/// skips it and tsc cannot feed back into the rebuild that started it.
-const TSBUILDINFO: &str = ".dcl-cache/tsbuildinfo";
 
 /// Whether the code this check covers is already running.
 #[derive(Clone, Copy, PartialEq)]
@@ -434,18 +442,29 @@ pub enum Reloaded {
     No,
 }
 
-pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Checked {
+    Ran,
+    /// tsc did not run: see [`crate::check_stamp`].
+    Unchanged,
+}
+
+pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<Checked> {
     let tsc = project.require_node_module("typescript/lib/tsc.js")?;
+    if crate::check_stamp::unchanged(project, &tsc) {
+        tracing::info!("type check skipped: nothing changed since the last pass");
+        return Ok(Checked::Unchanged);
+    }
     let node = require_node(
         "type checking",
         "to build without type checking, pass --skip-type-check",
     )?;
-    let buildinfo = project.root.join(TSBUILDINFO);
+    let buildinfo = project.root.join(crate::check_stamp::TSBUILDINFO);
     if let Some(dir) = buildinfo.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let out = tokio::process::Command::new(node)
-        .arg(tsc)
+        .arg(&tsc)
         .args(["-p", "tsconfig.json", "--noEmit"])
         .args(["--incremental", "--tsBuildInfoFile"])
         .arg(&buildinfo)
@@ -472,6 +491,7 @@ pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<()> {
             )
         })?;
     if !out.status.success() {
+        crate::check_stamp::forget(&project.root);
         let body = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -489,7 +509,8 @@ pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<()> {
         }
         return Err(UserError::new(what, steps).why(body).into());
     }
-    Ok(())
+    crate::check_stamp::record(project, &tsc);
+    Ok(Checked::Ran)
 }
 
 pub fn find_node() -> Option<PathBuf> {
@@ -518,24 +539,23 @@ mod tests {
 
     #[test]
     fn a_recovered_check_says_so_and_a_quick_pass_stays_quiet() {
+        let note =
+            |failing, ms| pass_note_text(failing, Duration::from_millis(ms), ux::fmt_elapsed);
         assert_eq!(
-            pass_note_text(true, Duration::from_millis(120), crate::ux::fmt_elapsed),
+            note(true, 120),
             Some("type errors fixed (120 ms)".to_string())
         );
         assert_eq!(
-            pass_note_text(true, Duration::from_secs(3), crate::ux::fmt_elapsed),
+            note(true, 3_000),
             Some("type errors fixed (3.00 sec)".to_string())
         );
+        assert_eq!(note(false, 20), None);
         assert_eq!(
-            pass_note_text(false, Duration::from_millis(20), crate::ux::fmt_elapsed),
-            None
-        );
-        assert_eq!(
-            pass_note_text(false, Duration::from_millis(120), crate::ux::fmt_elapsed),
+            note(false, 120),
             Some("type check passed (120 ms)".to_string())
         );
         assert_eq!(
-            pass_note_text(false, Duration::from_secs(3), crate::ux::fmt_elapsed),
+            note(false, 3_000),
             Some("type check passed (3.00 sec)".to_string())
         );
     }

@@ -5,6 +5,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 use tokio_tungstenite::tungstenite::Message;
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_dcl-one-sdk");
 
 const CLIENT_SCRIPT: &str = r#"
@@ -89,7 +91,7 @@ fn sandbox_node_modules() -> Option<PathBuf> {
         .filter(|p| p.is_dir())
     {
         Some(p) => Some(p),
-        None => catalyrst_testgate::unavailable(
+        None => common::testgate::unavailable(
             "DCL_ONE_SDK_TEST_NODE_MODULES",
             "point it at a scene node_modules dir on the same filesystem",
         ),
@@ -157,7 +159,7 @@ async fn data_layer_rpc_edit_saves_composite_and_reloads() {
         return;
     };
     let Some(node) = dcl_one_sdk::build::find_node().or_else(|| {
-        catalyrst_testgate::unavailable(
+        common::testgate::unavailable(
             "node on PATH",
             "the data-layer e2e drives a real node process",
         )

@@ -38,10 +38,6 @@ jobs:
           toolchain: "1.97.0"
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
       # --locked everywhere: a stale Cargo.lock must fail CI, not the release
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -58,10 +54,10 @@ jobs:
           toolchain: "1.97.0"
           targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: install protoc + mingw cross toolchain
+      - name: install mingw cross toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler g++-mingw-w64-x86-64-posix cmake
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix cmake
           cat > /tmp/mingw-toolchain.cmake <<'EOF'
           set(CMAKE_SYSTEM_NAME Windows)
           set(CMAKE_SYSTEM_PROCESSOR x86_64)

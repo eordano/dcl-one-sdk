@@ -14,8 +14,8 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.UiDropdownResult = exports.UiDropdown = exports.UiCanvasInformation = exports.UiBackground = exports.TweenState = exports.TweenSequence = exports.Tween = exports.TriggerAreaResult = exports.TriggerArea = exports.TextShape = exports.SkyboxTime = exports.RealmInfo = exports.RaycastResult = exports.Raycast = exports.PrimaryPointerInfo = exports.PointerLock = exports.PointerEventsResult = exports.PointerEvents = exports.PlayerIdentityData = exports.PhysicsCombinedImpulse = exports.PhysicsCombinedForce = exports.ParticleSystem = exports.NftShape = exports.MeshRenderer = exports.MeshCollider = exports.Material = exports.MainCamera = exports.LightSource = exports.InputModifier = exports.GltfNodeModifiers = exports.GltfContainerLoadingState = exports.GltfContainer = exports.EngineInfo = exports.CameraModeArea = exports.CameraMode = exports.Billboard = exports.AvatarShape = exports.AvatarModifierArea = exports.AvatarLocomotionSettings = exports.AvatarEquippedData = exports.AvatarEmoteCommand = exports.AvatarBase = exports.AvatarAttach = exports.AudioStream = exports.AudioSource = exports.AudioEvent = exports.AudioAnalysis = exports.AssetLoadLoadingState = exports.AssetLoad = exports.Animator = void 0;
-exports.componentDefinitionByName = exports.VisibilityComponent = exports.VirtualCamera = exports.VideoPlayer = exports.VideoEvent = exports.UiTransform = exports.UiText = exports.UiInputResult = exports.UiInput = void 0;
+exports.UiCanvasInformation = exports.UiBackground = exports.TweenState = exports.TweenSequence = exports.Tween = exports.TriggerAreaResult = exports.TriggerArea = exports.TouchScreenControls = exports.TextShape = exports.SkyboxTime = exports.RealmInfo = exports.RaycastResult = exports.Raycast = exports.PrimaryPointerInfo = exports.PointerLock = exports.PointerEventsResult = exports.PointerEvents = exports.PlayerIdentityData = exports.PhysicsCombinedImpulse = exports.PhysicsCombinedForce = exports.ParticleSystem = exports.NftShape = exports.MeshRenderer = exports.MeshCollider = exports.Material = exports.MainCamera = exports.LightSource = exports.InputModifier = exports.GltfNodeModifiers = exports.GltfContainerLoadingState = exports.GltfContainer = exports.ExplorerUiEventsResult = exports.EngineInfo = exports.CameraModeArea = exports.CameraMode = exports.Billboard = exports.AvatarShape = exports.AvatarModifierArea = exports.AvatarLocomotionSettings = exports.AvatarEquippedData = exports.AvatarEmoteCommand = exports.AvatarBase = exports.AvatarAttach = exports.AudioStream = exports.AudioSource = exports.AudioEvent = exports.AudioAnalysis = exports.AssetLoadLoadingState = exports.AssetLoad = exports.Animator = void 0;
+exports.componentDefinitionByName = exports.VisibilityComponent = exports.VirtualCamera = exports.VideoPlayer = exports.VideoEvent = exports.UiTransform = exports.UiText = exports.UiInputResult = exports.UiInputBinding = exports.UiInput = exports.UiDropdownResult = exports.UiDropdown = void 0;
 const Animator_gen_1 = require("./Animator.gen");
 const AssetLoad_gen_1 = require("./AssetLoad.gen");
 const AssetLoadLoadingState_gen_1 = require("./AssetLoadLoadingState.gen");
@@ -34,6 +34,7 @@ const Billboard_gen_1 = require("./Billboard.gen");
 const CameraMode_gen_1 = require("./CameraMode.gen");
 const CameraModeArea_gen_1 = require("./CameraModeArea.gen");
 const EngineInfo_gen_1 = require("./EngineInfo.gen");
+const ExplorerUiEventsResult_gen_1 = require("./ExplorerUiEventsResult.gen");
 const GltfContainer_gen_1 = require("./GltfContainer.gen");
 const GltfContainerLoadingState_gen_1 = require("./GltfContainerLoadingState.gen");
 const GltfNodeModifiers_gen_1 = require("./GltfNodeModifiers.gen");
@@ -57,6 +58,7 @@ const RaycastResult_gen_1 = require("./RaycastResult.gen");
 const RealmInfo_gen_1 = require("./RealmInfo.gen");
 const SkyboxTime_gen_1 = require("./SkyboxTime.gen");
 const TextShape_gen_1 = require("./TextShape.gen");
+const TouchScreenControls_gen_1 = require("./TouchScreenControls.gen");
 const TriggerArea_gen_1 = require("./TriggerArea.gen");
 const TriggerAreaResult_gen_1 = require("./TriggerAreaResult.gen");
 const Tween_gen_1 = require("./Tween.gen");
@@ -67,6 +69,7 @@ const UiCanvasInformation_gen_1 = require("./UiCanvasInformation.gen");
 const UiDropdown_gen_1 = require("./UiDropdown.gen");
 const UiDropdownResult_gen_1 = require("./UiDropdownResult.gen");
 const UiInput_gen_1 = require("./UiInput.gen");
+const UiInputBinding_gen_1 = require("./UiInputBinding.gen");
 const UiInputResult_gen_1 = require("./UiInputResult.gen");
 const UiText_gen_1 = require("./UiText.gen");
 const UiTransform_gen_1 = require("./UiTransform.gen");
@@ -92,6 +95,7 @@ __exportStar(require("./pb/decentraland/sdk/components/billboard.gen"), exports)
 __exportStar(require("./pb/decentraland/sdk/components/camera_mode.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/camera_mode_area.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/engine_info.gen"), exports);
+__exportStar(require("./pb/decentraland/sdk/components/explorer_ui_events_result.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/gltf_container.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/gltf_container_loading_state.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/gltf_node_modifiers.gen"), exports);
@@ -115,6 +119,7 @@ __exportStar(require("./pb/decentraland/sdk/components/raycast_result.gen"), exp
 __exportStar(require("./pb/decentraland/sdk/components/realm_info.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/skybox_time.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/text_shape.gen"), exports);
+__exportStar(require("./pb/decentraland/sdk/components/touch_screen_controls.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/trigger_area.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/trigger_area_result.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/tween.gen"), exports);
@@ -125,6 +130,7 @@ __exportStar(require("./pb/decentraland/sdk/components/ui_canvas_information.gen
 __exportStar(require("./pb/decentraland/sdk/components/ui_dropdown.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/ui_dropdown_result.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/ui_input.gen"), exports);
+__exportStar(require("./pb/decentraland/sdk/components/ui_input_binding.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/ui_input_result.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/ui_text.gen"), exports);
 __exportStar(require("./pb/decentraland/sdk/components/ui_transform.gen"), exports);
@@ -192,6 +198,11 @@ exports.CameraModeArea = CameraModeArea;
 /** @public */ const EngineInfo = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::EngineInfo", EngineInfo_gen_1.EngineInfoSchema);
 exports.EngineInfo = EngineInfo;
+/** @public */ const ExplorerUiEventsResult = (engine) => /* @__PURE__ */ engine.defineValueSetComponentFromSchema("core::ExplorerUiEventsResult", ExplorerUiEventsResult_gen_1.ExplorerUiEventsResultSchema, {
+    timestampFunction: (t) => t.timestamp,
+    maxElements: 100
+});
+exports.ExplorerUiEventsResult = ExplorerUiEventsResult;
 /** @public */ const GltfContainer = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::GltfContainer", GltfContainer_gen_1.GltfContainerSchema);
 exports.GltfContainer = GltfContainer;
@@ -263,6 +274,9 @@ exports.SkyboxTime = SkyboxTime;
 /** @public */ const TextShape = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::TextShape", TextShape_gen_1.TextShapeSchema);
 exports.TextShape = TextShape;
+/** @public */ const TouchScreenControls = engine => 
+/* @__PURE__ */ engine.defineComponentFromSchema("core::TouchScreenControls", TouchScreenControls_gen_1.TouchScreenControlsSchema);
+exports.TouchScreenControls = TouchScreenControls;
 /** @public */ const TriggerArea = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::TriggerArea", TriggerArea_gen_1.TriggerAreaSchema);
 exports.TriggerArea = TriggerArea;
@@ -295,6 +309,9 @@ exports.UiDropdownResult = UiDropdownResult;
 /** @public */ const UiInput = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::UiInput", UiInput_gen_1.UiInputSchema);
 exports.UiInput = UiInput;
+/** @public */ const UiInputBinding = engine => 
+/* @__PURE__ */ engine.defineComponentFromSchema("core::UiInputBinding", UiInputBinding_gen_1.UiInputBindingSchema);
+exports.UiInputBinding = UiInputBinding;
 /** @public */ const UiInputResult = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::UiInputResult", UiInputResult_gen_1.UiInputResultSchema);
 exports.UiInputResult = UiInputResult;
@@ -338,6 +355,7 @@ exports.componentDefinitionByName = {
     "core::CameraMode": exports.CameraMode,
     "core::CameraModeArea": exports.CameraModeArea,
     "core::EngineInfo": exports.EngineInfo,
+    "core::ExplorerUiEventsResult": exports.ExplorerUiEventsResult,
     "core::GltfContainer": exports.GltfContainer,
     "core::GltfContainerLoadingState": exports.GltfContainerLoadingState,
     "core::GltfNodeModifiers": exports.GltfNodeModifiers,
@@ -361,6 +379,7 @@ exports.componentDefinitionByName = {
     "core::RealmInfo": exports.RealmInfo,
     "core::SkyboxTime": exports.SkyboxTime,
     "core::TextShape": exports.TextShape,
+    "core::TouchScreenControls": exports.TouchScreenControls,
     "core::TriggerArea": exports.TriggerArea,
     "core::TriggerAreaResult": exports.TriggerAreaResult,
     "core::Tween": exports.Tween,
@@ -371,6 +390,7 @@ exports.componentDefinitionByName = {
     "core::UiDropdown": exports.UiDropdown,
     "core::UiDropdownResult": exports.UiDropdownResult,
     "core::UiInput": exports.UiInput,
+    "core::UiInputBinding": exports.UiInputBinding,
     "core::UiInputResult": exports.UiInputResult,
     "core::UiText": exports.UiText,
     "core::UiTransform": exports.UiTransform,

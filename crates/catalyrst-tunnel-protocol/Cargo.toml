@@ -1,0 +1,9 @@
+[package]
+name = "catalyrst-tunnel-protocol"
+version = "0.22.2"
+edition = "2021"
+description = "Wire types for the dcl-one-sdk preview tunnel: the control frames and data-channel framing an agent (dcl-one-sdk) and the relay (catalyrst-preview-tunnel) exchange over one WebSocket trunk. No transport, no I/O — the two sides depend on this instead of each other's server or client code."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

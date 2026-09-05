@@ -36,10 +36,12 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Pinned in Cargo.toml as `rolldown = "=1.2.4"`. Repeated here on purpose: a
+mod common;
+
+/// Pinned in Cargo.toml as `rolldown = "=1.2.6"`. Repeated here on purpose: a
 /// bump has to be copied into this line, which invalidates every golden in one
 /// visible place instead of scattering unexplained byte diffs.
-const BUNDLER: &str = "rolldown-1.2.4";
+const BUNDLER: &str = "rolldown-1.2.6";
 
 /// The CLI stamps the wall clock into the deploy entity, which would put a
 /// fresh CID in every run. Per-file CIDv1s are timestamp-independent, so only
@@ -174,7 +176,7 @@ fn node_bin() -> Option<PathBuf> {
         Some(p) => Some(p),
         // The build already needs node for the type check and the data-layer
         // fallback, so this adds no requirement the suite did not have.
-        None => catalyrst_testgate::unavailable(
+        None => common::testgate::unavailable(
             "node",
             "install node; the build's type check and data-layer fallback need it too",
         ),
@@ -209,12 +211,20 @@ fn node_modules_src() -> &'static Path {
             "DCL_PRIVATE_KEY",
             "RUST_LOG",
             "NO_COLOR",
-            "DCL_ONE_SDK_DEFAULT_TARGET",
+            "DCL_ONE_SDK_TARGET_SERVER",
             "DCL_ONE_SDK_LINKER_TIMEOUT_SECS",
         ] {
             std::env::remove_var(key);
         }
-        let dir = work_dir().join("node_modules-src");
+        // init keeps an existing node_modules, so a tree left by a previous
+        // blob would build every golden against the old toolchain and stamp
+        // the old versions into TOOLCHAIN. Start from nothing every run, on a
+        // path only this process uses: CARGO_TARGET_TMPDIR is shared with
+        // every other cargo on the machine, and removing a shared tree would
+        // land under a test binary that is mid-build against it.
+        sweep_dead_extractions(&work_dir());
+        let dir = work_dir().join(format!("node_modules-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creating the shared node_modules dir");
         init::init(&init::InitOptions {
             dir: dir.clone(),
@@ -225,6 +235,31 @@ fn node_modules_src() -> &'static Path {
         .expect("extracting the vendored node_modules");
         dir
     })
+}
+
+/// Drop extractions left by test binaries that no longer exist, so the per-pid
+/// paths do not accumulate a toolchain per run. Only where /proc can answer
+/// whether a pid is alive; elsewhere the trees stay until `cargo clean`.
+fn sweep_dead_extractions(parent: &Path) {
+    if !Path::new("/proc/self").exists() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("node_modules-src-"))
+        else {
+            continue;
+        };
+        if Path::new("/proc").join(pid).exists() {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
 }
 
 /// A private copy of the fixture with the shared toolchain symlinked in.

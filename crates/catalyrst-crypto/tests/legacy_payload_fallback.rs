@@ -4,7 +4,6 @@ use catalyrst_crypto::signed_fetch::{
     build_legacy_payload, build_payload_v6, verify_signed_fetch_meta_with_legacy_fallback,
     AuthChainError, AUTH_CHAIN_HEADER_PREFIX, AUTH_METADATA_HEADER, AUTH_TIMESTAMP_HEADER,
 };
-use catalyrst_types::ApiError;
 use http::{HeaderMap, HeaderName, HeaderValue};
 
 const TEST_KEY: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -345,10 +344,7 @@ async fn every_refusal_stays_distinguishable_at_the_http_boundary() {
     for (needle, headers, keys, metadata_gate) in cases {
         let err = verify(&headers, keys, metadata_gate).await.unwrap_err();
         assert!(err.is_bad_request(), "{needle}: {err:?}");
-        let ApiError::Http { status, message } = ApiError::from(err) else {
-            panic!("{needle}: expected ApiError::Http");
-        };
-        assert_eq!(status, 400, "{needle}");
+        let message = err.http_message();
         assert!(message.contains(needle), "{needle}: {message}");
         rendered.push(message);
     }
@@ -370,4 +366,155 @@ async fn the_signer_gate_passes_a_request_declaring_no_signer() {
 
     let current = headers_for(Shape::V6, raw, raw, now);
     assert!(verify(&current, &[], Some(&gate)).await.is_ok());
+}
+
+/// The attempt order is a cost decision only: every verdict below is pinned
+/// under both orders.
+mod attempt_order {
+    use super::*;
+    use catalyrst_crypto::signed_fetch::{
+        verify_signed_fetch_meta_with_policy, AttemptOrder, SignedFetchPolicy,
+    };
+
+    const ORDERS: [AttemptOrder; 2] = [AttemptOrder::V6First, AttemptOrder::LegacyFirst];
+    const FOLDED_SCENE: &str = r#"{"sceneid":"bafkreiabc"}"#;
+
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    async fn verify_ordered(
+        headers: &HeaderMap,
+        canonical_keys: &[&str],
+        gate: Option<&SignerGate>,
+        order: AttemptOrder,
+    ) -> Result<serde_json::Value, AuthChainError> {
+        let wallet = Wallet::from_hex(TEST_KEY).unwrap();
+        let (signer, metadata) = verify_signed_fetch_meta_with_policy(
+            headers,
+            METHOD,
+            PATH,
+            FIVE_MINUTES,
+            SignedFetchPolicy::new(canonical_keys, gate).attempt_order(order),
+            None,
+        )
+        .await?;
+        assert_eq!(signer, wallet.address().to_lowercase());
+        Ok(metadata)
+    }
+
+    #[tokio::test]
+    async fn both_shapes_verify_in_either_order() {
+        let now = now_ms();
+        for order in ORDERS {
+            for shape in [Shape::Legacy, Shape::V6] {
+                let headers = headers_for(shape, METADATA, METADATA, now);
+                let metadata = verify_ordered(&headers, SCENE_KEYS, None, order)
+                    .await
+                    .unwrap();
+                assert_eq!(metadata["sceneId"], serde_json::json!("bafkreiAbC123"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_policy_default_is_upstreams_order() {
+        assert_eq!(
+            SignedFetchPolicy::new(SCENE_KEYS, None).attempt_order,
+            AttemptOrder::V6First
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_first_without_declared_keys_is_still_6x_only() {
+        let headers = legacy_headers(METADATA);
+        let err = verify_ordered(&headers, &[], None, AttemptOrder::LegacyFirst)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AuthChainError::InvalidSignature(_)),
+            "{err:?}"
+        );
+    }
+
+    /// The one shape where the key guard refuses byte-identical payloads: a
+    /// declared key with an uppercase letter, delivered folded. The 6.x payload
+    /// binds those bytes, so upstream serves what the client signed, and the
+    /// order must not remove that acceptance.
+    #[tokio::test]
+    async fn a_guard_refusal_over_identical_payloads_still_serves_a_valid_6x_signature() {
+        assert_eq!(
+            build_legacy_payload(METHOD, PATH, "1", FOLDED_SCENE),
+            build_payload_v6(METHOD, PATH, "1", FOLDED_SCENE)
+        );
+        let now = now_ms();
+        for order in ORDERS {
+            let headers = headers_for(Shape::V6, FOLDED_SCENE, FOLDED_SCENE, now);
+            let metadata = verify_ordered(&headers, &["sceneId"], None, order)
+                .await
+                .unwrap();
+            assert_eq!(metadata["sceneid"], serde_json::json!("bafkreiabc"));
+            assert!(metadata.get("sceneId").is_none(), "{order:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guard_refusal_is_the_verdict_when_the_6x_signature_fails_too() {
+        let recased = METADATA.replace("\"signer\"", "\"Signer\"");
+        let now = now_ms();
+        for order in ORDERS {
+            let headers = headers_for(Shape::Legacy, METADATA, &recased, now);
+            let err = verify_ordered(&headers, SCENE_KEYS, None, order)
+                .await
+                .unwrap_err();
+            assert!(err.is_bad_request(), "{order:?}: {err:?}");
+            assert!(malformed_detail(err).contains("expected \"signer\""));
+
+            let headers = headers_for(Shape::V6, r#"{"sceneid":"other"}"#, FOLDED_SCENE, now);
+            let err = verify_ordered(&headers, &["sceneId"], None, order)
+                .await
+                .unwrap_err();
+            assert!(
+                malformed_detail(err).contains("expected \"sceneId\""),
+                "{order:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expiration_answers_before_the_metadata_is_parsed() {
+        let stale = now_ms() - (FIVE_MINUTES + 60) * 1000;
+        for order in ORDERS {
+            let headers = headers_for(Shape::Legacy, METADATA, "not json", stale);
+            let err = verify_ordered(&headers, SCENE_KEYS, None, order)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AuthChainError::Expired { .. }),
+                "{order:?}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_signer_gate_guards_both_shapes_in_either_order() {
+        let gate = reject_if_signer(&[SCENE_SIGNER]).unwrap();
+        let canonical = format!("{{\"signer\":\"{SCENE_SIGNER}\"}}");
+        let recased_key = format!("{{\"Signer\":\"{SCENE_SIGNER}\"}}");
+        let now = now_ms();
+        for order in ORDERS {
+            for shape in [Shape::Legacy, Shape::V6] {
+                for delivered in [&canonical, &recased_key] {
+                    let headers = headers_for(shape, delivered, delivered, now);
+                    let err = verify_ordered(&headers, SCENE_KEYS, Some(&gate), order)
+                        .await
+                        .unwrap_err();
+                    assert!(
+                        malformed_detail(err).contains("invalid metadata content"),
+                        "{order:?} {delivered}"
+                    );
+                }
+            }
+        }
+    }
 }

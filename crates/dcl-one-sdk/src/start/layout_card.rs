@@ -4,37 +4,33 @@
 use super::super::chrome::esc;
 use serde_json::Value;
 
-pub(super) fn coord(v: Option<&Value>) -> String {
+/// A coordinate's `[a, b]` as given; a plain number is `(n, n)`.
+fn coord_pair(v: Option<&Value>) -> (f64, f64) {
     match v {
         Some(Value::Array(range)) => {
-            let f = |i: usize| range.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let (a, b) = (f(0), f(1.min(range.len().saturating_sub(1))));
-            if a == b {
-                trim_num(a)
-            } else {
-                format!("{}\u{2013}{}", trim_num(a), trim_num(b))
-            }
+            let f = |i: usize| range.get(i).and_then(Value::as_f64).unwrap_or(0.0);
+            (f(0), f(1.min(range.len().saturating_sub(1))))
         }
-        Some(v) => trim_num(v.as_f64().unwrap_or(0.0)),
-        None => "0".to_string(),
+        _ => {
+            let n = v.and_then(Value::as_f64).unwrap_or(0.0);
+            (n, n)
+        }
     }
 }
 
-/// A coordinate as the `[min, max]` span it covers — a plain number is a span
-/// of zero. The grid draws spawn areas out of these.
-pub(super) fn coord_range(v: Option<&Value>) -> (f64, f64) {
-    match v {
-        Some(Value::Array(range)) => {
-            let f = |i: usize| range.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let (a, b) = (f(0), f(1.min(range.len().saturating_sub(1))));
-            (a.min(b), a.max(b))
-        }
-        Some(v) => {
-            let n = v.as_f64().unwrap_or(0.0);
-            (n, n)
-        }
-        None => (0.0, 0.0),
+pub(super) fn coord(v: Option<&Value>) -> String {
+    let (a, b) = coord_pair(v);
+    if a == b {
+        trim_num(a)
+    } else {
+        format!("{}\u{2013}{}", trim_num(a), trim_num(b))
     }
+}
+
+/// A coordinate as the `[min, max]` span it covers.
+pub(super) fn coord_range(v: Option<&Value>) -> (f64, f64) {
+    let (a, b) = coord_pair(v);
+    (a.min(b), a.max(b))
 }
 
 pub(super) fn trim_num(v: f64) -> String {
@@ -45,10 +41,9 @@ pub(super) fn trim_num(v: f64) -> String {
     }
 }
 
-/// Every `requiredPermissions` key the schema defines, with the label the
-/// page shows for it and the line saying what granting it allows. The
-/// permissions tab draws all of them as toggles, and the edit endpoint
-/// accepts no key outside this list that the scene does not already carry.
+/// Every `requiredPermissions` key the schema defines, with its label and
+/// what granting it allows. The edit endpoint accepts no key outside this
+/// list that the scene does not already carry.
 pub(in crate::start) const PERMISSIONS: [(&str, &str, &str); 7] = [
     (
         "USE_WEBSOCKET",
@@ -87,46 +82,54 @@ pub(in crate::start) fn parse_parcels(scene_json: &Value) -> (Vec<(i64, i64)>, (
     let parcels: Vec<(i64, i64)> = scene_json
         .get("scene")
         .and_then(|s| s.get("parcels"))
-        .and_then(|p| p.as_array())
+        .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str())
-                .filter_map(catalyrst_types::pointer::parse_pointer)
+                .filter_map(Value::as_str)
+                .filter_map(catalyrst_auth_chain::pointer::parse_pointer)
                 .collect()
         })
         .unwrap_or_default();
     let base = scene_json
         .get("scene")
         .and_then(|s| s.get("base"))
-        .and_then(|b| b.as_str())
-        .and_then(catalyrst_types::pointer::parse_pointer)
+        .and_then(Value::as_str)
+        .and_then(catalyrst_auth_chain::pointer::parse_pointer)
         .unwrap_or_else(|| parcels.first().copied().unwrap_or((0, 0)));
     (parcels, base)
 }
 
-/// Past this many cells a side, the grid draws the parcels without the add
-/// ring. A rendering bound only — the edit endpoint takes any connected
-/// layout — because the grid is drawn whole, gaps included, and a huge
-/// scene's add cells are page weight for drags nobody makes at that size.
+/// Past this many cells a side the grid draws no add ring: a rendering bound
+/// only (the edit endpoint takes any connected layout), since the grid is
+/// drawn whole and a huge scene's add cells are page weight for drags nobody
+/// makes at that size.
 pub(super) const GHOST_RING_SPAN: i64 = 40;
 
-/// The grid the layout card draws: the scene's bounding box plus, for scenes
-/// under [`GHOST_RING_SPAN`], one ring of add targets around it. The same
-/// bounds ride the `#edit-data` blob so the script and the markup agree on
-/// where the grid starts.
+/// `(min_x, min_y, max_x, max_y)` of the parcels, `(0, 0, 0, 0)` for none.
+fn bbox(parcels: &[(i64, i64)]) -> (i64, i64, i64, i64) {
+    let xs = || parcels.iter().map(|p| p.0);
+    let ys = || parcels.iter().map(|p| p.1);
+    (
+        xs().min().unwrap_or(0),
+        ys().min().unwrap_or(0),
+        xs().max().unwrap_or(0),
+        ys().max().unwrap_or(0),
+    )
+}
+
+/// The grid the layout card draws: the bounding box plus, under
+/// [`GHOST_RING_SPAN`], one ring of add targets. The same bounds ride the
+/// `#edit-data` blob so the script and the markup agree on where it starts.
 pub(super) fn grid_bounds(parcels: &[(i64, i64)]) -> (i64, i64, i64, i64, bool) {
-    let min_x = parcels.iter().map(|p| p.0).min().unwrap_or(0);
-    let max_x = parcels.iter().map(|p| p.0).max().unwrap_or(0);
-    let min_y = parcels.iter().map(|p| p.1).min().unwrap_or(0);
-    let max_y = parcels.iter().map(|p| p.1).max().unwrap_or(0);
+    let (min_x, min_y, max_x, max_y) = bbox(parcels);
     let ring = (1 + max_x - min_x).max(1 + max_y - min_y) < GHOST_RING_SPAN;
     let r = i64::from(ring);
     (min_x - r, min_y - r, max_x + r, max_y + r, ring)
 }
 
-/// The layout map as a DIV grid — ruler on top, row numbers on the left,
-/// one cell per parcel of the bounding box (plus the add ring), and the
-/// spawn areas as outlined rectangles positioned over it in world metres.
+/// The layout map as a DIV grid — ruler, row numbers, one cell per parcel of
+/// the bounding box plus the add ring, and the spawn areas positioned over it
+/// in world metres.
 ///
 /// The cell size rides the `--lay-pitch` variable: the stylesheet ships a
 /// default so the map renders without JavaScript, and the script refits it
@@ -135,69 +138,53 @@ pub(super) fn grid_bounds(parcels: &[(i64, i64)]) -> (i64, i64, i64, i64, bool) 
 pub(super) fn layout_grid(parcels: &[(i64, i64)], base: (i64, i64), spawns: &[Value]) -> String {
     let members: std::collections::HashSet<(i64, i64)> = parcels.iter().copied().collect();
     let (x0, y0, x1, y1, ring) = grid_bounds(parcels);
-    let (min_x, max_x) = (x0 + i64::from(ring), x1 - i64::from(ring));
-    let (min_y, max_y) = (y0 + i64::from(ring), y1 - i64::from(ring));
+    let (min_x, min_y, max_x, max_y) = bbox(parcels);
     let cols = x1 - x0 + 1;
     let rows = y1 - y0 + 1;
     let show_all = cols <= 24 && rows <= 24;
-    let label = |v: i64, lo: i64, hi: i64| {
-        if v >= lo && v <= hi {
-            format!("{v}")
+    let tick = |axis: &str, v: i64, lo: i64, hi: i64| {
+        let n = if (lo..=hi).contains(&v) {
+            v.to_string()
         } else {
             String::new()
-        }
+        };
+        let shown = if !n.is_empty() && (show_all || v % 5 == 0) {
+            n.as_str()
+        } else {
+            ""
+        };
+        format!(r#"<span data-{axis}="{v}" data-n="{n}">{shown}</span>"#)
     };
-    let mut ruler = String::new();
-    for x in x0..=x1 {
-        let n = label(x, min_x, max_x);
-        let shown = if !n.is_empty() && (show_all || x % 5 == 0) {
-            n.as_str()
+    let ruler: String = (x0..=x1).map(|x| tick("x", x, min_x, max_x)).collect();
+    let nums: String = (y0..=y1)
+        .rev()
+        .map(|y| tick("y", y, min_y, max_y))
+        .collect();
+    let cell = |x: i64, y: i64| {
+        let (kind, title) = if (x, y) == base {
+            ("base", format!("Base parcel {x},{y}"))
+        } else if members.contains(&(x, y)) {
+            ("in", format!("{x},{y}"))
+        } else if ring {
+            ("add", format!("Add {x},{y}"))
         } else {
-            ""
+            return r#"<div class="lay__cell"></div>"#.to_string();
         };
-        ruler.push_str(&format!(
-            r#"<span data-x="{x}" data-n="{n}">{shown}</span>"#
-        ));
-    }
-    let mut nums = String::new();
-    let mut cells = String::new();
-    for y in (y0..=y1).rev() {
-        let n = label(y, min_y, max_y);
-        let shown = if !n.is_empty() && (show_all || y % 5 == 0) {
-            n.as_str()
-        } else {
-            ""
-        };
-        nums.push_str(&format!(
-            r#"<span data-y="{y}" data-n="{n}">{shown}</span>"#
-        ));
-        for x in x0..=x1 {
-            if (x, y) == base {
-                cells.push_str(&format!(
-                    r#"<div class="lay__cell lay__cell--base" data-cell="{x},{y}" title="Base parcel {x},{y}"></div>"#
-                ));
-            } else if members.contains(&(x, y)) {
-                cells.push_str(&format!(
-                    r#"<div class="lay__cell lay__cell--in" data-cell="{x},{y}" title="{x},{y}"></div>"#
-                ));
-            } else if ring {
-                cells.push_str(&format!(
-                    r#"<div class="lay__cell lay__cell--add" data-cell="{x},{y}" title="Add {x},{y}"></div>"#
-                ));
-            } else {
-                cells.push_str(r#"<div class="lay__cell"></div>"#);
-            }
-        }
-    }
+        format!(
+            r#"<div class="lay__cell lay__cell--{kind}" data-cell="{x},{y}" title="{title}"></div>"#
+        )
+    };
+    let cells: String = (y0..=y1)
+        .rev()
+        .flat_map(|y| (x0..=x1).map(move |x| (x, y)))
+        .map(|(x, y)| cell(x, y))
+        .collect();
     let mut areas = String::new();
     for (i, spawn) in spawns.iter().enumerate() {
         let pos = spawn.get("position");
         let (sx0, sx1) = coord_range(pos.and_then(|p| p.get("x")));
         let (sz0, sz1) = coord_range(pos.and_then(|p| p.get("z")));
-        let name = spawn
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("spawn");
+        let name = spawn.get("name").and_then(Value::as_str).unwrap_or("spawn");
         let left = (base.0 - x0) as f64 * 16.0 + sx0;
         let top = (y1 + 1 - base.1) as f64 * 16.0 - sz1;
         areas.push_str(&format!(
@@ -214,16 +201,15 @@ pub(super) fn layout_grid(parcels: &[(i64, i64)], base: (i64, i64), spawns: &[Va
     )
 }
 
-/// Each spawn area as a row that opens its editor — name, a star when it is
-/// the default, its metre ranges — plus the dashed button that arms drawing
-/// a new one on the grid.
+/// Each spawn area as a row that opens its editor, plus the dashed button
+/// that arms drawing a new one on the grid.
 pub(super) fn spawn_rows(spawns: &[Value]) -> String {
     let mut out: String = spawns
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("spawn");
-            let def = s.get("default").and_then(|d| d.as_bool()) == Some(true);
+            let name = s.get("name").and_then(Value::as_str).unwrap_or("spawn");
+            let def = s.get("default").and_then(Value::as_bool) == Some(true);
             let pos = s.get("position");
             let p = |k| coord(pos.and_then(|p: &Value| p.get(k)));
             format!(
@@ -242,14 +228,14 @@ pub(super) fn spawn_rows(spawns: &[Value]) -> String {
     out
 }
 
-/// Every known permission as a switch row with the line saying what it
-/// grants, plus any key the scene carries that the schema list does not —
-/// shown so toggling a neighbour cannot silently drop it.
+/// Every known permission as a switch row, plus any key the scene carries
+/// that the schema list does not — shown so toggling a neighbour cannot
+/// silently drop it.
 pub(super) fn permission_rows(scene_json: &Value) -> String {
     let required: Vec<&str> = scene_json
         .get("requiredPermissions")
-        .and_then(|p| p.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     let row = |key: &str, label: &str, what: &str, on: bool| {
         format!(
@@ -276,11 +262,9 @@ pub(super) fn permission_rows(scene_json: &Value) -> String {
     out
 }
 
-/// The scene-layout card: one header naming the scene's world (or its base
-/// parcel), three tabs with counts, and a body that pairs the parcel grid
-/// with a rail that changes per tab — bounds, spawn areas, permissions. The
-/// server renders the parcels tab active and every control inert; the script
-/// switches tabs, drags, and saves.
+/// The scene-layout card: tabs, the parcel grid, and a rail that changes per
+/// tab. The server renders the Info tab active and every control inert; the
+/// script switches tabs, drags, and saves.
 pub(super) fn scene_layout_card(
     scene_json: &Value,
     parcels: &[(i64, i64)],
@@ -288,10 +272,7 @@ pub(super) fn scene_layout_card(
     spawns: &[Value],
     info_pane: &str,
 ) -> String {
-    let min_x = parcels.iter().map(|p| p.0).min().unwrap_or(0);
-    let max_x = parcels.iter().map(|p| p.0).max().unwrap_or(0);
-    let min_y = parcels.iter().map(|p| p.1).min().unwrap_or(0);
-    let max_y = parcels.iter().map(|p| p.1).max().unwrap_or(0);
+    let (min_x, min_y, max_x, max_y) = bbox(parcels);
     let (w, h) = ((max_x - min_x + 1) * 16, (max_y - min_y + 1) * 16);
     let tab = |key: &str, label: &str, selected: bool| {
         format!(

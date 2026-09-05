@@ -21,6 +21,7 @@ import { InputModifierComponentDefinitionExtended } from './extended/InputModifi
 import { LightSourceComponentDefinitionExtended } from './extended/LightSource';
 import { TriggerAreaComponentDefinitionExtended } from './extended/TriggerArea';
 import { ParticleSystemComponentDefinitionExtended } from './extended/ParticleSystem';
+import { TouchScreenControlsComponentDefinitionExtended } from './extended/TouchScreenControls';
 import { TagsComponentDefinitionExtended } from './manual/Tags';
 export * from './generated/index.gen';
 export type { GrowOnlyValueSetComponentDefinition, LastWriteWinElementSetComponentDefinition, LwwComponentGetter, GSetComponentGetter };
@@ -38,6 +39,7 @@ export declare const InputModifier: LwwComponentGetter<InputModifierComponentDef
 export declare const LightSource: LwwComponentGetter<LightSourceComponentDefinitionExtended>;
 export declare const TriggerArea: LwwComponentGetter<TriggerAreaComponentDefinitionExtended>;
 export declare const ParticleSystem: LwwComponentGetter<ParticleSystemComponentDefinitionExtended>;
+export declare const TouchScreenControls: LwwComponentGetter<TouchScreenControlsComponentDefinitionExtended>;
 /**
  * @alpha
  */

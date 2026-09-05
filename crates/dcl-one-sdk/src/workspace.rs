@@ -78,9 +78,8 @@ impl Workspace {
         match member_folders(dir)? {
             None => {
                 let project = Project::load(dir)?;
-                let root = project.root.clone();
                 Ok(Self {
-                    root,
+                    root: project.root.clone(),
                     projects: vec![project],
                 })
             }
@@ -91,12 +90,12 @@ impl Workspace {
                 for folder in &folders {
                     let project = Project::load(&root.join(folder)).map_err(|e| {
                         anyhow::Error::from(
-                            crate::ux::UserError::new(
+                            UserError::new(
                                 format!(
                                     "workspace member \"{folder}\" (from dcl-workspace.json) failed to load: {}",
                                     crate::ux::concise_cause(&e)
                                 ),
-                                crate::ux::TrySteps::one(format!(
+                                TrySteps::one(format!(
                                     "check the \"folders\" entry \"{folder}\" in dcl-workspace.json points at a scene directory"
                                 ))
                                 .and("remove the entry if the scene no longer exists"),
@@ -119,15 +118,9 @@ impl Workspace {
         if !self.is_multi() {
             return None;
         }
-        let project = &self.projects[index];
-        let rel = project
-            .root
-            .strip_prefix(&self.root)
-            .unwrap_or(&project.root);
-        let shown = if rel.as_os_str().is_empty() {
-            ".".to_string()
-        } else {
-            rel.display().to_string()
+        let shown = match crate::ux::rel_to(&self.root, &self.projects[index].root) {
+            s if s.is_empty() => ".".to_string(),
+            s => s,
         };
         Some(format!(
             "[{}/{}] in {shown}:",
@@ -140,39 +133,14 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::Tmp;
 
     const SCENE_OK: &str =
         r#"{"main":"bin/index.js","runtimeVersion":"7","scene":{"parcels":["0,0"],"base":"0,0"}}"#;
 
-    struct Tmp(PathBuf);
-
-    impl Tmp {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "dcl-one-sdk-workspace-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Tmp(dir)
-        }
-
-        fn write(&self, rel: &str, contents: &str) {
-            let p = self.0.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, contents).unwrap();
-        }
-    }
-
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn no_workspace_file_loads_a_single_project() {
-        let t = Tmp::new("single");
+        let t = Tmp::new("ws-single");
         t.write("scene.json", SCENE_OK);
         assert!(member_folders(&t.0).unwrap().is_none());
         let ws = Workspace::load(&t.0).unwrap();
@@ -184,7 +152,7 @@ mod tests {
 
     #[test]
     fn two_member_workspace_loads_in_folder_order() {
-        let t = Tmp::new("two");
+        let t = Tmp::new("ws-two");
         t.write(
             "dcl-workspace.json",
             r#"{"folders":[{"path":"scene-a"},{"path":"scene-b"}]}"#,
@@ -206,7 +174,7 @@ mod tests {
 
     #[test]
     fn malformed_workspace_json_names_the_location() {
-        let t = Tmp::new("badjson");
+        let t = Tmp::new("ws-badjson");
         t.write("dcl-workspace.json", "{\"folders\": [");
         let err = Workspace::load(&t.0).unwrap_err().to_string();
         assert!(err.contains("dcl-workspace.json is not valid JSON"));
@@ -215,7 +183,7 @@ mod tests {
 
     #[test]
     fn empty_or_missing_folders_is_a_shape_error() {
-        let t = Tmp::new("empty");
+        let t = Tmp::new("ws-empty");
         t.write("dcl-workspace.json", r#"{"folders":[]}"#);
         let err = Workspace::load(&t.0).unwrap_err().to_string();
         assert!(err.contains("must list at least one folder"));
@@ -229,7 +197,7 @@ mod tests {
 
     #[test]
     fn member_without_scene_json_fails_with_the_scene_error() {
-        let t = Tmp::new("badmember");
+        let t = Tmp::new("ws-badmember");
         t.write("dcl-workspace.json", r#"{"folders":[{"path":"scene-a"}]}"#);
         std::fs::create_dir_all(t.0.join("scene-a")).unwrap();
         let err = format!("{:#}", Workspace::load(&t.0).unwrap_err());
@@ -239,7 +207,7 @@ mod tests {
 
     #[test]
     fn missing_member_folder_names_the_directory() {
-        let t = Tmp::new("gone");
+        let t = Tmp::new("ws-gone");
         t.write("dcl-workspace.json", r#"{"folders":[{"path":"missing"}]}"#);
         let err = format!("{:#}", Workspace::load(&t.0).unwrap_err());
         assert!(err.contains("does not exist"));

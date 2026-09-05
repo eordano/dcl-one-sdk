@@ -1,10 +1,10 @@
 (dcl-one-sdk golden v1 smart-item production)
-TOOLCHAIN sdk=7.26.0 ecs=7.26.0 bundler=rolldown-1.2.4 blob=sha256:bfba3692f31514bd
-SCENE_COMPILED_JS_SIZE_PROD=635.0k bytes
+TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:46b04264e3081841
+SCENE_COMPILED_JS_SIZE_PROD=636.0k bytes
   ARTIFACT bin/index.js               8436 sha256=5a1d5e4ffadfe02e
   ARTIFACT bin/scene.js               1876 sha256=c22d2907c0387685
-  ARTIFACT bin/sdk-runtime.js       474613 sha256=33bab9f0f499ea4a
-  ARTIFACT bin/sdk-smart-items.js   150045 sha256=3111aee5f86af41a
+  ARTIFACT bin/sdk-runtime.js       475139 sha256=a24a18dc0fb8472f
+  ARTIFACT bin/sdk-smart-items.js   150551 sha256=890d799a1213efb8
 LOADER sdk=bin/sdk-runtime.js smart=bin/sdk-smart-items.js scene=bin/scene.js max_composite_entity=512
 ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
@@ -91,11 +91,11 @@ ENTITY_NAMES assets/scene/entity-names.ts
     Counter_Box = "Counter Box",
   } 
 MAIN_CRDT main.crdt 235 bytes sha256=6c587977670027c8 (native, 1 composite)
-DEPLOY entity=bafkreihoa3wjit4qj4eqgtwc766vs5poat7wwrxpso7caaa4algar5ioqq files=7 total=637.6k bytes
+DEPLOY entity=bafkreidxqynjqrccoxa7ncxqpbrurdy2cjjqx6f3x4jjpzdxq2ahwltjqe files=7 total=638.6k bytes
   bafkreifcxq62bje63i3khsvr45s3bkmtbvdutbhwehvfhc3yvspj6jrvda scene.json 167 bytes
   bafkreidmlb4xozyae7ejrd7tnw6qct7ppr3j6w4s4qpdrvzahvgvbsekca main.crdt 235 bytes
-  bafkreibrcgxol6dk6qnhsilypqyzgf7gi3z27ojoom4glnhkqxhe2xnsqu bin/sdk-smart-items.js 150045 bytes
-  bafybeiagimmlavww7momge3jfpkxtniibletbghzk6eybyv4jov777wvl4 bin/sdk-runtime.js 474613 bytes
+  bafkreiejbv4zueqt564lgioux7webi3gzp3jigxntrbrws5lje4hgbnmla bin/sdk-smart-items.js 150551 bytes
+  bafybeigkpkto7l6n5vqmzghvxtlz5hkv3q3xhemjoinawudcqkgamd3lfi bin/sdk-runtime.js 475139 bytes
   bafkreigcfuuqpqbyo2c3pul4xsjayjnbzgwigy6qftsnp3jidgt3vkcjtq bin/scene.js 1876 bytes
   bafkreic2dvpe76w74axf5zsvs734gkxtzpa6ghgqcb6p4qy5er7vo5gqoq bin/index.js 8436 bytes
   bafkreidxhlr4biomfortriklj6fnne7kzhvayixkmd6ynx2dlsoswh654a assets/scene/main.composite 2230 bytes

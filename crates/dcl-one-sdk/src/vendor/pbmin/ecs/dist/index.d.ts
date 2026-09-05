@@ -8,6 +8,7 @@ export { cyclicParentingChecker } from './systems/cyclicParentingChecker';
 export * from './systems/events';
 export * from './systems/raycast';
 export * from './systems/videoEvents';
+export * from './systems/audioEvents';
 export * from './systems/assetLoad';
 export * from './systems/async-task';
 export * from './systems/tween';
@@ -15,7 +16,7 @@ export * from './systems/triggerArea';
 export * from './systems/physics';
 export * from './engine/entity';
 export * from './components/types';
-import { MaterialComponentDefinitionExtended, MeshColliderComponentDefinitionExtended, MeshRendererComponentDefinitionExtended, TransformComponentExtended, AnimatorComponentDefinitionExtended, AudioSourceComponentDefinitionExtended, AudioAnalysisComponentDefinitionExtended, AudioStreamComponentDefinitionExtended, ISyncComponents, TweenComponentDefinitionExtended, INetowrkEntity, INetowrkParent, VirtualCameraComponentDefinitionExtended, InputModifierComponentDefinitionExtended, LightSourceComponentDefinitionExtended, TriggerAreaComponentDefinitionExtended, ParticleSystemComponentDefinitionExtended } from './components/types';
+import { MaterialComponentDefinitionExtended, MeshColliderComponentDefinitionExtended, MeshRendererComponentDefinitionExtended, TransformComponentExtended, AnimatorComponentDefinitionExtended, AudioSourceComponentDefinitionExtended, AudioAnalysisComponentDefinitionExtended, AudioStreamComponentDefinitionExtended, ISyncComponents, TweenComponentDefinitionExtended, INetowrkEntity, INetowrkParent, VirtualCameraComponentDefinitionExtended, InputModifierComponentDefinitionExtended, LightSourceComponentDefinitionExtended, TriggerAreaComponentDefinitionExtended, ParticleSystemComponentDefinitionExtended, TouchScreenControlsComponentDefinitionExtended } from './components/types';
 import { NameComponent } from './components/manual/Name';
 import { TagsComponentDefinitionExtended } from './components/manual/Tags';
 export declare const Transform: TransformComponentExtended;
@@ -34,6 +35,7 @@ export declare const InputModifier: InputModifierComponentDefinitionExtended;
 export declare const LightSource: LightSourceComponentDefinitionExtended;
 export declare const TriggerArea: TriggerAreaComponentDefinitionExtended;
 export declare const ParticleSystem: ParticleSystemComponentDefinitionExtended;
+export declare const TouchScreenControls: TouchScreenControlsComponentDefinitionExtended;
 /**
  * @alpha
  * This is going to be used for sync components through a server.

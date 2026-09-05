@@ -6,6 +6,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 use tokio_tungstenite::tungstenite::Message;
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_dcl-one-sdk");
 
 fn sandbox_node_modules() -> Option<PathBuf> {
@@ -14,7 +16,7 @@ fn sandbox_node_modules() -> Option<PathBuf> {
         .filter(|p| p.is_dir())
     {
         Some(p) => Some(p),
-        None => catalyrst_testgate::unavailable(
+        None => common::testgate::unavailable(
             "DCL_ONE_SDK_TEST_NODE_MODULES",
             "point it at a scene node_modules dir on the same filesystem",
         ),

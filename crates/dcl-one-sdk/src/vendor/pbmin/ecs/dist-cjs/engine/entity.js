@@ -60,6 +60,16 @@ var EntityState;
     EntityState[EntityState["Reserved"] = 3] = "Reserved";
 })(EntityState = exports.EntityState || (exports.EntityState = {}));
 /**
+ * True when `entity`'s NUMBER falls in the renderer-reserved range, at any version.
+ *
+ * Masks rather than calling `EntityUtils.fromEntityId`, which allocates a tuple per call to
+ * read one number; this runs on every inbound CRDT message. `entity & MAX_U16` already lands
+ * in [0, 65535], so the `>>> 0` fromEntityId applies is a no-op here.
+ */
+function isReservedEntity(entity, reservedStaticEntities) {
+    return (entity & exports.MAX_U16) < reservedStaticEntities;
+}
+/**
  * @public
  */
 function createEntityContainer(opts) {
@@ -93,7 +103,11 @@ function createEntityContainer(opts) {
             return generateNewEntity();
         }
         for (const [number, version] of removedEntities.getMap()) {
-            if (version < exports.MAX_U16) {
+            // Never recycle a renderer-reserved number: the renderer reissues those slots as
+            // toEntityId(number, version + 1) too, from the same stored version, so it would hand
+            // the scene an id belonging to a live remote player. Belt-and-braces — every writer
+            // into `removedEntities` refuses reserved numbers, so this cannot fire today.
+            if (number >= reservedStaticEntities && version < exports.MAX_U16) {
                 const entity = EntityUtils.toEntityId(number, version + 1);
                 // If the entity is not being used, we can re-use it
                 // If the entity was removed in this tick, we're not counting for the usedEntities, but we have it in the toRemoveEntityArray
@@ -106,7 +120,7 @@ function createEntityContainer(opts) {
         return generateNewEntity();
     }
     function removeEntity(entity) {
-        if (entity < reservedStaticEntities)
+        if (isReservedEntity(entity, reservedStaticEntities))
             return false;
         if (usedEntities.has(entity)) {
             usedEntities.delete(entity);
@@ -129,6 +143,12 @@ function createEntityContainer(opts) {
         return arr;
     }
     function updateRemovedEntity(entity) {
+        // Called for EVERY inbound DELETE_ENTITY, including the renderer's tombstones for
+        // departed remote players — so this is the door reserved numbers would otherwise enter
+        // the free list through. They need no tombstone: getEntityState reports them Reserved
+        // before it consults `removedEntities`, so `Removed` is unreachable for them anyway.
+        if (isReservedEntity(entity, reservedStaticEntities))
+            return false;
         const [n, v] = EntityUtils.fromEntityId(entity);
         // Update the removed entities map
         removedEntities.addTo(n, v);
@@ -139,6 +159,11 @@ function createEntityContainer(opts) {
         return true;
     }
     function updateUsedEntity(entity) {
+        // Same invariant as updateRemovedEntity. Unreachable from the CRDT path today
+        // (getEntityState returns `Reserved`, never `Unknown`), but the `v > 0` branch below
+        // would seed `removedEntities` with a reserved number.
+        if (isReservedEntity(entity, reservedStaticEntities))
+            return false;
         const [n, v] = EntityUtils.fromEntityId(entity);
         // if the entity was removed then abort fast
         if (removedEntities.has(n, v))
@@ -154,10 +179,12 @@ function createEntityContainer(opts) {
         return true;
     }
     function getEntityState(entity) {
-        const [n, v] = EntityUtils.fromEntityId(entity);
-        if (n < reservedStaticEntities) {
+        // Same guard as the three above, so `Engine.removeEntity` — which classifies via
+        // getEntityState — cannot disagree with whether this container releases the id.
+        if (isReservedEntity(entity, reservedStaticEntities)) {
             return EntityState.Reserved;
         }
+        const [n, v] = EntityUtils.fromEntityId(entity);
         if (usedEntities.has(entity)) {
             return EntityState.UsedEntity;
         }

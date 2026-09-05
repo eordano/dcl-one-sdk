@@ -36,7 +36,8 @@ function createVideoEventsSystem(engine) {
     function registerVideoEventsEntity(entity, callback) {
         // video event component is not added here because the renderer adds it
         // to every entity with a VideoPlayer component
-        entitiesCallbackVideoStateMap.set(entity, { callback: callback });
+        const existing = entitiesCallbackVideoStateMap.get(entity);
+        entitiesCallbackVideoStateMap.set(entity, { callback: callback, lastVideoState: existing?.lastVideoState });
     }
     function removeVideoEventsEntity(entity) {
         entitiesCallbackVideoStateMap.delete(entity);
@@ -45,7 +46,7 @@ function createVideoEventsSystem(engine) {
         return entitiesCallbackVideoStateMap.has(entity);
     }
     // @internal
-    engine.addSystem(function EventSystem() {
+    engine.addSystem(function VideoEventSystem() {
         for (const [entity, data] of entitiesCallbackVideoStateMap) {
             const videoPlayer = videoPlayerComponent.getOrNull(entity);
             if (engine.getEntityState(entity) === entity_1.EntityState.Removed || !videoPlayer) {

@@ -125,7 +125,7 @@ async fn run_bin(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(BIN);
         cmd.args(&args);
-        for k in ["RUST_LOG", "DCL_ONE_SDK_DEFAULT_TARGET"] {
+        for k in ["RUST_LOG", "DCL_ONE_SDK_TARGET_SERVER"] {
             cmd.env_remove(k);
         }
         cmd.env("NO_COLOR", "1");

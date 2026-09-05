@@ -1,26 +1,27 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/catalyrst-envcfg",
-    "crates/catalyrst-types",
+    "crates/catalyrst-auth-chain",
     "crates/catalyrst-hashing",
     "crates/catalyrst-crypto",
-    "crates/catalyrst-preview-tunnel",
-    "crates/catalyrst-testgate",
+    "crates/catalyrst-tunnel-protocol",
     "crates/dcl-one-sdk",
 ]
 
+# Every `{ workspace = true }` dependency the five members inherit, spelled
+# exactly as in the monorepo root Cargo.toml (version and features): drift here
+# resolves a different tree from the one the monorepo tests.
 [workspace.dependencies]
-alloy = { version = "2", default-features = false, features = ["std", "reqwest-rustls-tls", "provider-http", "rpc-types-eth", "signer-local", "sol-types"] }
+alloy = { version = "2", default-features = false, features = ["std", "signer-local"] }
 alloy-primitives = "1"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["multipart"] }
-tower-http = { version = "0.7", features = ["cors", "trace", "timeout"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "timeout", "fs"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2", "charset", "query", "multipart", "form"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
-base64 = "0.22"
+base64 = "0.23"
 bs58 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
@@ -32,17 +33,8 @@ url = { version = "2", features = ["serde"] }
 futures = "0.3"
 async-trait = "0.1"
 parking_lot = "0.12"
-tokio-tungstenite = "=0.29.0"
-# sqlx (DB-facing types) and utoipa (OpenAPI derives) are OPTIONAL deps of
-# catalyrst-types, behind its `sqlx` and `openapi` features. The SDK uses
-# neither, so catalyrst-types is pulled with default-features off — these are
-# defined here only so the crate's `{ workspace = true, optional = true }`
-# inheritance resolves, and neither is ever actually compiled.
-sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "json", "chrono"] }
-utoipa = { version = "5", features = ["chrono"] }
-catalyrst-envcfg = { path = "crates/catalyrst-envcfg" }
-catalyrst-types = { path = "crates/catalyrst-types", default-features = false }
+tokio-tungstenite = "=0.30.0"
+catalyrst-auth-chain = { path = "crates/catalyrst-auth-chain" }
 catalyrst-hashing = { path = "crates/catalyrst-hashing" }
 catalyrst-crypto = { path = "crates/catalyrst-crypto" }
-catalyrst-preview-tunnel = { path = "crates/catalyrst-preview-tunnel" }
-catalyrst-testgate = { path = "crates/catalyrst-testgate" }
+catalyrst-tunnel-protocol = { path = "crates/catalyrst-tunnel-protocol" }

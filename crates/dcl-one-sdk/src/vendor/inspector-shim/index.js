@@ -8,7 +8,7 @@
 //   serve      -> inspector.createDataLayerHost / DataServiceDefinition
 //
 // Both are implemented here. What is NOT here is the reason the real package
-// weighs 119 MB: the browser editor UI — an 18 MB bundle.js of which ~10.8 MB
+// weighs 119 MB: the browser editor UI - an 18 MB bundle.js of which ~10.8 MB
 // is a non-tree-shaken Babylon, plus 2,967 Font Awesome icons. This package
 // serves no `public/`, so `start --data-layer` gets a working data layer and
 // no editor to point at it unless a real @dcl/inspector supplies one.
@@ -32,9 +32,10 @@
 //   data-layer.gen.js       the service descriptor. NOT hand-written: it is
 //                           upstream's protoc output (proto/gen/data-layer.gen.ts,
 //                           emitted by the @dcl/ts-proto FORK) transpiled to
-//                           CommonJS by scripts/build-base-blob.py with the
-//                           vendored typescript. Its only imports are `long`
-//                           and `protobufjs/minimal`, both already in the blob.
+//                           CommonJS by build_service_descriptor() in
+//                           scripts/blob_overlays.py with the vendored
+//                           typescript. Its only imports are `long` and
+//                           `protobufjs/minimal`, both already in the blob.
 //
 // Not implemented, and honestly so:
 //

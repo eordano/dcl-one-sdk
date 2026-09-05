@@ -1,5 +1,5 @@
 use crate::scene::Project;
-use crate::ux::{TrySteps, UserError};
+use crate::ux::{write_error, TrySteps, UserError};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -11,14 +11,10 @@ pub struct Generated {
 
 const COMPOSITE_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
-fn write_error(path: &Path, e: std::io::Error) -> anyhow::Error {
-    UserError::new(
-        format!("cannot write to {}", path.display()),
-        TrySteps::one("check write permission on the project directory")
-            .and("re-run from a writable checkout (not a read-only mount)"),
-    )
-    .caused_by(e)
-    .into()
+fn write_in(dir: &Path, name: &str, content: impl AsRef<[u8]>) -> Result<PathBuf> {
+    let path = dir.join(name);
+    std::fs::write(&path, content).map_err(|e| write_error(&path, e))?;
+    Ok(path)
 }
 
 pub fn generate(
@@ -27,26 +23,29 @@ pub fn generate(
     custom_entry: bool,
     split: bool,
 ) -> Result<Generated> {
-    let dir = project.root.join(".dcl-one");
-    std::fs::create_dir_all(&dir).map_err(|e| write_error(&dir, e))?;
+    let dir = crate::scene::work_dir(&project.root)
+        .map_err(|e| write_error(&project.root.join(".dcl-one"), e))?;
 
     let user_entry = project.root.join("src/index.ts");
     let safe_entry = serde_json::to_string(&user_entry.display().to_string().replace('\\', "/"))?;
 
-    let entry_path = dir.join("entrypoint.ts");
     let content = if custom_entry {
         format!(";\"use strict\";export * from {safe_entry}")
     } else {
         write_all_composites(project, &dir, ignore_composite)?;
-        write_script_utils(project, &dir, ignore_composite)?;
-        write_sdk_boot(&dir)?;
+        write_in(
+            &dir,
+            "script-utils.js",
+            script_utils_content(project, ignore_composite),
+        )?;
+        write_in(&dir, "sdk-boot.js", SDK_BOOT)?;
         let mp = authoritative_multiplayer(project);
         if mp {
-            write_mp_client(&dir)?;
+            write_in(&dir, "mp-client.js", MP_CLIENT_TEMPLATE)?;
         }
         entrypoint_code(&safe_entry, project.is_editor_scene(), split, mp)
     };
-    std::fs::write(&entry_path, content).map_err(|e| write_error(&entry_path, e))?;
+    let entrypoint = write_in(&dir, "entrypoint.ts", content)?;
 
     let max_composite_entity = if ignore_composite {
         0
@@ -55,7 +54,7 @@ pub fn generate(
     };
     Ok(Generated {
         dir,
-        entrypoint: entry_path,
+        entrypoint,
         max_composite_entity,
     })
 }
@@ -73,11 +72,11 @@ pub fn authoritative_multiplayer(project: &Project) -> bool {
 
 const MP_CLIENT_TEMPLATE: &str = include_str!("templates/mp-client.js");
 
-fn write_mp_client(dir: &Path) -> Result<()> {
-    let path = dir.join("mp-client.js");
-    std::fs::write(&path, MP_CLIENT_TEMPLATE).map_err(|e| write_error(&path, e))?;
-    Ok(())
-}
+// Exactly what `@dcl/sdk`'s own module body does (its index.ts), pulled into a
+// module the generated entrypoint can import before the scene.
+const SDK_BOOT: &str = "import { engine, setCompositeProvider } from '@dcl/sdk/ecs'\n\
+                        import { compositeProvider } from '@dcl/sdk/composite-provider'\n\
+                        setCompositeProvider(engine, compositeProvider)\n";
 
 fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool, mp: bool) -> String {
     let composite_fill = if split {
@@ -162,9 +161,8 @@ pub fn find_composites(root: &Path) -> Vec<PathBuf> {
 }
 
 fn walk_composites(dir: &Path, out: &mut Vec<PathBuf>) {
-    let rd = match std::fs::read_dir(dir) {
-        Ok(x) => x,
-        Err(_) => return,
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in rd.flatten() {
         let path = entry.path();
@@ -217,8 +215,7 @@ fn write_all_composites(project: &Project, dir: &Path, ignore: bool) -> Result<(
         }
     }
     let content = format!("export const compositeFromLoader = {{{}}}", lines.join(","));
-    let path = dir.join("all-composites.js");
-    std::fs::write(&path, content).map_err(|e| write_error(&path, e))?;
+    write_in(dir, "all-composites.js", content)?;
     Ok(())
 }
 
@@ -257,8 +254,8 @@ pub const SCRIPT_UTILS_STUB: &str = "export function _initializeScripts(_engine)
 
 /// The real `~sdk/script-utils`: `@dcl/sdk-commands`' compiled smart-item script
 /// runtime, de-CommonJS'd so rolldown can bundle it as an ES module. `None`
-/// unless both packages are on disk — the npm flow; the vendored blob ships
-/// this same output prebuilt, via `prebuilt::build_chunks`.
+/// unless both packages are on disk (the npm flow; the vendored blob ships this
+/// output prebuilt via `prebuilt::build_chunks`).
 pub fn script_utils_source(project: &Project) -> Option<String> {
     let code = project
         .node_module("@dcl/asset-packs")
@@ -338,24 +335,6 @@ fn script_component_has_instances(comp: &serde_json::Value) -> bool {
                 None => entry.get("binary").is_some(),
             })
         })
-}
-
-// Exactly what `@dcl/sdk`'s own module body does (its index.ts), pulled into a
-// module the generated entrypoint can import before the scene.
-fn write_sdk_boot(dir: &Path) -> Result<()> {
-    let content = "import { engine, setCompositeProvider } from '@dcl/sdk/ecs'\n\
-                   import { compositeProvider } from '@dcl/sdk/composite-provider'\n\
-                   setCompositeProvider(engine, compositeProvider)\n";
-    let path = dir.join("sdk-boot.js");
-    std::fs::write(&path, content).map_err(|e| write_error(&path, e))?;
-    Ok(())
-}
-
-fn write_script_utils(project: &Project, dir: &Path, ignore_composite: bool) -> Result<()> {
-    let content = script_utils_content(project, ignore_composite);
-    let path = dir.join("script-utils.js");
-    std::fs::write(&path, content).map_err(|e| write_error(&path, e))?;
-    Ok(())
 }
 
 fn strip_cjs(code: &str) -> String {
@@ -457,108 +436,80 @@ mod tests {
         composites_have_scripts, composites_script_scan, rewrite_requires,
         scan_max_composite_entity, script_utils_content, strip_cjs, SCRIPT_UTILS_STUB,
     };
-    use crate::scene::Project;
-    use std::path::PathBuf;
+    use crate::scene::{Project, Tmp};
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dcl-one-sdk-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
-    }
+    const MAIN: &str = "assets/scene/main.composite";
+    const UNINSTANCEABLE: &str = r#"{"version":1,"components":[{"name":"core::NotAThing","data":{}},{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#;
 
     #[test]
     fn composites_have_scripts_requires_script_instances() {
-        let dir = scratch("hasscripts");
-        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
-        assert!(!composites_have_scripts(&dir));
-        std::fs::write(
-            dir.join("assets/scene/main.composite"),
+        let t = Tmp::new("hasscripts");
+        std::fs::create_dir_all(t.0.join("assets/scene")).unwrap();
+        assert!(!composites_have_scripts(&t.0));
+        t.write(
+            MAIN,
             r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[]}}}},{"name":"asset-packs::Actions","jsonSchema":{"type":"object"},"data":{"512":{"json":{}}}}]}"#,
-        )
-        .unwrap();
-        assert!(!composites_have_scripts(&dir));
-        std::fs::write(
-            dir.join("assets/scene/main.composite"),
+        );
+        assert!(!composites_have_scripts(&t.0));
+        t.write(
+            MAIN,
             r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[{"path":"src/counter.ts","priority":0}]}}}}]}"#,
-        )
-        .unwrap();
-        assert!(composites_have_scripts(&dir));
-        let _ = std::fs::remove_dir_all(&dir);
+        );
+        assert!(composites_have_scripts(&t.0));
     }
 
     #[test]
     fn composites_have_scripts_counts_binary_entries_in_instanceable_composites() {
-        let dir = scratch("binscripts");
-        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
-        std::fs::write(
-            dir.join("assets/scene/main.composite"),
+        let t = Tmp::new("binscripts");
+        t.write(
+            MAIN,
             r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"binary":"AQID"}}}]}"#,
-        )
-        .unwrap();
-        assert!(composites_have_scripts(&dir));
-        let _ = std::fs::remove_dir_all(&dir);
+        );
+        assert!(composites_have_scripts(&t.0));
     }
 
     #[test]
     fn non_instanceable_composites_do_not_flip_the_script_gate() {
-        let dir = scratch("badscripts");
-        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
-        std::fs::write(
-            dir.join("assets/scene/main.composite"),
-            r#"{"version":1,"components":[{"name":"core::NotAThing","data":{}},{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
-        )
-        .unwrap();
-        assert!(!composites_have_scripts(&dir));
-        std::fs::write(
-            dir.join("assets/scene/other.composite"),
+        let t = Tmp::new("badscripts");
+        t.write(MAIN, UNINSTANCEABLE);
+        assert!(!composites_have_scripts(&t.0));
+        t.write(
+            "assets/scene/other.composite",
             r#"{"version":1,"components":[{"name":"asset-packs::Script","data":{"512":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
-        )
-        .unwrap();
-        assert!(!composites_have_scripts(&dir));
-        let _ = std::fs::remove_dir_all(&dir);
+        );
+        assert!(!composites_have_scripts(&t.0));
     }
 
     #[test]
     fn non_instanceable_composite_skip_is_reported() {
-        let dir = scratch("skipnote");
-        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
-        std::fs::write(
-            dir.join("assets/scene/main.composite"),
-            r#"{"version":1,"components":[{"name":"core::NotAThing","data":{}},{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"512":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
-        )
-        .unwrap();
-        let (has_scripts, skipped) = composites_script_scan(&dir);
+        let t = Tmp::new("skipnote");
+        t.write(MAIN, UNINSTANCEABLE);
+        let (has_scripts, skipped) = composites_script_scan(&t.0);
         assert!(!has_scripts);
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("can't be instanced"), "{}", skipped[0]);
         assert!(skipped[0].contains("main.composite"), "{}", skipped[0]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn script_utils_stub_for_scriptless_scenes_even_with_the_runtime_installed() {
-        let dir = scratch("scriptgate");
-        std::fs::create_dir_all(dir.join("node_modules/@dcl/asset-packs")).unwrap();
-        std::fs::create_dir_all(dir.join("node_modules/@dcl/sdk-commands/dist/logic")).unwrap();
-        std::fs::write(
-            dir.join("node_modules/@dcl/sdk-commands/dist/logic/runtime-script.js"),
+        let t = Tmp::new("scriptgate");
+        std::fs::create_dir_all(t.0.join("node_modules/@dcl/asset-packs")).unwrap();
+        t.write(
+            "node_modules/@dcl/sdk-commands/dist/logic/runtime-script.js",
             "\"use strict\";\nexports.runScripts = runScripts;\nfunction runScripts(engine, scripts) {}\n",
-        )
-        .unwrap();
+        );
         let project = Project {
-            root: dir.clone(),
+            root: t.0.clone(),
             scene_json: serde_json::json!({"main": "bin/index.js"}),
         };
         assert_eq!(script_utils_content(&project, false), SCRIPT_UTILS_STUB);
-        std::fs::create_dir_all(dir.join("assets/scene")).unwrap();
-        std::fs::write(
-            dir.join("assets/scene/main.composite"),
+        t.write(
+            MAIN,
             r#"{"version":1,"components":[{"name":"asset-packs::Script","jsonSchema":{"type":"object"},"data":{"0":{"json":{"value":[{"path":"src/counter.ts"}]}}}}]}"#,
-        )
-        .unwrap();
+        );
         assert!(script_utils_content(&project, false).contains("runScripts"));
         assert_eq!(script_utils_content(&project, true), SCRIPT_UTILS_STUB);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -577,22 +528,18 @@ mod tests {
 
     #[test]
     fn max_composite_entity_scans_every_parseable_composite() {
-        let dir = scratch("maxentity");
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        assert_eq!(scan_max_composite_entity(&dir), 0);
-        std::fs::write(
-            dir.join("main.composite"),
+        let t = Tmp::new("maxentity");
+        assert_eq!(scan_max_composite_entity(&t.0), 0);
+        t.write(
+            "main.composite",
             r#"{"version":1,"components":[{"name":"core::Transform","data":{"512":{},"600":{}}}]}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("sub/other.composite"),
+        );
+        t.write(
+            "sub/other.composite",
             r#"{"version":1,"components":[{"name":"my::Thing","data":{"5170":{}}}]}"#,
-        )
-        .unwrap();
-        std::fs::write(dir.join("sub/broken.composite"), "not json").unwrap();
-        assert_eq!(scan_max_composite_entity(&dir), 5170);
-        let _ = std::fs::remove_dir_all(&dir);
+        );
+        t.write("sub/broken.composite", "not json");
+        assert_eq!(scan_max_composite_entity(&t.0), 5170);
     }
 
     #[test]

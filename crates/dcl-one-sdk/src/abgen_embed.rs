@@ -1,11 +1,7 @@
-//! The abgen asset-bundle server, carried inside this binary.
-//!
-//! Every build embeds one (build.rs downloads the release pinned in
-//! abgen-release.lock, or takes ABGEN_EMBED_BIN), so `start` always has a
-//! sidecar to run and never asks a user to install anything. The files are
-//! deflate-compressed in the binary and inflated into a temp directory keyed by
-//! [`TAG`], a content hash — so a given build extracts once per machine, and a
-//! new abgen lands in a new directory instead of racing the old one.
+//! The abgen asset-bundle server, carried inside this binary: build.rs embeds
+//! the release pinned in abgen-release.lock (or ABGEN_EMBED_BIN), deflated, and
+//! it is inflated into a temp directory keyed by [`TAG`], a content hash, so a
+//! build extracts once per machine and a new abgen never races an old one.
 
 use std::path::{Path, PathBuf};
 
@@ -15,9 +11,8 @@ pub fn present() -> bool {
     !FILES.is_empty()
 }
 
-/// Serializes extraction within the process. Two threads racing the same TAG
-/// directory would otherwise each inflate 36 MB, and — before this — collide on
-/// a staging name, since a pid is not unique between threads.
+/// Two threads extracting the same TAG would each inflate 36 MB and collide on
+/// a staging name (a pid is not unique between threads).
 static EXTRACT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn ensure_extracted() -> Option<PathBuf> {
@@ -39,6 +34,7 @@ pub fn ensure_extracted() -> Option<PathBuf> {
 }
 
 fn extract_into(root: &Path) -> std::io::Result<()> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     for (rel, packed, raw_len) in FILES {
         let path = root.join(rel);
         if std::fs::metadata(&path).is_ok_and(|m| m.len() as usize == *raw_len) {
@@ -49,7 +45,6 @@ fn extract_into(root: &Path) -> std::io::Result<()> {
         }
         let bytes = inflate(packed, *raw_len)?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = path.with_file_name(format!(
             ".{}.tmp-{}-{}",
             name.unwrap_or_default(),

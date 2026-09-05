@@ -1,5 +1,6 @@
 use super::net::{resolve_target_from, url_path, TargetConsent};
 use super::run::load_signer;
+use super::{read_server_message, refusal, send_text, with_headers, VERBOSE_HINT};
 use crate::ux::{self, TrySteps, UserError};
 use crate::world::signed_headers;
 use anyhow::Result;
@@ -15,27 +16,24 @@ pub struct UnpublishOptions {
 }
 
 pub fn canon_parcel(raw: &str) -> Result<String> {
-    let bad = || -> anyhow::Error {
+    let (x, y) = catalyrst_auth_chain::pointer::parse_pointer(raw).ok_or_else(|| {
         UserError::new(
             format!("\"{raw}\" is not a parcel coordinate"),
             TrySteps::one("expect two integers x,y \u{2014} e.g. --parcel 52,-52"),
         )
-        .into()
-    };
-    let (x, y) = catalyrst_types::pointer::parse_pointer(raw).ok_or_else(bad)?;
+    })?;
     Ok(format!("{x},{y}"))
 }
 
 fn require_signer(sign_key: Option<&Path>) -> Result<Wallet> {
-    match load_signer(sign_key)? {
-        Some(signer) => Ok(signer),
-        None => Err(UserError::new(
+    load_signer(sign_key)?.ok_or_else(|| {
+        UserError::new(
             "no wallet available to sign the unpublish request",
             TrySteps::one("set DCL_PRIVATE_KEY=<hex> (a wallet with rights on the parcel)")
                 .and("or pass --sign-key <path-to-key-file>"),
         )
-        .into()),
-    }
+        .into()
+    })
 }
 
 pub async fn unpublish(opts: &UnpublishOptions) -> Result<()> {
@@ -52,18 +50,15 @@ pub async fn unpublish(opts: &UnpublishOptions) -> Result<()> {
     let path = format!("{}/scenes/{parcel}", url_path(&base));
     let url = format!("{base}/scenes/{parcel}");
     let client = super::client(Duration::from_secs(30), Duration::from_secs(30))?;
-    let mut req = client.delete(&url);
-    for (k, v) in signed_headers(&signer, "delete", &path)? {
-        req = req.header(k, v);
-    }
-    let resp = match req.send().await {
-        Ok(resp) => resp,
-        Err(e) => return Err(super::unreachable_server(&url, e)),
-    };
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(refused(&parcel, status.as_u16(), &body));
+    let req = with_headers(
+        client.delete(&url),
+        signed_headers(&signer, "delete", &path)?,
+    );
+    let (status, body) = send_text(req)
+        .await
+        .map_err(|e| super::unreachable_server(&url, e))?;
+    if !(200..300).contains(&status) {
+        return Err(refused(&parcel, status, &body));
     }
     let mut steps = ux::Steps::new(1);
     steps.done(format!(
@@ -83,19 +78,16 @@ fn refused(parcel: &str, status: u16, body: &str) -> anyhow::Error {
         401 | 403 => TrySteps::one(format!(
             "check the signing wallet owns or has operator rights on {parcel}"
         ))
-        .and("re-run with --verbose for the full response"),
-        _ => TrySteps::one("read the server message above")
-            .and("re-run with --verbose for the full response"),
+        .and(VERBOSE_HINT),
+        _ => read_server_message(),
     };
-    let mut u = UserError::new(
-        format!("the content server refused to unpublish {parcel} (HTTP {status})"),
-        steps,
-    );
-    let body = body.trim();
-    if !body.is_empty() {
-        u = u.why(body);
-    }
-    u.into()
+    refusal(
+        UserError::new(
+            format!("the content server refused to unpublish {parcel} (HTTP {status})"),
+            steps,
+        ),
+        body,
+    )
 }
 
 #[cfg(test)]

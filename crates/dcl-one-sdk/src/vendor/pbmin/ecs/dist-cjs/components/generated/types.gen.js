@@ -23,6 +23,8 @@ __exportStar(require("./pb/decentraland/sdk/components/common/camera_transition.
 // export { PbCameraTransition }
 __exportStar(require("./pb/decentraland/sdk/components/common/camera_type.gen"), exports);
 // export { PbCameraType }
+__exportStar(require("./pb/decentraland/sdk/components/common/explorer_ui.gen"), exports);
+// export { PbExplorerUi }
 __exportStar(require("./pb/decentraland/sdk/components/common/input_action.gen"), exports);
 // export { PbInputAction }
 __exportStar(require("./pb/decentraland/sdk/components/common/loading_state.gen"), exports);

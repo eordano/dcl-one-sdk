@@ -1,42 +1,22 @@
-//! Prebuilt SDK runtime chunks: shipped in the vendored blob, not rebuilt per
-//! scene.
+//! Prebuilt SDK runtime chunks: built once at blob-build time, not per scene.
 //!
-//! The SDK runtime chunk is *scene-independent*. Two scenes — one importing
-//! three `@dcl/ecs` symbols, one importing react-ecs UI + tweens + audio +
-//! animator + players + network — produce byte-identical `bin/sdk-runtime.js`
-//! (463,133 B, sha256 ba5189ef…). It is keyed only on which `@dcl/*` packages
-//! are installed, never on what the scene imports. So the 3.64 MB of SDK
-//! JavaScript the base blob used to ship existed for one purpose: letting
-//! rolldown re-derive the same artifact on every build. Building it once, at
-//! blob-build time, is the whole idea here.
+//! The SDK runtime chunk is scene-independent — keyed only on which `@dcl/*`
+//! packages are installed, never on what the scene imports — so the 3.64 MB of
+//! SDK source the blob used to ship existed only to let rolldown re-derive the
+//! same bytes on every build.
 //!
-//! Two chunks, not one:
+//! Two chunks, not one: **core** (always installed; the registry of
+//! [`crate::split::core_registry_keys`]) and **smart** (installed only when the
+//! scene uses smart items; `@dcl/asset-packs`, its scene entrypoint and the
+//! real `~sdk/script-utils`, resolving everything else through core's
+//! registry). `write_script_utils` inlines the smart-item runtime whenever
+//! `@dcl/asset-packs` merely *resolves*, +30% on every bundle; the split makes
+//! only smart-item scenes pay it.
 //!
-//! * **core** — always installed. The registry of everything under
-//!   `@dcl/{sdk,ecs,ecs-math,react-ecs}` + react, exactly what
-//!   [`crate::split::core_registry_keys`] lists.
-//! * **smart** — installed only when the scene actually uses smart items. It
-//!   carries `@dcl/asset-packs`, its scene entrypoint, and the real
-//!   `~sdk/script-utils` runtime, and it resolves everything else through the
-//!   core chunk's registry.
-//!
-//! Splitting them fixes a real defect, not just a size: `write_script_utils`
-//! inlines the smart-item runtime whenever `@dcl/asset-packs` merely *resolves*,
-//! which grew the single chunk from 463,133 B to 601,100 B (+137,967 B, +30%)
-//! for every production bundle — including scenes with no composite and no
-//! smart item anywhere. Putting `@dcl/asset-packs` in the base blob (so
-//! smart-item scenes type-check and bundle without a 12 MB editor install)
-//! would have made that inflation universal. With the split it is paid only by
-//! scenes that use smart items, and even they pay slightly less than before
-//! (613 KB across two chunks vs 604 KB in one is +1.6%, against −140 KB for
-//! every scene that does not).
-//!
-//! The chunks live *inside* the vendored `@dcl/sdk` at
-//! `node_modules/@dcl/sdk/prebuilt/`. That is deliberate: they are only valid
-//! for the `@dcl/sdk` version they were built from, and putting them in that
-//! package means an `npm install` that replaces `@dcl/sdk` removes them in the
-//! same step, which flips the build back to the source path atomically instead
-//! of leaving a stale chunk behind.
+//! The chunks live inside the vendored `@dcl/sdk` (`node_modules/@dcl/sdk/
+//! prebuilt/`) on purpose: they are valid only for the `@dcl/sdk` they were
+//! built from, so an `npm install` that replaces the package removes them in
+//! the same step and flips the build back to the source path atomically.
 
 use crate::esbuild::EsbuildOptions;
 use crate::scene::Project;
@@ -59,11 +39,8 @@ pub struct Prebuilt {
     pub smart: Option<PathBuf>,
 }
 
-/// The prebuilt chunks of this scene's installed toolchain, if it has them.
-///
-/// `None` means the scene has a source `node_modules` (an npm install, or a
-/// blob predating this change) and the SDK chunk is bundled from source, as
-/// before.
+/// `None` means a source `node_modules` (an npm install, or an older blob):
+/// the SDK chunk is bundled from source.
 pub fn locate(project: &Project) -> Option<Prebuilt> {
     let core = project.node_module(CORE_FILE)?;
     Some(Prebuilt {
@@ -72,17 +49,11 @@ pub fn locate(project: &Project) -> Option<Prebuilt> {
     })
 }
 
-/// Does this scene need the smart-item chunk?
-///
-/// [`Project::is_editor_scene`] is the primary signal: a composite carrying
-/// runtime `asset-packs::` components makes the generated entrypoint call
-/// `initAssetPacks`. It is not the only one — a scene can import
+/// An editor scene's entrypoint calls `initAssetPacks`; a scene can also import
 /// `@dcl/asset-packs/dist/scene-entrypoint` from its own source with no
-/// composite at all (`0,0-cube-spawner` in decentraland/sdk7-test-scenes does
-/// exactly that) — so the built scene chunk is also consulted. That second test
-/// is exact rather than predictive: `@dcl/asset-packs` is an external of the
-/// scene chunk, so the specifier survives verbatim into the emitted bundle
-/// precisely when something reaches it.
+/// composite at all (`0,0-cube-spawner` in sdk7-test-scenes), and since the
+/// package is an external of the scene chunk the specifier survives into the
+/// emitted bundle exactly when something reaches it.
 pub fn scene_needs_smart_chunk(project: &Project, scene_chunk: &Path) -> bool {
     project.is_editor_scene() || chunk_requires(scene_chunk, "@dcl/asset-packs")
 }
@@ -117,70 +88,52 @@ pub fn install(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Remove a smart-item chunk left behind by an earlier build of the same scene.
-///
-/// Without this, deleting the last smart item from a scene leaves a stale
-/// `sdk-smart-items.js` in `bin/`, which the loader stub no longer names but
-/// `deploy` would still upload.
+/// Deleting the last smart item would otherwise leave a stale
+/// `sdk-smart-items.js` the loader no longer names but `deploy` still uploads.
 pub fn remove_stale_smart_chunk(root: &Path, smart_rel: &str) {
     let _ = std::fs::remove_file(root.join(smart_rel));
 }
 
 /// Build both chunks from a scene whose `node_modules` is the full install tree
-/// — this is what `scripts/build-base-blob.py` calls through the hidden
-/// `vendor-chunks` subcommand, and the only place either chunk is ever
-/// produced.
-///
-/// The two passes differ only in entry module and externals:
-///
-/// * core: entry is the registry of [`split::core_registry_keys`], nothing is
-///   external, `~sdk/script-utils` is aliased to the no-op stub.
-/// * smart: entry is the registry of [`split::smart_registry_keys`],
-///   everything the core chunk owns is external, and `~sdk/script-utils` is
-///   aliased to the *real* `@dcl/sdk-commands` runtime so exactly one copy is
-///   bundled and the registry entry and asset-packs' own internal import land
-///   on the same module instance.
-///
-/// Both chunks are then checked: every `require()` a chunk emits must be
-/// `~system/*` or a key the loader will have by the time that chunk is
-/// evaluated. This is what catches the class of bug that was invisible while
-/// asset-packs shared a chunk with the SDK — `@dcl/sdk/platform` and
-/// `@dcl/sdk/text-codec` are required by asset-packs, were not registry keys,
-/// and would have thrown "not in the sdk runtime registry" at scene start.
+/// (what `scripts/build-base-blob.py` calls through the hidden `vendor-chunks`
+/// subcommand). The passes differ in entry and externals: core aliases
+/// `~sdk/script-utils` to the no-op stub with nothing external; smart makes
+/// everything core owns external and aliases `~sdk/script-utils` to the *real*
+/// `@dcl/sdk-commands` runtime, so exactly one copy is bundled and the registry
+/// entry and asset-packs' own import land on the same module instance. Both are
+/// then checked for requires the loader could not serve — `@dcl/sdk/platform`
+/// and `@dcl/sdk/text-codec` were invisible while asset-packs shared the SDK's
+/// chunk, and would have thrown "not in the sdk runtime registry" at scene start.
 pub async fn build_chunks(dir: &Path, out_core: &Path, out_smart: &Path) -> Result<()> {
     let project = Project::load(dir)?;
     let tsconfig = project.tsconfig()?;
-    let work = project.root.join(".dcl-one");
-    std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
+    let work = crate::scene::work_dir(&project.root)
+        .with_context(|| format!("creating {}", project.root.join(".dcl-one").display()))?;
+    let write = |name: &str, content: &str| -> Result<PathBuf> {
+        let path = work.join(name);
+        std::fs::write(&path, content)?;
+        Ok(path)
+    };
 
     let core_keys = split::core_registry_keys(&project);
     let smart_keys = split::smart_registry_keys();
 
-    std::fs::write(
-        work.join("composite-slot.js"),
+    let slot = write(
+        "composite-slot.js",
         "export const compositeFromLoader = {}\n",
     )?;
-    let stub = work.join("script-utils-stub.js");
-    std::fs::write(&stub, entrypoint::SCRIPT_UTILS_STUB)?;
-    let core_entry = work.join("core-registry.js");
-    std::fs::write(&core_entry, split::registry_module(&core_keys))?;
-
+    let stub = write("script-utils-stub.js", entrypoint::SCRIPT_UTILS_STUB)?;
+    let core_entry = write("core-registry.js", &split::registry_module(&core_keys))?;
     let mut core_aliases = crate::esbuild::resolve_aliases(&project)?;
-    core_aliases.push((
-        "~sdk/all-composites".to_string(),
-        work.join("composite-slot.js"),
-    ));
+    core_aliases.push(("~sdk/all-composites".to_string(), slot));
     core_aliases.push(("~sdk/script-utils".to_string(), stub));
-    crate::esbuild::bundle(
+    bundle_chunk(
         &project,
-        &EsbuildOptions {
-            production: true,
-            entrypoint: core_entry,
-            outfile: out_core.to_path_buf(),
-            tsconfig: tsconfig.clone(),
-            aliases: core_aliases,
-            externals: vec![],
-        },
+        core_entry,
+        out_core,
+        &tsconfig,
+        core_aliases,
+        vec![],
     )
     .await?;
 
@@ -193,26 +146,20 @@ pub async fn build_chunks(dir: &Path, out_core: &Path, out_smart: &Path) -> Resu
         )
         .why("@dcl/sdk-commands/dist/logic/runtime-script.js did not resolve"))
     })?;
-    let real_utils = work.join("script-utils.js");
-    std::fs::write(&real_utils, script_utils)?;
-    let smart_entry = work.join("smart-registry.js");
-    std::fs::write(&smart_entry, split::registry_module(smart_keys))?;
-
-    let mut smart_aliases: Vec<(String, PathBuf)> = Vec::new();
+    let real_utils = write("script-utils.js", &script_utils)?;
+    let smart_entry = write("smart-registry.js", &split::registry_module(smart_keys))?;
+    let mut smart_aliases = Vec::new();
     if let Some(ap) = project.node_module("@dcl/asset-packs") {
         smart_aliases.push(("@dcl/asset-packs".to_string(), ap));
     }
     smart_aliases.push(("~sdk/script-utils".to_string(), real_utils));
-    crate::esbuild::bundle(
+    bundle_chunk(
         &project,
-        &EsbuildOptions {
-            production: true,
-            entrypoint: smart_entry,
-            outfile: out_smart.to_path_buf(),
-            tsconfig,
-            aliases: smart_aliases,
-            externals: split::smart_externals(),
-        },
+        smart_entry,
+        out_smart,
+        &tsconfig,
+        smart_aliases,
+        split::smart_externals(),
     )
     .await?;
 
@@ -227,6 +174,28 @@ pub async fn build_chunks(dir: &Path, out_core: &Path, out_smart: &Path) -> Resu
     std::fs::write(&manifest, serde_json::to_vec_pretty(&registry)?)
         .with_context(|| format!("writing {}", manifest.display()))?;
     Ok(())
+}
+
+async fn bundle_chunk(
+    project: &Project,
+    entrypoint: PathBuf,
+    outfile: &Path,
+    tsconfig: &Path,
+    aliases: Vec<(String, PathBuf)>,
+    externals: Vec<String>,
+) -> Result<()> {
+    crate::esbuild::bundle(
+        project,
+        &EsbuildOptions {
+            production: true,
+            entrypoint,
+            outfile: outfile.to_path_buf(),
+            tsconfig: tsconfig.to_path_buf(),
+            aliases,
+            externals,
+        },
+    )
+    .await
 }
 
 /// Every `require()` literal in a built chunk must be `~system/*` (passed to
@@ -287,6 +256,7 @@ fn require_specifiers(code: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::Tmp;
 
     #[test]
     fn require_specifiers_reads_both_quote_styles_and_ignores_calls() {
@@ -299,32 +269,29 @@ mod tests {
 
     #[test]
     fn verify_requires_accepts_system_and_registry_keys_only() {
-        let dir = std::env::temp_dir().join(format!("dcl-one-prebuilt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let chunk = dir.join("smart.js");
-        std::fs::write(
-            &chunk,
+        let t = Tmp::new("prebuilt");
+        t.write(
+            "smart.js",
             r#"require("~system/EngineApi");require("@dcl/sdk/ecs")"#,
-        )
-        .unwrap();
+        );
+        let chunk = t.0.join("smart.js");
         assert!(verify_requires(&chunk, &["@dcl/sdk/ecs"]).is_ok());
         assert!(verify_requires(&chunk, &[]).is_err());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn chunk_requires_matches_only_a_real_specifier() {
-        let dir = std::env::temp_dir().join(format!("dcl-one-prebuilt-cr-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let chunk = dir.join("scene.js");
-        std::fs::write(&chunk, "var x = 1 // @dcl/asset-packs is only a comment\n").unwrap();
+        let t = Tmp::new("prebuilt-cr");
+        let chunk = t.0.join("scene.js");
+        t.write(
+            "scene.js",
+            "var x = 1 // @dcl/asset-packs is only a comment\n",
+        );
         assert!(!chunk_requires(&chunk, "@dcl/asset-packs"));
-        std::fs::write(
-            &chunk,
+        t.write(
+            "scene.js",
             r#"var e=require("@dcl/asset-packs/dist/scene-entrypoint");"#,
-        )
-        .unwrap();
+        );
         assert!(chunk_requires(&chunk, "@dcl/asset-packs"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

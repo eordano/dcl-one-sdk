@@ -8,6 +8,7 @@ import { PointerEventsSystem } from '../../systems/events';
 import { IInputSystem } from './../../engine/input';
 import { RaycastSystem } from '../../systems/raycast';
 import { VideoEventsSystem } from '../../systems/videoEvents';
+import { AudioEventsSystem } from '../../systems/audioEvents';
 import { AssetLoadLoadingStateSystem } from '../../systems/assetLoad';
 import { TweenSystem } from '../../systems/tween';
 import { TriggerAreaEventsSystem } from '../../systems/triggerArea';
@@ -54,6 +55,12 @@ export { RaycastSystem };
  */
 export declare const videoEventsSystem: VideoEventsSystem;
 export { VideoEventsSystem };
+/**
+ * @public
+ * Register callback functions to a particular entity on audio events.
+ */
+export declare const audioEventsSystem: AudioEventsSystem;
+export { AudioEventsSystem };
 /**
  * @public
  * Register callback functions to a particular entity on asset pre-load events.

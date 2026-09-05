@@ -10,6 +10,18 @@ pub struct Project {
     pub scene_json: Value,
 }
 
+/// `.dcl-one/`, created with its own `.gitignore` so no scene-level ignore
+/// file has to list it.
+pub fn work_dir(root: &Path) -> std::io::Result<PathBuf> {
+    let dir = root.join(".dcl-one");
+    std::fs::create_dir_all(&dir)?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, "*\n")?;
+    }
+    Ok(dir)
+}
+
 impl Project {
     pub fn load(dir: &Path) -> Result<Self> {
         if !dir.is_dir() {
@@ -141,18 +153,16 @@ impl Project {
     }
 
     pub fn require_node_module(&self, rel: &str) -> Result<PathBuf> {
-        match self.node_module(rel) {
-            Some(p) => Ok(p),
-            None => Err(UserError::new(
-                format!("{rel} is not installed in this scene"),
-                TrySteps::one("run dcl-one-sdk init --node-modules-only to restore the vendored node_modules (or npm install)"),
-            )
-            .why(format!(
-                "{} does not exist",
-                self.root.join("node_modules").join(rel).display()
-            ))
-            .into()),
+        let p = self.root.join("node_modules").join(rel);
+        if p.exists() {
+            return Ok(p);
         }
+        Err(UserError::new(
+            format!("{rel} is not installed in this scene"),
+            TrySteps::one("run dcl-one-sdk init --node-modules-only to restore the vendored node_modules (or npm install)"),
+        )
+        .why(format!("{} does not exist", p.display()))
+        .into())
     }
 
     pub fn is_editor_scene(&self) -> bool {
@@ -198,7 +208,7 @@ pub fn min_cli_warning(root: &Path) -> Option<String> {
     let tracked = parse_semver(TRACKED_MIN_CLI)?;
     if min > tracked {
         Some(format!(
-            "this project asks for CLI version >= {declared}, newer than the {TRACKED_MIN_CLI} level dcl-one-sdk tracks (@dcl/sdk-commands 7.26.0) \u{2014} if a command misbehaves, cross-check with npx @dcl/sdk-commands"
+            "this project asks for CLI version >= {declared}, newer than the {TRACKED_MIN_CLI} level dcl-one-sdk tracks (@dcl/sdk-commands 7.27.0) \u{2014} if a command misbehaves, cross-check with npx @dcl/sdk-commands"
         ))
     } else {
         None
@@ -243,11 +253,10 @@ pub fn machine_id() -> String {
         .unwrap_or_else(|| "dcl-one".to_string())
 }
 
-/// A project root as an opaque, stable id. Everything a preview addresses lives
-/// under a root, so the root is the only part of a path that has to be hidden —
-/// the part below it is already public in every entity's `content[].file`.
-/// Machine-scoped like the hash it goes into, so two machines previewing the
-/// same folder never mint the same id.
+/// A project root as an opaque, stable id: the root is the only part of a path
+/// that has to be hidden (the rest is public in every entity's `content[].file`).
+/// Machine-scoped, so two machines previewing the same folder never mint the
+/// same id.
 pub fn root_tag(root: &Path, machine: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
@@ -262,34 +271,20 @@ pub fn root_tag(root: &Path, machine: &str) -> String {
         .collect()
 }
 
-/// The nearest ancestor holding a scene.json — [`Project::load`]'s rule read
-/// backwards, so a hash can be built from an absolute path alone by a caller
-/// that has nothing else to go on.
-///
-/// This is a guess, and it costs a `stat` per ancestor on every call. Anything
-/// that already knows which project a file belongs to — the entity builder, the
-/// wearable list, the watcher — must say so with [`b64_hash_in_root`] instead:
-/// faster, and it cannot mistake a nested `scene.json` (a vendored scene, a
-/// second scene folder inside the published tree) for the root the file is
-/// actually served under.
+/// The nearest ancestor holding a scene.json. A guess costing a `stat` per
+/// ancestor, and one that can mistake a nested `scene.json` for the root the
+/// file is served under: a caller that knows the project must use
+/// [`b64_hash_in_root`] instead.
 fn project_root_of(path: &Path) -> Option<&Path> {
     path.ancestors().find(|a| a.join("scene.json").is_file())
 }
 
-/// [`b64_hash`] for a caller that already holds the project's [`root_tag`] and
-/// the path inside it — which is every caller that walks a project.
-///
-/// `root_tag` is a pure function of (root, machine), so it is computed once per
-/// project instead of once per file, and no filesystem probe is needed to
-/// rediscover a root the caller passed in. The payload is byte-for-byte what
-/// [`b64_hash`] builds for the same file, so hashes minted through either door
-/// resolve identically — and, as there, it is the tag and the path inside the
-/// root, never the path on disk.
-///
-/// `rel` is not validated: minting is not authorization. The read side already
-/// treats every relative half as attacker-supplied, whoever minted it — see
-/// [`b64_unhash`] and the canonicalize-and-contain check in
-/// `start::http::contents`.
+/// [`b64_hash`] for a caller that already holds the project's [`root_tag`]:
+/// the payload is byte-for-byte what [`b64_hash`] builds for the same file, so
+/// hashes minted through either door resolve identically. `rel` is not
+/// validated — minting is not authorization; the read side treats every
+/// relative half as attacker-supplied (see [`b64_unhash`] and the
+/// canonicalize-and-contain check in `start::http::contents`).
 pub fn b64_hash_in_root(root_tag: &str, rel: &str) -> String {
     use base64::Engine;
     let unique = format!("{root_tag}/{}", rel.replace('\\', "/"));
@@ -303,7 +298,12 @@ pub fn b64_hash_in_root(root_tag: &str, rel: &str) -> String {
 /// [`b64_hash_in_root`]. `abs` is only read for the digest; the identity half
 /// comes from `root_tag` and `rel`.
 pub fn b64_content_hash_in_root(root_tag: &str, rel: &str, abs: &Path) -> String {
-    let base = b64_hash_in_root(root_tag, rel);
+    with_content_tag(b64_hash_in_root(root_tag, rel), abs)
+}
+
+/// `base` plus the file's digest; an unreadable file keeps the path-only hash,
+/// since the request for it is going to fail anyway.
+fn with_content_tag(base: String, abs: &Path) -> String {
     match content_tag(abs) {
         Some(tag) => format!("{base}{CONTENT_TAG}{tag}"),
         None => base,
@@ -311,16 +311,12 @@ pub fn b64_content_hash_in_root(root_tag: &str, rel: &str, abs: &Path) -> String
 }
 
 /// The identity of a path in a preview: reversible, so `/content/contents/{hash}`
-/// finds the file again without a side table. Used bare only for things that ARE
-/// a path and have no bytes; real files go through [`b64_content_hash`].
-///
-/// The payload is `{root tag}/{path inside the project}`, never the absolute
-/// path. Base64 is not concealment, and the pages carrying these hashes — the
-/// landing page, `/content/entities/active` — are unauthenticated and reachable
-/// over the LAN or any tunnel, so an absolute path here handed every visitor the
-/// OS username and the layout of the disk. A path under no project root is
-/// tagged whole with no relative part: no root can match that tag, so it 404s
-/// rather than travelling in the clear.
+/// finds the file again without a side table (real files go through
+/// [`b64_content_hash`]). The payload is `{root tag}/{path inside the project}`,
+/// never the absolute path: the pages carrying these hashes are unauthenticated
+/// and reachable over the LAN or a tunnel, and base64 is not concealment. A path
+/// under no project root is tagged whole with no relative part, so no root can
+/// match it and it 404s rather than travelling in the clear.
 pub fn b64_hash(path_str: &str, machine: &str) -> String {
     let path = Path::new(path_str);
     match project_root_of(path) {
@@ -337,32 +333,16 @@ pub fn b64_hash(path_str: &str, machine: &str) -> String {
 /// untagged hash still decodes.
 const CONTENT_TAG: char = '.';
 
-/// [`b64_hash`] plus a digest of the file's bytes. This is content addressing
-/// on the WRITE side only, and the distinction matters enough to spell out.
-///
-/// What holds: an edit always changes the hash. A client that cached the old
-/// name asks for a name it has never seen and refetches just that asset,
-/// instead of dropping every cached asset on reload the way a path-only hash
-/// forced it to.
-///
-/// What does NOT hold, and why this is not called a content address: the name
-/// does not pin the bytes. `/content/contents/{hash}` resolves on
-/// [`hash_path_part`] alone and never looks at the digest, so a request
-/// carrying a superseded digest is answered 200 with whatever that file holds
-/// NOW — not 404, and not the bytes the digest names. Nothing here keeps old
-/// versions, so those bytes are gone and there is nothing else to serve; and
-/// failing the request instead would break a fetch already in flight when the
-/// file changed under it. Pinned by
+/// [`b64_hash`] plus a digest of the file's bytes: content addressing on the
+/// WRITE side only. An edit always changes the name, so a client refetches just
+/// that asset instead of dropping its whole cache on reload; but the name does
+/// not pin the bytes — `/content/contents/{hash}` resolves on
+/// [`hash_path_part`] alone, so a superseded digest is answered 200 with what
+/// the file holds NOW (old versions are not kept, and failing would break a
+/// fetch in flight). Pinned by
 /// `start::http::tests::a_stale_digest_serves_the_current_bytes`.
-///
-/// An unreadable file falls back to the path-only hash — the request for it is
-/// going to fail anyway.
 pub fn b64_content_hash(abs_path: &str, machine: &str) -> String {
-    let base = b64_hash(abs_path, machine);
-    match content_tag(Path::new(abs_path)) {
-        Some(tag) => format!("{base}{CONTENT_TAG}{tag}"),
-        None => base,
-    }
+    with_content_tag(b64_hash(abs_path, machine), Path::new(abs_path))
 }
 
 /// How old an mtime has to be before (mtime, len) is a safe cache key. Filesystem
@@ -370,11 +350,10 @@ pub fn b64_content_hash(abs_path: &str, machine: &str) -> String {
 /// writes inside one tick are indistinguishable — the make/rsync guard.
 const MTIME_SETTLED: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// A short digest of a file, memoised on (mtime, len): the content mapping is
-/// rebuilt on every entity request, so re-reading would push the whole scene
-/// through sha256 on a timer. A file touched within [`MTIME_SETTLED`] is hashed
-/// every time instead — its stamp cannot yet tell one edit from the next, and a
-/// stale tag would be cached under it forever.
+/// A short digest of a file, memoised on (mtime, len) because the content
+/// mapping is rebuilt on every entity request. A file touched within
+/// [`MTIME_SETTLED`] is hashed every time: its stamp cannot yet tell one edit
+/// from the next, and a stale tag would be cached under it forever.
 fn content_tag(path: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
     type Stamp = (std::time::SystemTime, u64);
@@ -413,10 +392,8 @@ fn content_tag(path: &Path) -> Option<String> {
     Some(tag)
 }
 
-/// Bounded parallel map, input order preserved. The per-file read+hash work in
-/// deploy and the preview content mappings is independent blocking I/O, and
-/// upstream walks project files with a concurrency of 32 (js-sdk-toolchain
-/// b7a44a20); one worker per item up to that same cap.
+/// Bounded parallel map, input order preserved; the cap of 32 is upstream's
+/// project-walk concurrency (js-sdk-toolchain b7a44a20).
 pub(crate) fn parallel_map<T, U>(items: &[T], f: impl Fn(&T) -> U + Sync) -> Vec<U>
 where
     T: Sync,
@@ -454,16 +431,13 @@ where
         .collect()
 }
 
-/// The part of a hash that identifies WHICH file, not which version of it —
-/// and the only part anything resolving a hash compares on, which is what
-/// makes the read side path-addressed rather than content-addressed. See
-/// [`b64_content_hash`].
+/// The part of a hash that identifies WHICH file, not which version: the only
+/// part the read side compares on (see [`b64_content_hash`]).
 pub fn hash_path_part(hash: &str) -> &str {
     hash.rsplit_once(CONTENT_TAG).map_or(hash, |(path, _)| path)
 }
 
-/// Splits a hash back into the [`root_tag`] it was minted under and the path
-/// inside that root. The caller owns the roots, so it does the matching; the
+/// Splits a hash back into its [`root_tag`] and the path inside that root. The
 /// relative half is attacker-controlled (anyone can mint a hash for a tag they
 /// read off the page) and must not be joined to a root unchecked.
 pub fn b64_unhash(hash: &str) -> Option<(String, String)> {
@@ -479,32 +453,53 @@ pub fn b64_unhash(hash: &str) -> Option<(String, String)> {
     Some((tag.to_string(), rel.to_string()))
 }
 
+/// A scratch directory for tests, removed on drop.
+#[cfg(test)]
+pub(crate) struct Tmp(pub PathBuf);
+
+#[cfg(test)]
+impl Tmp {
+    pub fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("dcl-one-sdk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Tmp(dir)
+    }
+
+    pub fn write(&self, rel: &str, contents: impl AsRef<[u8]>) {
+        let p = self.0.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, contents).unwrap();
+    }
+}
+
+#[cfg(test)]
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct Tmp(PathBuf);
-
-    impl Tmp {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("dcl-one-sdk-mincli-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Tmp(dir)
-        }
-
-        fn write(&self, rel: &str, contents: &str) {
-            let p = self.0.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, contents).unwrap();
-        }
-    }
-
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    #[test]
+    fn the_work_dir_carries_its_own_gitignore() {
+        let tmp = Tmp::new("workdir");
+        let dir = work_dir(&tmp.0).unwrap();
+        assert_eq!(dir, tmp.0.join(".dcl-one"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+        std::fs::write(dir.join(".gitignore"), "*\n!deploy-target\n").unwrap();
+        work_dir(&tmp.0).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
+            "*\n!deploy-target\n",
+            "a second visit rewrites nothing"
+        );
     }
 
     #[test]

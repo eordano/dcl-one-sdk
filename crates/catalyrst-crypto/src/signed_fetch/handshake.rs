@@ -2,9 +2,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::{
-    build_legacy_payload, build_payload, build_payload_v6, default_eip1654_validator,
-    parse_metadata, signed_fetch_path, AuthChain, AuthLink, AUTH_CHAIN_HEADER_PREFIX,
-    AUTH_METADATA_HEADER, AUTH_TIMESTAMP_HEADER, MAX_AUTH_CHAIN_LINKS,
+    build_legacy_payload, build_payload_v6, default_eip1654_validator, parse_metadata,
+    signed_fetch_path, AuthChain, AuthLink, AUTH_CHAIN_HEADER_PREFIX, AUTH_METADATA_HEADER,
+    AUTH_TIMESTAMP_HEADER, MAX_AUTH_CHAIN_LINKS,
 };
 use crate::eip1654::Eip1654Validator;
 use crate::metadata_gate::{
@@ -13,7 +13,7 @@ use crate::metadata_gate::{
 use crate::signer::Signer;
 use crate::verify::verify_auth_chain_async;
 use crate::AuthError;
-use catalyrst_types::{AuthLink as CryptoAuthLink, AuthLinkType};
+use catalyrst_auth_chain::{AuthLink as CryptoAuthLink, AuthLinkType};
 
 #[derive(Debug, Error)]
 pub enum AuthChainError {
@@ -210,6 +210,31 @@ fn map_auth_error(err: AuthError) -> AuthChainError {
     }
 }
 
+/// The [`super::validate_signature_either_payload`] contract reported through
+/// this module's error: the 6.x payload first, the legacy one only when the
+/// 6.x signature comparison fails and the two payloads differ. Every other
+/// failure is deterministic in the payload shape, so it settles on the first
+/// attempt; a request that fails both answers with the legacy attempt's
+/// verdict, which is what the legacy-only check answered.
+pub async fn validate_signature_either_payload(
+    chain: &AuthChain,
+    method: &str,
+    path: &str,
+    timestamp: &str,
+    metadata: &str,
+    expiration_secs: i64,
+    now: i64,
+) -> Result<Signer, AuthChainError> {
+    let v6 = build_payload_v6(method, path, timestamp, metadata);
+    let legacy = build_legacy_payload(method, path, timestamp, metadata);
+    match validate_signature(chain, &v6, timestamp, expiration_secs, now).await {
+        Err(AuthChainError::InvalidSignature(_)) if legacy != v6 => {
+            validate_signature(chain, &legacy, timestamp, expiration_secs, now).await
+        }
+        settled => settled,
+    }
+}
+
 pub async fn verify_handshake(
     frame_json: &str,
     method: &str,
@@ -222,8 +247,16 @@ pub async fn verify_handshake(
     let timestamp = obj_str(&obj, AUTH_TIMESTAMP_HEADER)
         .ok_or(AuthChainError::MissingHeader(AUTH_TIMESTAMP_HEADER))?;
     let metadata = obj_str(&obj, AUTH_METADATA_HEADER).unwrap_or("{}");
-    let payload = build_payload(method, path, timestamp, metadata);
-    validate_signature(&chain, &payload, timestamp, expiration_secs, now_secs).await
+    validate_signature_either_payload(
+        &chain,
+        method,
+        path,
+        timestamp,
+        metadata,
+        expiration_secs,
+        now_secs,
+    )
+    .await
 }
 
 fn header_object(headers: &http::HeaderMap) -> serde_json::Map<String, Value> {
@@ -252,9 +285,17 @@ pub async fn require_signer(
     let metadata = obj_str(&value, AUTH_METADATA_HEADER)
         .unwrap_or("{}")
         .to_string();
-    let payload = build_payload(method, path, &timestamp, &metadata);
     let now = chrono::Utc::now().timestamp();
-    validate_signature(&chain, &payload, &timestamp, tolerance_secs, now).await
+    validate_signature_either_payload(
+        &chain,
+        method,
+        path,
+        &timestamp,
+        &metadata,
+        tolerance_secs,
+        now,
+    )
+    .await
 }
 
 pub async fn optional_signer(

@@ -16,6 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod common;
+
 /// A requirement no machine can satisfy, and deliberately outside every prefix
 /// [`documented_prefixes`] treats as a gate: this is the harness testing itself,
 /// not a knob anyone should set.
@@ -25,7 +27,7 @@ const IMPOSSIBLE: &str = "A_RESOURCE_THIS_MACHINE_DOES_NOT_HAVE";
 #[test]
 #[ignore = "probe for the tests in this file; it exists to be skipped, not to assert"]
 fn testgate_probe_that_can_never_find_its_dependency() {
-    let Some(_) = catalyrst_testgate::require_env(IMPOSSIBLE) else {
+    let Some(_) = common::testgate::require_env(IMPOSSIBLE) else {
         return;
     };
     panic!("{IMPOSSIBLE} was actually set; this probe is meaningless");
@@ -40,10 +42,10 @@ fn run_probe(opt_out: Option<&str>) -> Output {
         "--test-threads=1",
     ]);
     cmd.env_remove(IMPOSSIBLE);
-    cmd.env_remove(catalyrst_testgate::SKIP_LOG);
+    cmd.env_remove(common::testgate::SKIP_LOG);
     match opt_out {
-        Some(v) => cmd.env(catalyrst_testgate::OPT_OUT, v),
-        None => cmd.env_remove(catalyrst_testgate::OPT_OUT),
+        Some(v) => cmd.env(common::testgate::OPT_OUT, v),
+        None => cmd.env_remove(common::testgate::OPT_OUT),
     };
     cmd.output().expect("re-running this test binary")
 }
@@ -86,7 +88,7 @@ fn without_the_opt_out_a_missing_dependency_fails_and_names_the_variable() {
         "a gated test with no dependency and no opt-out reported success\n{all}"
     );
     assert!(all.contains(IMPOSSIBLE), "{all}");
-    assert!(all.contains(catalyrst_testgate::OPT_OUT), "{all}");
+    assert!(all.contains(common::testgate::OPT_OUT), "{all}");
 }
 
 fn tests_dir() -> PathBuf {

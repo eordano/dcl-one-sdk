@@ -7,16 +7,8 @@ mod edit;
 mod editor;
 mod http;
 mod landing;
-pub(crate) mod scene_logs;
-
-/// Whether a worlds host is configured, for callers outside this module.
-///
-/// `joinblock` needs it to decide whether advertising the `/world/…` mirror is
-/// honest: the mirror answers 501 when this is false (see `proxy::world_base`).
-pub fn world_base_configured() -> bool {
-    proxy::world_base().is_some()
-}
 pub(crate) mod proxy;
+pub(crate) mod scene_logs;
 
 use crate::build::{self, BuildOptions};
 use crate::data_layer::{self, DataLayerState};
@@ -29,7 +21,7 @@ use crate::watch::{FsWatcher, WatchSession};
 use crate::workspace::Workspace;
 use anyhow::{Context, Result};
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{header, HeaderMap},
     middleware::{self, Next},
     response::Response,
@@ -47,55 +39,56 @@ use proxy::{
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+
+/// `joinblock` advertises the `/world/…` mirror only when this holds: the
+/// mirror answers 501 otherwise.
+pub fn world_base_configured() -> bool {
+    proxy::world_base().is_some()
+}
 
 pub struct StartOptions {
     pub dir: PathBuf,
     /// None picks 8000, or the next free port when 8000 is taken.
     pub port: Option<u16>,
     pub skip_build: bool,
-    /// Type checking runs beside the watch loop, not in front of it, so it never
-    /// delays a reload; this turns it off entirely.
     pub skip_type_check: bool,
     pub no_watch: bool,
     pub ignore_composite: bool,
     pub offline_comms: bool,
     pub mobile: bool,
-    /// Run the local abgen conversion sidecar. On unless --no-asset-bundles.
+    /// Run the local abgen conversion sidecar.
     pub ab_sidecar: bool,
-    /// Forward `local-ab=true` in the desktop deep link (tracks `ab_sidecar`).
-    /// The client then fetches `{realm}/optimized-assets`, which this server
-    /// proxies to the sidecar. Not an option: naming the sidecar via
-    /// `optimized-assets-url` was the old default and the launcher drops that
-    /// param before the explorer sees it.
+    /// Forward `local-ab=true` in the desktop deep link (tracks `ab_sidecar`):
+    /// the client then fetches `{realm}/optimized-assets`, which this server
+    /// proxies to the sidecar. Naming the sidecar via `optimized-assets-url`
+    /// instead does not work — the launcher drops that param.
     pub local_ab: bool,
     pub mcp: bool,
-    /// Let a non-loopback peer press Deploy. Off by default: the publish
-    /// button signs with the wallet of the machine hosting the preview, and
-    /// the port is otherwise unauthenticated.
+    /// Let a non-loopback peer press Deploy. Off by default: the button signs
+    /// with the hosting machine's wallet and the port is otherwise
+    /// unauthenticated.
     pub allow_remote_deploy: bool,
     /// Already defaulted by the caller, so the deep link and the log reader
-    /// cannot disagree about which port the client opened.
+    /// agree on the port.
     pub mcp_port: u16,
-    /// How much of the developer's source to quote around a scene error.
     pub source_context: SourceContext,
-    /// Raw tokens after a standalone `--`, forwarded into the desktop deep
-    /// link as query params.
+    /// Raw tokens after a standalone `--`, forwarded into the deep link as
+    /// query params.
     pub explorer_params: Vec<String>,
     pub data_layer: bool,
     pub tunnel: Option<String>,
     pub tunnel_token: Option<String>,
     /// Skip the authoritative-server isolate a scene.json
-    /// `authoritativeMultiplayer: true` would otherwise attach (upstream's
-    /// preview auto-starts the server role; so does this one).
+    /// `authoritativeMultiplayer: true` attaches (upstream parity).
     pub no_host: bool,
 }
 
 /// Extra source lines quoted either side of the line a scene error points at.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct SourceContext {
     pub before: u32,
     pub after: u32,
@@ -103,83 +96,83 @@ pub struct SourceContext {
 
 impl SourceContext {
     /// `--error-source-lines-context` sets both sides; the per-side flags win
-    /// over it, so `--error-source-lines-context=4 --error-source-lines-after=0`
-    /// is meaningful.
-    ///
-    /// Defaults to 0: the line that threw is the answer, and neighbours are
-    /// padding the reader has to skip past on every error.
+    /// over it. Defaults to 0: the line that threw is the answer.
     pub fn resolve(context: Option<u32>, before: Option<u32>, after: Option<u32>) -> Self {
-        const DEFAULT: u32 = 0;
         SourceContext {
-            before: before.or(context).unwrap_or(DEFAULT),
-            after: after.or(context).unwrap_or(DEFAULT),
+            before: before.or(context).unwrap_or(0),
+            after: after.or(context).unwrap_or(0),
         }
     }
 }
 
-impl Default for SourceContext {
-    fn default() -> Self {
-        SourceContext::resolve(None, None, None)
-    }
-}
-
 pub(crate) struct AppState {
-    /// Behind a lock because the landing page's editors rewrite scene.json at
-    /// runtime: every reader takes a snapshot, and `set_scene_json` /
-    /// `refresh_scene_json` are the only writers.
-    projects: std::sync::RwLock<Vec<Project>>,
+    /// Readers take a snapshot; `set_scene_json` / `refresh_scene_json` are
+    /// the only writers (the landing page's editors rewrite scene.json).
+    projects: RwLock<Vec<Project>>,
     machine: String,
     reload_tx: broadcast::Sender<ReloadFrame>,
     offline_comms: bool,
     port: u16,
     data_layer: Option<DataLayerState>,
     entity_cache: Mutex<HashMap<PathBuf, (Instant, Value)>>,
-    /// The sidecar's own address, set once abgen reports ready. This is what
-    /// `/optimized-assets/*` forwards to and what the landing page reports —
-    /// NOT something to put in a deep link; see `local_ab`.
-    optimized_assets_url: std::sync::OnceLock<String>,
-    /// Whether deep links carry `local-ab=true`. Mirrors `Opts::local_ab` so
-    /// the landing page builds the same link the terminal banner prints: with
-    /// this on, a link must NOT also name the sidecar directly, since the
-    /// explorer treats `optimized-assets-url` as an override of the
-    /// realm-derived base and the two would cancel out.
+    /// The sidecar's own address, set once abgen reports ready: what
+    /// `/optimized-assets/*` forwards to, never what a deep link names (see
+    /// `local_ab`).
+    optimized_assets_url: OnceLock<String>,
+    /// Whether deep links carry `local-ab=true`. A link must then NOT also
+    /// name the sidecar: the explorer treats `optimized-assets-url` as an
+    /// override of the realm-derived base and the two would cancel out.
     local_ab: bool,
     mcp: bool,
     mcp_port: u16,
     allow_remote_deploy: bool,
-    /// Publish as a dry run: build, pack and mint the entity id, then stop
-    /// before signing or uploading. Only the test suite sets it, and it exists
-    /// because every gate test works by BREAKING a gate — without this, a test
-    /// that neuters the token check falls through to a real deploy against a
-    /// real content server. The suite must not be one deleted line away from
-    /// publishing.
+    /// Publish stops before signing or uploading. Only the test suite sets
+    /// it: every gate test works by BREAKING a gate, so without this a test
+    /// would fall through to a real deploy against a real content server.
     deploy_dry_run: bool,
     explorer_params: Vec<String>,
     /// Ring buffer of the latest requests, shown on the landing page.
     recent_requests: Mutex<VecDeque<(String, u16, Instant)>>,
-    /// The publish run, its signer, and the /deploy caches.
     deploy: deploy_page::DeployState,
 }
 
 impl AppState {
-    /// A snapshot, not a guard: no handler holds the lock across an await, and
-    /// the vec is a handful of small documents.
+    /// Everything off; each mode sets the fields it needs.
+    fn new(projects: Vec<Project>, port: u16, reload_tx: broadcast::Sender<ReloadFrame>) -> Self {
+        AppState {
+            projects: RwLock::new(projects),
+            machine: machine_id(),
+            reload_tx,
+            offline_comms: false,
+            port,
+            data_layer: None,
+            entity_cache: Mutex::new(HashMap::new()),
+            optimized_assets_url: OnceLock::new(),
+            local_ab: false,
+            mcp: false,
+            mcp_port: joinblock::DEFAULT_EXPLORER_MCP_PORT,
+            allow_remote_deploy: false,
+            deploy_dry_run: false,
+            explorer_params: Vec::new(),
+            recent_requests: Mutex::new(VecDeque::new()),
+            deploy: deploy_page::DeployState::default(),
+        }
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, Vec<Project>> {
+        self.projects.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A snapshot, not a guard: no handler holds the lock across an await.
     fn projects(&self) -> Vec<Project> {
-        self.projects
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.read().clone()
     }
 
     fn first_project(&self) -> Option<Project> {
-        self.projects
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .first()
-            .cloned()
+        self.read().first().cloned()
     }
 
-    fn set_scene_json(&self, root: &std::path::Path, scene_json: Value) {
+    fn set_scene_json(&self, root: &Path, scene_json: Value) {
         let mut projects = self
             .projects
             .write()
@@ -189,10 +182,9 @@ impl AppState {
         }
     }
 
-    /// Re-read scene.json off disk, keeping the last good copy through a
-    /// mid-edit syntax error. Called on every watch batch, so a hand edit
-    /// reaches the landing page and the entity metadata like a page edit does.
-    fn refresh_scene_json(&self, root: &std::path::Path) {
+    /// Re-read scene.json off disk on every watch batch, keeping the last good
+    /// copy through a mid-edit syntax error.
+    fn refresh_scene_json(&self, root: &Path) {
         if let Ok(bytes) = std::fs::read(root.join("scene.json")) {
             if let Ok(scene_json) = serde_json::from_slice(&bytes) {
                 self.set_scene_json(root, scene_json);
@@ -201,54 +193,88 @@ impl AppState {
     }
 }
 
-async fn scene_route(
-    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
-) -> Response {
+async fn scene_route(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     landing::scene_page(&st, &headers)
 }
 
-/// One `AppState` for every test in this tree — the per-test differences are
-/// field mutations at the call site, so a new field is added exactly once.
+/// Shared fixtures for every test under `start`.
 #[cfg(test)]
 pub(crate) mod testkit {
     use super::*;
+    use serde_json::json;
 
+    /// The per-test differences are field mutations at the call site.
     pub(crate) fn state(projects: Vec<Project>) -> AppState {
-        let (reload_tx, _) = broadcast::channel(4);
-        AppState {
-            projects: std::sync::RwLock::new(projects),
-            machine: "test-machine".to_string(),
-            reload_tx,
-            offline_comms: true,
-            port: 0,
-            data_layer: None,
-            entity_cache: Mutex::new(HashMap::new()),
-            optimized_assets_url: std::sync::OnceLock::new(),
-            local_ab: true,
-            mcp: true,
-            mcp_port: crate::joinblock::DEFAULT_EXPLORER_MCP_PORT,
-            allow_remote_deploy: false,
-            deploy_dry_run: true,
-            explorer_params: Vec::new(),
-            recent_requests: Mutex::new(VecDeque::new()),
-            deploy: deploy_page::DeployState::default(),
+        let mut st = AppState::new(projects, 0, broadcast::channel(4).0);
+        st.machine = "test-machine".to_string();
+        st.offline_comms = true;
+        st.local_ab = true;
+        st.mcp = true;
+        st.deploy_dry_run = true;
+        st
+    }
+
+    /// A fresh temp dir, removed on drop.
+    pub(crate) struct Tmp(pub(crate) PathBuf);
+
+    impl Tmp {
+        pub(crate) fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "dcl-one-sdk-start-{tag}-{}-{:x}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Tmp(dir)
         }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A one-file scene at `<dir>/<name>` whose `bin/index.js` holds `body`.
+    pub(crate) fn scene(dir: &Path, name: &str, parcels: &[&str], body: &str) -> Project {
+        let scene_json = json!({
+            "main": "bin/index.js",
+            "runtimeVersion": "7",
+            "scene": { "parcels": parcels, "base": parcels[0] }
+        });
+        project_with(dir, name, scene_json, body)
+    }
+
+    pub(crate) fn project_with(dir: &Path, name: &str, scene_json: Value, body: &str) -> Project {
+        let root = dir.join(name);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/index.js"), body).unwrap();
+        std::fs::write(root.join("scene.json"), scene_json.to_string()).unwrap();
+        Project {
+            root: root.canonicalize().unwrap(),
+            scene_json,
+        }
+    }
+
+    pub(crate) async fn body_text(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 }
 
 /// Refuses a mutating request whose peer is not this machine: a loopback
 /// socket that is a tunnel replay counts as remote (the agent stamps
 /// [`crate::tunnel::FORWARDED_HEADER`]).
-fn remote_peer(allow_remote: bool, peer: std::net::SocketAddr, headers: &HeaderMap) -> bool {
+fn remote_peer(allow_remote: bool, peer: SocketAddr, headers: &HeaderMap) -> bool {
     !allow_remote
         && (headers.contains_key(crate::tunnel::FORWARDED_HEADER) || !peer.ip().is_loopback())
 }
 
-/// The same-origin half of the write gate: `Sec-Fetch-Site` when the browser
-/// sends it, then `Origin` against `Host`. One copy, because the routes that
-/// mutate (scene edits, the publish POST, the signature POST) must agree on
-/// what "our own page" means.
+/// The same-origin half of the write gate, shared by every mutating route:
+/// `Sec-Fetch-Site` when the browser sends it, then `Origin` against `Host`.
 fn cross_origin_refusal(headers: &HeaderMap) -> Option<&'static str> {
     const WHY: &str = "this request did not come from the preview's own page";
     if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
@@ -268,26 +294,18 @@ fn cross_origin_refusal(headers: &HeaderMap) -> Option<&'static str> {
     None
 }
 
-/// The buffer is what bounds what is held; `RECENT_REQUESTS_SHOWN` bounds what
-/// is drawn. A few hundred short lines is nothing to hold and covers a whole
-/// scene load, which is the run someone opening the drawer reads it to
-/// understand.
+/// Bounds what is held; `RECENT_REQUESTS_SHOWN` bounds what is drawn. A few
+/// hundred lines covers a whole scene load.
 const RECENT_REQUESTS_CAP: usize = 200;
 
-/// How much of a request path the log keeps.
-///
-/// The path is a string a stranger chose — any LAN or tunnel peer can put one
-/// in this buffer just by asking for it — and `RECENT_REQUESTS_CAP` of them are
-/// held in memory and re-rendered into every page this server serves. Without a
-/// cap, one request with a 7000-character path is retained and echoed whole,
-/// and 200 of them are megabytes of attacker-chosen text on every render. A
-/// real path is a scene file; anything longer is not information the reader
-/// loses by having it cut.
+/// A path is attacker-chosen (any LAN or tunnel peer can log one just by
+/// asking), retained `RECENT_REQUESTS_CAP` times over and re-rendered into
+/// every page, so it is cut on the way in. A real path is a scene file.
 const MAX_LOGGED_PATH: usize = 120;
 
 const ENTITY_CACHE_TTL: Duration = Duration::from_millis(500);
 
-fn lock_cache(st: &AppState) -> std::sync::MutexGuard<'_, HashMap<PathBuf, (Instant, Value)>> {
+fn lock_cache(st: &AppState) -> MutexGuard<'_, HashMap<PathBuf, (Instant, Value)>> {
     st.entity_cache
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -301,7 +319,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         .transpose()?;
     let workspace = Workspace::load(&opts.dir)?;
     let first = workspace.projects[0].clone();
-    crate::deploy::sticky_default_target(&first.root);
+    crate::deploy::forget_remembered_target(&first.root);
     let (port, listener) = bind_preview_port(opts.port).await?;
 
     let data_layer = if opts.data_layer {
@@ -321,25 +339,15 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         None
     };
 
-    let (reload_tx, _) = broadcast::channel::<ReloadFrame>(32);
-    let state = Arc::new(AppState {
-        projects: std::sync::RwLock::new(workspace.projects.clone()),
-        machine: machine_id(),
-        reload_tx: reload_tx.clone(),
-        offline_comms: opts.offline_comms,
-        port,
-        data_layer,
-        entity_cache: Mutex::new(HashMap::new()),
-        optimized_assets_url: std::sync::OnceLock::new(),
-        local_ab: opts.local_ab,
-        mcp: opts.mcp,
-        mcp_port: opts.mcp_port,
-        allow_remote_deploy: opts.allow_remote_deploy,
-        deploy_dry_run: false,
-        explorer_params: opts.explorer_params.clone(),
-        recent_requests: Mutex::new(VecDeque::new()),
-        deploy: deploy_page::DeployState::default(),
-    });
+    let mut state = AppState::new(workspace.projects.clone(), port, broadcast::channel(32).0);
+    state.offline_comms = opts.offline_comms;
+    state.data_layer = data_layer;
+    state.local_ab = opts.local_ab;
+    state.mcp = opts.mcp;
+    state.mcp_port = opts.mcp_port;
+    state.allow_remote_deploy = opts.allow_remote_deploy;
+    state.explorer_params = opts.explorer_params.clone();
+    let state = Arc::new(state);
     match scene_log_port(opts.mcp, opts.mcp_port, port) {
         Some(mcp_port) => {
             scene_logs::spawn(mcp_port, workspace.projects.clone(), opts.source_context)
@@ -351,9 +359,9 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     let comms_state = Arc::new(crate::comms::CommsState::default());
 
     let mut steps = if workspace.is_multi() {
-        prepare_members(&opts, &workspace, &state, &reload_tx).await?
+        prepare_members(&opts, &workspace, &state).await?
     } else {
-        prepare_single(&opts, first.clone(), &state, &reload_tx).await?
+        prepare_single(&opts, first.clone(), &state).await?
     };
 
     let app = build_router(state.clone(), comms_state);
@@ -393,24 +401,30 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     let local_ab = opts.local_ab;
     let tunnel_token = opts.tunnel_token.clone();
     tokio::spawn(async move {
-        let optimized_assets_url = match sidecar.as_mut() {
-            Some(s) => {
-                if s.wait_ready().await {
-                    ux::note_arrow(format!(
-                        "Selected abgen backend: {} at {}",
-                        s.backend_label(),
-                        s.url
-                    ));
-                    let _ = banner_state.optimized_assets_url.set(s.url.clone());
-                    Some(s.url.clone())
-                } else {
-                    None
-                }
+        let mut optimized_assets_url = None;
+        if let Some(s) = sidecar.as_mut() {
+            if s.wait_ready().await {
+                ux::note_arrow(format!(
+                    "Selected abgen backend: {} at {}",
+                    s.backend_label(),
+                    s.url
+                ));
+                let _ = banner_state.optimized_assets_url.set(s.url.clone());
+                optimized_assets_url = Some(s.url.clone());
             }
-            None => None,
-        };
+        }
         let ifaces = netinfo::enumerate();
         let unreachable = probe_unreachable(&ifaces, port).await;
+        // The terminal link carries the same fresh-page defaults the
+        // join card starts with; they ride AFTER the user's own
+        // params, so an explicit `--multi-instance=false` still wins
+        // the dedup.
+        let mut params = banner_state.explorer_params.clone();
+        params.extend(
+            landing::DEFAULT_ON
+                .iter()
+                .map(|flag| format!("--{flag}=true")),
+        );
         let block = JoinBlock {
             title: joinblock::scene_title(&scene_json),
             position: joinblock::base_coords(&scene_json),
@@ -426,17 +440,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
                 banner_state.local_ab,
                 banner_state.mcp,
                 banner_state.mcp.then_some(banner_state.mcp_port),
-                // The terminal link carries the same fresh-page defaults the
-                // join card starts with; they ride AFTER the user's own
-                // params, so an explicit `--multi-instance=false` still wins
-                // the dedup.
-                &{
-                    let mut params = banner_state.explorer_params.clone();
-                    for flag in landing::DEFAULT_ON {
-                        params.push(format!("--{flag}=true"));
-                    }
-                    params
-                },
+                &params,
             ),
             native_hud: true,
             native_bin: joinblock::detect_native_bin(),
@@ -465,7 +469,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     let result = tokio::select! {
         r = axum::serve(
             listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            app.into_make_service_with_connect_info::<SocketAddr>(),
         ) => r.context("serving"),
         _ = shutdown_signal() => Ok(()),
     };
@@ -473,15 +477,12 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     result
 }
 
-/// A CLI publish waiting on its wallet signature, served as the preview
-/// interface rather than a one-off page: the printed URL is /deploy, which
-/// carries the signing panel beside the payload and its alarms while the
-/// signature is pending — and the server under it is the normal one, so the
-/// scene about to go up can be walked from the same origin while you decide.
-/// Resolves when the signature lands or the wait runs out, and the server
-/// goes down with it.
+/// A CLI publish waiting on its wallet signature, served as the normal preview
+/// server: the printed URL is /deploy, which carries the signing panel, and the
+/// scene about to go up can be walked from the same origin meanwhile. Resolves
+/// when the signature lands or the wait runs out.
 pub(crate) async fn serve_signing(
-    dir: &std::path::Path,
+    dir: &Path,
     port: Option<u16>,
     open_browser: bool,
     timeout: Duration,
@@ -490,29 +491,10 @@ pub(crate) async fn serve_signing(
 ) -> Result<String> {
     let workspace = Workspace::load(dir)?;
     let (port, listener) = bind_preview_port(port).await?;
-    // DCL_ONE_SDK_LINKER_HOST=0.0.0.0 keeps its old meaning: sign from
-    // another device. The listener is bound wide either way (it is the normal
-    // preview listener); the env var opens the signing gate.
     let allow_remote = crate::linker::linker_bind_host() != "127.0.0.1";
-    let (reload_tx, _) = broadcast::channel::<ReloadFrame>(32);
-    let state = Arc::new(AppState {
-        projects: std::sync::RwLock::new(workspace.projects.clone()),
-        machine: machine_id(),
-        reload_tx,
-        offline_comms: false,
-        port,
-        data_layer: None,
-        entity_cache: Mutex::new(HashMap::new()),
-        optimized_assets_url: std::sync::OnceLock::new(),
-        local_ab: false,
-        mcp: false,
-        mcp_port: joinblock::DEFAULT_EXPLORER_MCP_PORT,
-        allow_remote_deploy: allow_remote,
-        deploy_dry_run: false,
-        explorer_params: Vec::new(),
-        recent_requests: Mutex::new(VecDeque::new()),
-        deploy: deploy_page::DeployState::default(),
-    });
+    let mut state = AppState::new(workspace.projects.clone(), port, broadcast::channel(32).0);
+    state.allow_remote_deploy = allow_remote;
+    let state = Arc::new(state);
     deploy_page::adopt_cli_signing(&state, signer);
     let app = build_router(state, Arc::new(crate::comms::CommsState::default()));
     let url = format!("http://localhost:{port}/deploy");
@@ -532,7 +514,7 @@ pub(crate) async fn serve_signing(
     }
     let serve = axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     );
     tokio::select! {
         r = serve => {
@@ -548,7 +530,7 @@ pub(crate) async fn serve_signing(
 }
 
 /// The line the watch session re-floats: the address someone else on the
-/// network can actually reach, not the loopback one they cannot.
+/// network can reach, not the loopback one.
 fn session_note(port: u16) -> String {
     let host = netinfo::share_ip(&netinfo::enumerate())
         .map(|ip| ip.to_string())
@@ -556,12 +538,8 @@ fn session_note(port: u16) -> String {
     format!("you are running the dcl-one-sdk at http://{host}:{port}")
 }
 
-/// Everything this server answers, in one place a test can drive.
-///
-/// Built here rather than inline in `start` so the routing table is reachable
-/// without a scene build, a watcher and a tunnel: a route registered but never
-/// fetched is a page whose disappearance no test can notice, and every page
-/// this server draws carries a header button pointing at `/deploy`.
+/// Everything this server answers, reachable by a test without a scene build,
+/// a watcher and a tunnel.
 fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>) -> Router {
     Router::new()
         .route("/", get(root))
@@ -579,10 +557,7 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
         .route("/lambdas/{*path}", any(catalyst_proxy))
         .route("/explorer/{*path}", any(catalyst_proxy))
         .route("/world/{name}/about", get(world_about))
-        .route(
-            "/optimized-assets/{*path}",
-            any(crate::start::proxy::optimized_assets),
-        )
+        .route("/optimized-assets/{*path}", any(proxy::optimized_assets))
         .route(
             "/world-content/{name}/contents/{hash}",
             get(world_content).head(world_content),
@@ -613,33 +588,25 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
         .layer(middleware::from_fn_with_state(state, access_log))
 }
 
-/// The `optimized-assets-url` the join block should advertise, given whether the
-/// deep link already carries `local-ab=true`.
-///
-/// The two are alternatives, never both: the explorer treats
-/// `optimized-assets-url` as an OVERRIDE of the realm-derived base
-/// (`DecentralandUrlsSource::ResolveOptimizedAssetsUrl`), so emitting it
-/// alongside `local-ab=true` would silently defeat the flag. Since `local_ab`
-/// now tracks the sidecar, in practice this returns None whenever there is a
-/// sidecar at all — but the pairing is what matters, so it stays explicit.
+/// The `optimized-assets-url` the join block advertises. Never alongside
+/// `local-ab=true`: the explorer treats it as an OVERRIDE of the realm-derived
+/// base (`DecentralandUrlsSource::ResolveOptimizedAssetsUrl`), so the pair
+/// would silently defeat the flag.
 fn banner_ab_url(local_ab: bool, sidecar_url: Option<String>) -> Option<String> {
-    match local_ab {
-        true => None,
-        false => sidecar_url,
+    if local_ab {
+        None
+    } else {
+        sidecar_url
     }
 }
 
 /// The scene-log poller POSTs `127.0.0.1:{mcp_port}` every 700ms; when that
-/// port IS this server (`start --port 8123`), the loop would 404 against
-/// itself and fill the request log — skipped and reported instead.
+/// port IS this server (`start --port 8123`) it would 404 against itself and
+/// fill the request log, so it is skipped and reported instead.
 fn scene_log_port(mcp: bool, mcp_port: u16, server_port: u16) -> Option<u16> {
-    match mcp && mcp_port != server_port {
-        true => Some(mcp_port),
-        false => None,
-    }
+    (mcp && mcp_port != server_port).then_some(mcp_port)
 }
 
-/// What to print when the client's MCP port is this server's own port.
 fn mcp_port_clash(port: u16) -> UserError {
     let other = port.saturating_add(1).max(1024);
     UserError::new(
@@ -664,25 +631,20 @@ fn mcp_port_clash(port: u16) -> UserError {
 /// Resolves on SIGINT (ctrl-c) or, on unix, SIGTERM.
 async fn shutdown_signal() {
     #[cfg(unix)]
-    {
-        let mut term =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-        let term = async {
-            match term.as_mut() {
-                Some(t) => {
-                    t.recv().await;
-                }
-                None => std::future::pending().await,
+    let term = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()).ok() {
+            Some(mut t) => {
+                t.recv().await;
             }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term => {}
+            None => std::future::pending().await,
         }
-    }
+    };
     #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term => {}
     }
 }
 
@@ -732,8 +694,8 @@ fn spawn_tunnel_printer(
     });
 }
 
-/// The `BuildOptions` every preview build uses: never production/minified, entry point always
-/// generated (never the scene's own `main`), differing only in which project dir to build.
+/// Preview builds are never production/minified and always use the generated
+/// entry point, never the scene's own `main`.
 fn preview_build_opts(opts: &StartOptions, dir: PathBuf) -> BuildOptions {
     BuildOptions {
         dir,
@@ -746,39 +708,56 @@ fn preview_build_opts(opts: &StartOptions, dir: PathBuf) -> BuildOptions {
     }
 }
 
-async fn prepare_single(
+/// How many `steps` an initial build reports.
+fn build_chunk(opts: &StartOptions) -> usize {
+    if opts.skip_build {
+        0
+    } else {
+        3
+    }
+}
+
+/// Build once under --no-watch; otherwise start the watch loop for `project`.
+async fn build_or_watch(
     opts: &StartOptions,
     project: Project,
+    build_dir: PathBuf,
+    scene: String,
+    steps: &mut ux::Steps,
     state: &Arc<AppState>,
-    reload_tx: &broadcast::Sender<ReloadFrame>,
-) -> Result<ux::Steps> {
-    let build_opts = preview_build_opts(opts, opts.dir.clone());
-
-    let total = if opts.no_watch {
-        1
-    } else {
-        let chunk = if opts.skip_build { 0 } else { 3 };
-        chunk + 2
-    };
-    let mut steps = ux::Steps::new(total);
-
+) -> Result<()> {
+    let build_opts = preview_build_opts(opts, build_dir);
     if opts.no_watch {
         if !opts.skip_build {
             build::build(&build_opts).await?;
         }
+        return Ok(());
+    }
+    watch_or_retry(
+        project,
+        build_opts,
+        !opts.skip_build,
+        steps,
+        scene,
+        state.clone(),
+    )
+    .await
+}
+
+async fn prepare_single(
+    opts: &StartOptions,
+    project: Project,
+    state: &Arc<AppState>,
+) -> Result<ux::Steps> {
+    let total = if opts.no_watch {
+        1
     } else {
-        let root = project.root.clone();
-        let scene = b64_hash(&root.display().to_string(), &state.machine);
-        watch_or_retry(
-            project,
-            build_opts,
-            !opts.skip_build,
-            &mut steps,
-            scene,
-            state.clone(),
-            reload_tx.clone(),
-        )
-        .await?;
+        build_chunk(opts) + 2
+    };
+    let mut steps = ux::Steps::new(total);
+    let scene = b64_hash(&project.root.display().to_string(), &state.machine);
+    build_or_watch(opts, project, opts.dir.clone(), scene, &mut steps, state).await?;
+    if !opts.no_watch {
         steps.done("Watching for changes");
     }
     Ok(steps)
@@ -788,47 +767,34 @@ async fn prepare_members(
     opts: &StartOptions,
     workspace: &Workspace,
     state: &Arc<AppState>,
-    reload_tx: &broadcast::Sender<ReloadFrame>,
 ) -> Result<ux::Steps> {
     for (i, project) in workspace.projects.iter().enumerate() {
         if let Some(header) = workspace.member_header(i) {
             ux::note(header);
         }
-        let build_opts = preview_build_opts(opts, project.root.clone());
-        if opts.no_watch {
-            if !opts.skip_build {
-                build::build(&build_opts).await?;
-            }
-            continue;
-        }
-        let chunk = if opts.skip_build { 0 } else { 3 };
-        let mut steps = ux::Steps::new(chunk);
+        let mut steps = ux::Steps::new(build_chunk(opts));
         let scene = scene_id_for(project, &state.machine);
-        watch_or_retry(
+        build_or_watch(
+            opts,
             project.clone(),
-            build_opts,
-            !opts.skip_build,
-            &mut steps,
+            project.root.clone(),
             scene,
-            state.clone(),
-            reload_tx.clone(),
+            &mut steps,
+            state,
         )
         .await?;
     }
-    if opts.no_watch {
-        Ok(ux::Steps::new(1))
-    } else {
-        let mut steps = ux::Steps::new(2);
+    let mut steps = ux::Steps::new(if opts.no_watch { 1 } else { 2 });
+    if !opts.no_watch {
         steps.done("Watching for changes");
-        Ok(steps)
     }
+    Ok(steps)
 }
 
-/// Start the watch loop for one project. A failed INITIAL build must not kill
-/// `start`: the server can still serve and the watcher is what picks up the
-/// fix, so scene-content errors get the same report-and-recover contract
-/// re-builds have always had. Config errors (scene.json main, tsconfig) stay
-/// fatal, pre-checked here — upstream dies on those before bundling too.
+/// A failed INITIAL build must not kill `start`: the server still serves and
+/// the watcher picks up the fix, like every re-build. Config errors
+/// (scene.json main, tsconfig) stay fatal, pre-checked here — upstream dies on
+/// those before bundling too.
 async fn watch_or_retry(
     project: Project,
     build_opts: BuildOptions,
@@ -836,7 +802,6 @@ async fn watch_or_retry(
     steps: &mut ux::Steps,
     scene: String,
     state: Arc<AppState>,
-    tx: broadcast::Sender<ReloadFrame>,
 ) -> Result<()> {
     project.main_output()?;
     project.tsconfig()?;
@@ -844,7 +809,7 @@ async fn watch_or_retry(
     let root = project.root.clone();
     match WatchSession::create(project.clone(), &build_opts, initial_build, steps).await {
         Ok(session) => {
-            tokio::spawn(run_watch(session, fs, root, scene, state, tx));
+            tokio::spawn(run_watch(session, fs, root, scene, state));
         }
         Err(e) => {
             report_initial_failure(&e);
@@ -856,16 +821,14 @@ async fn watch_or_retry(
                 root,
                 scene,
                 state,
-                tx,
             ));
         }
     }
     Ok(())
 }
 
-/// Reports the build error itself (matching the re-build loop, so the compiler
-/// diagnostic in the inner UserError's `why` is preserved) before noting that
-/// the session survived it.
+/// Reports the build error the way the re-build loop does (keeping the
+/// compiler diagnostic in the inner `why`), then that the session survived it.
 fn report_initial_failure(e: &anyhow::Error) {
     ux::report_watch(e);
     ux::note(
@@ -873,11 +836,8 @@ fn report_initial_failure(e: &anyhow::Error) {
     );
 }
 
-/// The recover half of the initial-build contract: every watch batch retries
-/// the initial build (with the same skip-build choice the session started
-/// with) until one succeeds, then hands the watcher to the normal re-build
-/// loop.
-#[allow(clippy::too_many_arguments)]
+/// Every watch batch retries the initial build (with the session's skip-build
+/// choice) until one succeeds, then hands the watcher to the normal loop.
 async fn retry_initial_build(
     project: Project,
     build_opts: BuildOptions,
@@ -886,7 +846,6 @@ async fn retry_initial_build(
     root: PathBuf,
     scene: String,
     state: Arc<AppState>,
-    tx: broadcast::Sender<ReloadFrame>,
 ) {
     loop {
         if fs.next_batch().await.is_none() {
@@ -895,8 +854,8 @@ async fn retry_initial_build(
         let mut steps = ux::Steps::new(if initial_build { 3 } else { 0 });
         match WatchSession::create(project.clone(), &build_opts, initial_build, &mut steps).await {
             Ok(session) => {
-                notify_reload(&root, &scene, &state, &tx, ReloadEvent::Scene);
-                run_watch(session, fs, root, scene, state, tx).await;
+                notify_reload(&root, &scene, &state, ReloadEvent::Scene);
+                run_watch(session, fs, root, scene, state).await;
                 return;
             }
             Err(e) => report_initial_failure(&e),
@@ -904,22 +863,16 @@ async fn retry_initial_build(
     }
 }
 
-/// Push the change and say what it achieved: the client routes UpdateModel
-/// and UpdateScene alike into TryReloadSceneAsync, so an asset save reloads
-/// the whole scene, and `send`'s receiver count is the difference between
-/// "reloaded" and "nothing was listening".
-fn notify_reload(
-    root: &std::path::Path,
-    scene: &str,
-    state: &AppState,
-    tx: &broadcast::Sender<ReloadFrame>,
-    event: ReloadEvent,
-) {
+/// Push the change and say what it achieved. The client routes UpdateModel and
+/// UpdateScene alike into TryReloadSceneAsync, so an asset save reloads the
+/// whole scene; `send`'s receiver count tells "reloaded" from "nobody
+/// listening".
+fn notify_reload(root: &Path, scene: &str, state: &AppState, event: ReloadEvent) {
     state.refresh_scene_json(root);
     lock_cache(state).remove(root);
     let mut clients = 0;
     for frame in live_reload::reload_frames(root, scene, &state.machine, &event) {
-        clients = tx.send(frame).unwrap_or(0);
+        clients = state.reload_tx.send(frame).unwrap_or(0);
     }
     match clients {
         0 => ux::note_absent(reload_note(0)),
@@ -928,7 +881,6 @@ fn notify_reload(
     tracing::info!("scene update pushed to {clients} client(s)");
 }
 
-/// What the push actually achieved, in the words the reader needs.
 fn reload_note(clients: usize) -> String {
     match clients {
         0 => "no client connected".to_string(),
@@ -943,11 +895,10 @@ async fn run_watch(
     root: PathBuf,
     scene: String,
     state: Arc<AppState>,
-    tx: broadcast::Sender<ReloadFrame>,
 ) {
     let notify = {
         let root = root.clone();
-        move |event: ReloadEvent| notify_reload(&root, &scene, &state, &tx, event)
+        move |event: ReloadEvent| notify_reload(&root, &scene, &state, event)
     };
     if let Err(e) = session.run(fs, notify).await {
         tracing::error!("watch loop stopped: {e:#}");
@@ -984,24 +935,21 @@ async fn probe_unreachable(ifaces: &[Iface], port: u16) -> Vec<std::net::Ipv4Add
     out
 }
 
-/// Bind the preview listener. An explicit port must bind exactly (the error
-/// explains the conflict); the default scans 8000 upward and falls back to an
-/// ephemeral port, so `start` never dies just because 8000 is taken.
-async fn bind_preview_port(
-    requested: Option<u16>,
-) -> Result<(u16, tokio::net::TcpListener), anyhow::Error> {
+/// An explicit port must bind exactly; the default scans 8000 upward and
+/// falls back to an ephemeral port, so `start` never dies because 8000 is
+/// taken.
+async fn bind_preview_port(requested: Option<u16>) -> Result<(u16, tokio::net::TcpListener)> {
     const DEFAULT_PORT: u16 = 8000;
     const SCAN: u16 = 20;
+    let wide = |port: u16| SocketAddr::from(([0, 0, 0, 0], port));
     if let Some(port) = requested {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        return match tokio::net::TcpListener::bind(addr).await {
+        return match tokio::net::TcpListener::bind(wide(port)).await {
             Ok(l) => Ok((port, l)),
-            Err(e) => Err(bind_error(port, addr, e)),
+            Err(e) => Err(bind_error(port, wide(port), e)),
         };
     }
     for port in DEFAULT_PORT..DEFAULT_PORT + SCAN {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        match tokio::net::TcpListener::bind(addr).await {
+        match tokio::net::TcpListener::bind(wide(port)).await {
             Ok(l) => {
                 if port != DEFAULT_PORT {
                     ux::note(format!("port {DEFAULT_PORT} is busy — serving on {port}"));
@@ -1009,13 +957,12 @@ async fn bind_preview_port(
                 return Ok((port, l));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
-            Err(e) => return Err(bind_error(port, addr, e)),
+            Err(e) => return Err(bind_error(port, wide(port), e)),
         }
     }
-    let addr = SocketAddr::from(([0, 0, 0, 0], 0));
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = tokio::net::TcpListener::bind(wide(0))
         .await
-        .map_err(|e| bind_error(0, addr, e))?;
+        .map_err(|e| bind_error(0, wide(0), e))?;
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     ux::note(format!(
         "ports {DEFAULT_PORT}\u{2013}{} are busy — serving on {port}",
@@ -1049,11 +996,7 @@ fn bind_error(port: u16, addr: SocketAddr, e: std::io::Error) -> anyhow::Error {
     }
 }
 
-async fn access_log(
-    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn access_log(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let resp = next.run(req).await;
@@ -1070,9 +1013,7 @@ async fn access_log(
     resp
 }
 
-/// The one line the request log keeps for a request, cut to
-/// [`MAX_LOGGED_PATH`] on a char boundary so a multi-byte path is trimmed
-/// rather than split.
+/// The request's log line, cut to [`MAX_LOGGED_PATH`] on a char boundary.
 fn log_line(method: &axum::http::Method, path: &str) -> String {
     if path.len() <= MAX_LOGGED_PATH {
         return format!("{method} {path}");
@@ -1084,9 +1025,7 @@ fn log_line(method: &axum::http::Method, path: &str) -> String {
     format!("{method} {}\u{2026}", &path[..cut])
 }
 
-/// Push one line into the ring buffer, dropping the oldest past the cap. A
-/// poisoned lock loses the line rather than the request: nothing here is worth
-/// failing a response over.
+/// A poisoned lock loses the line rather than the request.
 fn record_request(st: &AppState, line: String, status: u16) {
     if let Ok(mut recent) = st.recent_requests.lock() {
         recent.push_back((line, status, Instant::now()));

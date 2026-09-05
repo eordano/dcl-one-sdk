@@ -1,4 +1,4 @@
-use crate::ux::{self, TrySteps, UserError};
+use crate::ux::{self, write_error, TrySteps, UserError};
 use anyhow::{Context, Result};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -45,6 +45,8 @@ const SW_INDEX_TS: &str = include_str!("templates/init/smart-wearable/index.ts")
 const SW_README: &str = include_str!("templates/init/smart-wearable/README.md");
 const VENDORED_NODE_MODULES: &[u8] = include_bytes!("vendor/node_modules.zip");
 
+const INSTALLED_NOTE: &str = "Installed node_modules from the vendored SDK — no npm needed";
+
 pub fn init(opts: &InitOptions) -> Result<()> {
     if opts.node_modules_only {
         let root = dunce::canonicalize(&opts.dir).map_err(|e| {
@@ -55,11 +57,10 @@ pub fn init(opts: &InitOptions) -> Result<()> {
             .caused_by(e)
         })?;
         let mut steps = ux::Steps::new(1);
-        if install_vendored_node_modules(&root)? {
-            steps.done("Installed node_modules from the vendored SDK — no npm needed");
-        } else {
-            steps.done("node_modules already exists — nothing to do");
-        }
+        steps.done(match install_vendored_node_modules(&root)? {
+            true => INSTALLED_NOTE,
+            false => "node_modules already exists — nothing to do",
+        });
         return Ok(());
     }
     let root = prepare_dir(&opts.dir, opts.yes)?;
@@ -76,11 +77,10 @@ pub fn init(opts: &InitOptions) -> Result<()> {
         display_dir(&opts.dir),
         files.len()
     ));
-    if install_vendored_node_modules(&root)? {
-        steps.done("Installed node_modules from the vendored SDK — no npm needed");
-    } else {
-        steps.done("Kept the existing node_modules");
-    }
+    steps.done(match install_vendored_node_modules(&root)? {
+        true => INSTALLED_NOTE,
+        false => "Kept the existing node_modules",
+    });
     steps.done("Next steps:");
     if opts.dir != Path::new(".") {
         ux::note(format!("  cd {}", display_dir(&opts.dir)));
@@ -110,10 +110,8 @@ fn install_vendored_node_modules(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Is a full `@dcl/inspector` (the one with the editor UI) already present?
-///
-/// The base blob ships a small stand-in that only implements the crdt dump, so
-/// presence of the directory is not enough — the UI bundle is what decides.
+/// Is a full `@dcl/inspector` (with the editor UI) present? The base blob ships
+/// a stand-in that only implements the crdt dump, so the UI bundle decides.
 pub fn has_full_inspector(root: &Path) -> bool {
     root.join("node_modules/@dcl/inspector/public/index.html")
         .is_file()
@@ -221,84 +219,52 @@ pub fn scaffold_files(kind: ProjectKind, title: &str) -> Vec<FileSpec> {
             .replace("{{TITLE}}", title)
             .replace("{{DESCRIPTION}}", description)
             .replace("{{SLUG}}", &slug)
-            .into_bytes()
     };
-    match kind {
-        ProjectKind::Scene => vec![
-            FileSpec {
-                rel: "scene.json",
-                body: sub(SCENE_SCENE_JSON),
-            },
-            FileSpec {
-                rel: "package.json",
-                body: sub(SCENE_PACKAGE_JSON),
-            },
-            FileSpec {
-                rel: "tsconfig.json",
-                body: SCENE_TSCONFIG.as_bytes().to_vec(),
-            },
-            FileSpec {
-                rel: "src/index.ts",
-                body: sub(SCENE_INDEX_TS),
-            },
-            FileSpec {
-                rel: ".gitignore",
-                body: SCENE_GITIGNORE.as_bytes().to_vec(),
-            },
-            FileSpec {
-                rel: ".dclignore",
-                body: SCENE_DCLIGNORE.as_bytes().to_vec(),
-            },
-            FileSpec {
-                rel: "README.md",
-                body: sub(SCENE_README),
-            },
-            FileSpec {
-                rel: "images/scene-thumbnail.png",
-                body: SCENE_THUMBNAIL.to_vec(),
-            },
-        ],
-        ProjectKind::SmartWearable => vec![
-            FileSpec {
-                rel: "wearable.json",
-                body: String::from_utf8(sub(SW_WEARABLE_JSON))
-                    .expect("wearable template is utf8")
-                    .replace("{{ID}}", &uuid_v4())
-                    .into_bytes(),
-            },
-            FileSpec {
-                rel: "scene.json",
-                body: String::from_utf8(sub(SW_SCENE_JSON))
-                    .expect("scene template is utf8")
-                    .replace("{{PARCELS}}", &parcel_grid(10, 10))
-                    .into_bytes(),
-            },
-            FileSpec {
-                rel: "package.json",
-                body: sub(SW_PACKAGE_JSON),
-            },
-            FileSpec {
-                rel: "tsconfig.json",
-                body: SCENE_TSCONFIG.as_bytes().to_vec(),
-            },
-            FileSpec {
-                rel: "src/index.ts",
-                body: sub(SW_INDEX_TS),
-            },
-            FileSpec {
-                rel: ".gitignore",
-                body: SCENE_GITIGNORE.as_bytes().to_vec(),
-            },
-            FileSpec {
-                rel: ".dclignore",
-                body: SCENE_DCLIGNORE.as_bytes().to_vec(),
-            },
-            FileSpec {
-                rel: "README.md",
-                body: sub(SW_README),
-            },
-        ],
+    let file = |rel, body: String| FileSpec {
+        rel,
+        body: body.into_bytes(),
+    };
+    let raw = |rel, body: &str| file(rel, body.to_string());
+    let (head, index, readme): (Vec<FileSpec>, _, _) = match kind {
+        ProjectKind::Scene => (
+            vec![
+                file("scene.json", sub(SCENE_SCENE_JSON)),
+                file("package.json", sub(SCENE_PACKAGE_JSON)),
+            ],
+            SCENE_INDEX_TS,
+            SCENE_README,
+        ),
+        ProjectKind::SmartWearable => (
+            vec![
+                file(
+                    "wearable.json",
+                    sub(SW_WEARABLE_JSON).replace("{{ID}}", &uuid_v4()),
+                ),
+                file(
+                    "scene.json",
+                    sub(SW_SCENE_JSON).replace("{{PARCELS}}", &parcel_grid(10, 10)),
+                ),
+                file("package.json", sub(SW_PACKAGE_JSON)),
+            ],
+            SW_INDEX_TS,
+            SW_README,
+        ),
+    };
+    let mut files = head;
+    files.extend([
+        raw("tsconfig.json", SCENE_TSCONFIG),
+        file("src/index.ts", sub(index)),
+        raw(".gitignore", SCENE_GITIGNORE),
+        raw(".dclignore", SCENE_DCLIGNORE),
+        file("README.md", sub(readme)),
+    ]);
+    if kind == ProjectKind::Scene {
+        files.push(FileSpec {
+            rel: "images/scene-thumbnail.png",
+            body: SCENE_THUMBNAIL.to_vec(),
+        });
     }
+    files
 }
 
 fn write_file(root: &Path, rel: &str, body: &[u8]) -> Result<()> {
@@ -310,21 +276,10 @@ fn write_file(root: &Path, rel: &str, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn write_error(path: &Path, e: std::io::Error) -> anyhow::Error {
-    UserError::new(
-        format!("cannot write to {}", path.display()),
-        TrySteps::one("check write permission on the project directory")
-            .and("re-run from a writable checkout (not a read-only mount)"),
-    )
-    .caused_by(e)
-    .into()
-}
-
 fn display_dir(dir: &Path) -> String {
-    if dir == Path::new(".") {
-        "the current directory".to_string()
-    } else {
-        dir.display().to_string()
+    match dir == Path::new(".") {
+        true => "the current directory".to_string(),
+        false => dir.display().to_string(),
     }
 }
 
@@ -343,11 +298,9 @@ pub fn project_title(root: &Path) -> String {
             }
         })
         .collect();
-    let trimmed = cleaned.trim().trim_matches('-').trim().to_string();
-    if trimmed.is_empty() {
-        "my-scene".to_string()
-    } else {
-        trimmed
+    match cleaned.trim().trim_matches('-').trim() {
+        "" => "my-scene".to_string(),
+        t => t.to_string(),
     }
 }
 
@@ -365,21 +318,17 @@ pub fn project_slug(name: &str) -> String {
             pending_dash = true;
         }
     }
-    if slug.is_empty() {
-        "new-scene".to_string()
-    } else {
-        slug
+    match slug.is_empty() {
+        true => "new-scene".to_string(),
+        false => slug,
     }
 }
 
 fn parcel_grid(cols: u32, rows: u32) -> String {
-    let mut out = Vec::new();
-    for y in 0..rows {
-        for x in 0..cols {
-            out.push(format!("\"{x},{y}\""));
-        }
-    }
-    out.join(", ")
+    (0..rows)
+        .flat_map(|y| (0..cols).map(move |x| format!("\"{x},{y}\"")))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn uuid_v4() -> String {
@@ -459,14 +408,11 @@ mod tests {
         }
     }
 
-    /// The blob must carry a working data layer, not just the crdt dumper.
-    ///
-    /// Each of these is a silent failure if a rebuild drops it: no `host.js`
-    /// and `start --data-layer` cannot boot; no descriptor and
-    /// `registerService` has nothing to register; a descriptor short of 22
-    /// methods is a `TypeError` that kills the whole rpc connection rather
-    /// than the one call; no `component-schemas.json` and the engine silently
-    /// drops every crdt message for a component it does not know.
+    /// Each of these is a silent failure if a blob rebuild drops it: without
+    /// `host.js` `start --data-layer` cannot boot, a descriptor short of 22
+    /// methods is a `TypeError` that kills the whole rpc connection, and
+    /// without `component-schemas.json` the engine drops every crdt message
+    /// for a component it does not know.
     #[test]
     fn blob_carries_the_data_layer_host() {
         let cursor = std::io::Cursor::new(VENDORED_NODE_MODULES);
@@ -506,5 +452,124 @@ mod tests {
             22,
             "the DataService descriptor must declare all 22 methods"
         );
+    }
+
+    /// Both scaffold pins must name the blob's @dcl line (a manifest naming an
+    /// older one would have the next npm install downgrade it), and the blob's
+    /// @dcl/ecs must carry the 7.27.0 fixes: the byteLength-scoped DataView
+    /// (upstream #1460), the renderer-reserved entity-id guard (#1544), and —
+    /// ours until upstream #1595 ships — the eight-byte network delete body the
+    /// bevy engine's strict framing needs (`patch_ecs_network_delete_length()`
+    /// in scripts/blob_overlays.py).
+    #[test]
+    fn blob_tracks_the_scaffold_pin_and_carries_the_ecs_fixes() {
+        use std::io::Read;
+        let scene: serde_json::Value = serde_json::from_str(SCENE_PACKAGE_JSON).unwrap();
+        let pin = scene["devDependencies"]["@dcl/sdk"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for (name, raw) in [
+            ("scene", SCENE_PACKAGE_JSON),
+            ("smart-wearable", SW_PACKAGE_JSON),
+        ] {
+            let scaffold: serde_json::Value = serde_json::from_str(raw).unwrap();
+            for dep in ["@dcl/sdk", "@dcl/js-runtime"] {
+                assert_eq!(
+                    scaffold["devDependencies"][dep], pin,
+                    "the {name} scaffold's {dep} is off the blob's line"
+                );
+            }
+        }
+
+        let cursor = std::io::Cursor::new(VENDORED_NODE_MODULES);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut read = |rel: &str| {
+            let mut s = String::new();
+            archive
+                .by_name(rel)
+                .unwrap_or_else(|e| panic!("blob is missing {rel}: {e}"))
+                .read_to_string(&mut s)
+                .unwrap();
+            s
+        };
+        for pkg in ["@dcl/sdk", "@dcl/ecs", "@dcl/js-runtime"] {
+            let manifest: serde_json::Value =
+                serde_json::from_str(&read(&format!("node_modules/{pkg}/package.json"))).unwrap();
+            assert_eq!(
+                manifest["version"], pin,
+                "{pkg} is not on the scaffold's line"
+            );
+        }
+
+        let byte_buffer = read("node_modules/@dcl/ecs/dist-cjs/serialization/ByteBuffer/index.js");
+        assert_eq!(
+            byte_buffer
+                .matches("new DataView(this._buffer.buffer, this._buffer.byteOffset, this._buffer.byteLength)")
+                .count(),
+            2,
+            "ByteBuffer must scope both DataViews to the buffer's byteLength"
+        );
+        assert!(
+            !byte_buffer.contains("new DataView(this._buffer.buffer, oldOffset)"),
+            "ByteBuffer still rebuilds its view from the pre-growth offset"
+        );
+
+        let entity = read("node_modules/@dcl/ecs/dist-cjs/engine/entity.js");
+        assert!(
+            entity.contains("function isReservedEntity("),
+            "entity container lacks the renderer-reserved id guard"
+        );
+        assert!(
+            entity.contains("number >= reservedStaticEntities && version < exports.MAX_U16"),
+            "entity container still recycles renderer-reserved numbers"
+        );
+
+        let core = read("node_modules/@dcl/sdk/prebuilt/core.js");
+        assert_eq!(
+            core.matches(
+                "new DataView(this._buffer.buffer,this._buffer.byteOffset,this._buffer.byteLength)"
+            )
+            .count(),
+            2,
+            "the prebuilt runtime chunk was not built from the fixed ByteBuffer"
+        );
+
+        let net_delete = read(
+            "node_modules/@dcl/ecs/dist-cjs/serialization/crdt/network/deleteEntityNetwork.js",
+        );
+        assert!(
+            net_delete.contains(
+                "buf.writeUint32(types_1.CRDT_MESSAGE_HEADER_LENGTH + DeleteEntityNetwork.MESSAGE_HEADER_LENGTH);"
+            ),
+            "DeleteEntityNetwork.write does not declare the eight-byte body it writes (upstream #1595)"
+        );
+        assert!(
+            !net_delete.contains("CRDT_MESSAGE_HEADER_LENGTH + 4"),
+            "DeleteEntityNetwork.write still declares a 12-byte record"
+        );
+        let write = chunk_net_delete_write(&core);
+        assert!(
+            write.contains("writeUint32(8+") && write.contains(".MESSAGE_HEADER_LENGTH),"),
+            "the prebuilt runtime chunk frames a network entity delete short: {write}"
+        );
+        assert!(
+            !write.contains("writeUint32(12),"),
+            "the prebuilt runtime chunk was built from the unpatched @dcl/ecs: {write}"
+        );
+    }
+
+    /// The minified `DeleteEntityNetwork.write`. Rolldown mangles every local
+    /// name, so the anchors are the two things it keeps: the namespace's
+    /// `MESSAGE_HEADER_LENGTH=8` (its siblings set 4, 12, 16 or 20) and the
+    /// string literal `read` throws; the write function sits between them.
+    fn chunk_net_delete_write(core: &str) -> &str {
+        let end = core
+            .find("DeleteEntityNetwork tried to read another message type")
+            .expect("core.js lacks the DeleteEntityNetwork namespace");
+        let start = core[..end]
+            .rfind("MESSAGE_HEADER_LENGTH=8;")
+            .expect("core.js lacks DeleteEntityNetwork.MESSAGE_HEADER_LENGTH");
+        &core[start..end]
     }
 }

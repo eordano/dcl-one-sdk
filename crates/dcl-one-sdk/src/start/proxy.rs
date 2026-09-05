@@ -4,21 +4,22 @@
 //! desktop client clears a cached identity on boot (a profile 404 reads as
 //! abandoned onboarding) and the new-account lobby's profile deploy fails.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use axum::body::Bytes;
-use axum::extract::Request;
+use axum::extract::{Path as AxPath, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::http::{contents_cache_dir, preview_host, preview_origin};
+use super::AppState;
 
-/// Where profiles, wearables and avatars come from. This used to default to a
-/// local catalyrst on 5141, which almost nobody runs, so every preview lost its
-/// avatars; upstream `@dcl/sdk-commands` ships a default here too
-/// (`logic/config.ts::getCatalystBaseUrl`). The env knob still aims it anywhere.
+/// Where profiles, wearables and avatars come from. Upstream
+/// `@dcl/sdk-commands` ships a default too (`logic/config.ts::getCatalystBaseUrl`);
+/// the old local-catalyrst default lost every preview its avatars.
 const DEFAULT_CATALYST: &str = "https://interconnected.online";
 
 /// Ours first, then upstream's own name so a project already configured for
@@ -26,10 +27,9 @@ const DEFAULT_CATALYST: &str = "https://interconnected.online";
 const CATALYST_ENV: [&str; 2] = ["DCL_ONE_SDK_CATALYST", "DCL_CATALYST"];
 
 /// Where `/world/{name}/about` is proxied from. Deliberately no baked default:
-/// whatever host went here would be infrastructure somebody runs, and shipping
-/// one silently points every preview at it (bevy-explorer takes the same line
-/// with `DCL_WORLD_REALM_BASE`). Unset, only the world proxy stops working.
-pub(crate) const WORLD_BASE_ENV: &str = "DCL_ONE_SDK_WORLD_BASE";
+/// any host here is infrastructure somebody runs, and shipping one silently
+/// points every preview at it. Unset, only the world proxy stops working.
+const WORLD_BASE_ENV: &str = "DCL_ONE_SDK_WORLD_BASE";
 
 /// Immutable content hashes never revalidate.
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
@@ -43,8 +43,7 @@ pub(super) fn configured_base(names: &[&str]) -> Option<String> {
     })
 }
 
-/// The one sentence every unconfigured-upstream route says, so the "we bake in
-/// no third-party host" promise is worded the same wherever it surfaces.
+/// The one sentence every unconfigured-upstream route says.
 pub(super) fn unconfigured_host_hint(what: &str, env: &str, serves: &str) -> String {
     format!(
         "no {what} host configured — set {env} to the base URL that serves {serves}. This \
@@ -52,20 +51,15 @@ pub(super) fn unconfigured_host_hint(what: &str, env: &str, serves: &str) -> Str
     )
 }
 
-pub(crate) fn world_base() -> Option<String> {
+pub(super) fn world_base() -> Option<String> {
     configured_base(&[WORLD_BASE_ENV])
 }
 
-pub(crate) fn world_base_hint() -> String {
-    unconfigured_host_hint("worlds", WORLD_BASE_ENV, "/<world>/about")
-}
-
-pub(crate) fn catalyst_base() -> String {
+fn catalyst_base() -> String {
     configured_base(&CATALYST_ENV).unwrap_or_else(|| DEFAULT_CATALYST.to_string())
 }
 
-/// The primary upstream plus two fallbacks, so a timeout or 5xx on one catalyst
-/// does not strand wearable/profile fetches. Only a rotation someone named is
+/// The primary upstream plus two fallbacks. Only a rotation someone named is
 /// used: unlike `deploy`, a preview must not source a realm unasked.
 fn upstream_candidates() -> Vec<String> {
     let primary = catalyst_base();
@@ -98,6 +92,10 @@ fn axum_status(status: reqwest::StatusCode) -> StatusCode {
     StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
+fn relay(status: StatusCode, ct: String, body: Bytes) -> Response {
+    (status, [(header::CONTENT_TYPE, ct)], body).into_response()
+}
+
 fn content_type_or(resp: &reqwest::Response, default: &str) -> String {
     resp.headers()
         .get(header::CONTENT_TYPE)
@@ -106,14 +104,9 @@ fn content_type_or(resp: &reqwest::Response, default: &str) -> String {
         .to_string()
 }
 
-/// Serve `hash` from the on-disk LRU if it is there. Shared by the catalyst
-/// back-fill and the world mirror, which cache into the same directory.
-async fn cached_content(
-    dir: &std::path::Path,
-    hash: &str,
-    method: &Method,
-    label: &str,
-) -> Option<Response> {
+/// Serve `hash` from the on-disk LRU if it is there; the catalyst back-fill
+/// and the world mirror cache into the same directory.
+async fn cached_content(dir: &Path, hash: &str, method: &Method, label: &str) -> Option<Response> {
     let (bytes, ct) = super::content_cache::get(dir, hash).await?;
     let ct = ct.unwrap_or_else(|| "application/octet-stream".to_string());
     tracing::info!(target: "access", "{label} {hash} 200 dcl-cache sent={}", bytes.len());
@@ -122,9 +115,10 @@ async fn cached_content(
         (header::CACHE_CONTROL, IMMUTABLE.to_string()),
         (header::CONTENT_LENGTH, bytes.len().to_string()),
     ];
-    Some(match *method == Method::HEAD {
-        true => (resp_headers, axum::body::Body::empty()).into_response(),
-        false => (resp_headers, bytes).into_response(),
+    Some(if *method == Method::HEAD {
+        (resp_headers, axum::body::Body::empty()).into_response()
+    } else {
+        (resp_headers, bytes).into_response()
     })
 }
 
@@ -140,7 +134,7 @@ pub(super) async fn passthrough(method: Method, url: &str) -> Response {
             let status = axum_status(resp.status());
             let ct = content_type_or(&resp, "application/octet-stream");
             match resp.bytes().await {
-                Ok(body) => (status, [(header::CONTENT_TYPE, ct)], body).into_response(),
+                Ok(body) => relay(status, ct, body),
                 Err(e) => (StatusCode::BAD_GATEWAY, format!("{url}: {e}")).into_response(),
             }
         }
@@ -149,15 +143,14 @@ pub(super) async fn passthrough(method: Method, url: &str) -> Response {
 }
 
 /// `{realm}/optimized-assets/*` — the path the explorer derives from the realm
-/// under `local-ab=true`, pinned by `RealmLaunchSettings.OPTIMIZED_ASSETS_PATH`
-/// and carrying no URL or port of its own. Serving it here keeps the client on
-/// the realm it already has: no extra port in the deep link, no second firewall
-/// approval on the LAN. The sidecar still does the work.
+/// under `local-ab=true` (`RealmLaunchSettings.OPTIMIZED_ASSETS_PATH`). Serving
+/// it here keeps the client on the realm it has: no extra port in the deep
+/// link, no second firewall approval on the LAN.
 pub(super) async fn optimized_assets(
     method: Method,
-    axum::extract::State(st): axum::extract::State<std::sync::Arc<super::AppState>>,
-    axum::extract::Path(path): axum::extract::Path<String>,
-    raw_query: axum::extract::RawQuery,
+    State(st): State<Arc<AppState>>,
+    AxPath(path): AxPath<String>,
+    raw_query: RawQuery,
 ) -> Response {
     let Some(base) = st.optimized_assets_url.get() else {
         return (
@@ -171,7 +164,7 @@ pub(super) async fn optimized_assets(
 }
 
 /// Upstream parity: the realm advertises itself as the only realm.
-pub(super) async fn lambdas_explore_realms(req: Request) -> Json<serde_json::Value> {
+pub(super) async fn lambdas_explore_realms(req: Request) -> Json<Value> {
     let host = preview_host(req.headers());
     Json(json!([{
         "serverName": "localhost",
@@ -184,7 +177,7 @@ pub(super) async fn lambdas_explore_realms(req: Request) -> Json<serde_json::Val
 }
 
 /// Upstream parity: a single stub catalyst contract entry pointing local.
-pub(super) async fn lambdas_contracts_servers(req: Request) -> Json<serde_json::Value> {
+pub(super) async fn lambdas_contracts_servers(req: Request) -> Json<Value> {
     let host = preview_host(req.headers());
     Json(json!([{
         "address": format!("http://{host}"),
@@ -193,16 +186,12 @@ pub(super) async fn lambdas_contracts_servers(req: Request) -> Json<serde_json::
     }]))
 }
 
-fn complained_bases() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    SEEN.get_or_init(Default::default)
-}
+static COMPLAINED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
 /// Once per base, not once per request: the explorer re-asks for profiles and
 /// wearables continuously, so a per-request warning buried everything else.
 fn note_upstream_unreachable(base: &str) {
-    let mut seen = complained_bases().lock().unwrap_or_else(|e| e.into_inner());
+    let mut seen = COMPLAINED.lock().unwrap_or_else(PoisonError::into_inner);
     if !seen.insert(base.to_string()) {
         return;
     }
@@ -271,15 +260,14 @@ async fn forward_to_catalyst(
     }))
 }
 
-/// Backup fetch: content hashes the local scene does not own (wearable GLBs,
-/// emotes, profile snapshots) come from the upstream catalyst so the explorer
-/// can render avatars in preview. Successful GETs land in the scene's
-/// `.dcl-cache` LRU, which the next session serves offline.
+/// Content hashes the local scene does not own (wearable GLBs, emotes, profile
+/// snapshots) come from the upstream catalyst. Successful GETs land in the
+/// scene's `.dcl-cache` LRU, which the next session serves offline.
 pub(super) async fn contents_upstream(
     method: Method,
     hash: &str,
     headers: &HeaderMap,
-    cache_dir: Option<&std::path::Path>,
+    cache_dir: Option<&Path>,
 ) -> Response {
     if let Some(dir) = cache_dir {
         if let Some(hit) = cached_content(dir, hash, &method, "contents").await {
@@ -300,15 +288,15 @@ pub(super) async fn contents_upstream(
                     super::content_cache::put(dir, hash, &bytes, Some(&ct)).await;
                 }
             }
-            (status, [(header::CONTENT_TYPE, ct)], bytes).into_response()
+            relay(status, ct, bytes)
         }
         Err(resp) => resp,
     }
 }
 
-/// Backup fetch: pointers no local scene covers (wearable/emote URNs) resolve
-/// against the upstream catalyst; failures degrade to local-only results.
-pub(super) async fn entities_active_upstream(pointers: &[String]) -> Vec<serde_json::Value> {
+/// Pointers no local scene covers (wearable/emote URNs) resolve against the
+/// upstream catalyst; failures degrade to local-only results.
+pub(super) async fn entities_active_upstream(pointers: &[String]) -> Vec<Value> {
     let url = format!("{}/content/entities/active", catalyst_base());
     let Ok(client) = proxy_client() else {
         return Vec::new();
@@ -319,8 +307,8 @@ pub(super) async fn entities_active_upstream(pointers: &[String]) -> Vec<serde_j
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(serde_json::Value::Array(arr)) => arr,
+        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+            Ok(Value::Array(arr)) => arr,
             _ => Vec::new(),
         },
         Ok(resp) => {
@@ -352,17 +340,17 @@ pub(super) async fn catalyst_proxy(req: Request) -> Response {
         }
     };
     match forward_to_catalyst(method, path_and_query, &headers, body).await {
-        Ok((status, ct, bytes)) => (status, [(header::CONTENT_TYPE, ct)], bytes).into_response(),
+        Ok((status, ct, bytes)) => relay(status, ct, bytes),
         Err(resp) => resp,
     }
 }
 
 /// World name (lowercased) -> candidate upstream contents prefixes, best first,
-/// learned from the world's own /about and re-derivable by refetching it.
+/// learned from the world's own /about.
 static WORLD_CONTENT_UPSTREAMS: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
     LazyLock::new(Default::default);
 
-fn world_upstreams() -> std::sync::MutexGuard<'static, HashMap<String, Vec<String>>> {
+fn world_upstreams() -> MutexGuard<'static, HashMap<String, Vec<String>>> {
     WORLD_CONTENT_UPSTREAMS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -375,23 +363,41 @@ fn valid_world_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
-async fn fetch_world_about(name: &str) -> Result<serde_json::Value, Response> {
+async fn fetch_world_about(name: &str) -> Result<Value, Response> {
     let client = proxy_client()?;
-    let base = world_base()
-        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, world_base_hint()).into_response())?;
+    let base = world_base().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            unconfigured_host_hint("worlds", WORLD_BASE_ENV, "/<world>/about"),
+        )
+            .into_response()
+    })?;
     let url = format!("{base}/{name}/about");
     match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            resp.json::<serde_json::Value>().await.map_err(|e| {
-                (StatusCode::BAD_GATEWAY, format!("world about {url}: {e}")).into_response()
-            })
-        }
+        Ok(resp) if resp.status().is_success() => resp.json::<Value>().await.map_err(|e| {
+            (StatusCode::BAD_GATEWAY, format!("world about {url}: {e}")).into_response()
+        }),
         Ok(resp) => {
             let status = axum_status(resp.status());
             Err((status, format!("world about {url}: {status}")).into_response())
         }
         Err(e) => Err((StatusCode::BAD_GATEWAY, format!("world about {url}: {e}")).into_response()),
     }
+}
+
+/// Fetch a world's /about and remember where its content is served from.
+async fn learn_world(name: &str) -> Result<(Value, Vec<String>), Response> {
+    let about = fetch_world_about(name).await?;
+    let candidates = world_content_candidates(&about);
+    if candidates.is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "world about carries no content base",
+        )
+            .into_response());
+    }
+    world_upstreams().insert(name.to_ascii_lowercase(), candidates.clone());
+    Ok((about, candidates))
 }
 
 fn origin_of(url: &str) -> Option<String> {
@@ -408,7 +414,7 @@ fn origin_of(url: &str) -> Option<String> {
 /// host that does not expose `/contents/`, while the catalyst that proxied the
 /// /about has the entity synced. Hashes are immutable, so any host answering
 /// 200 answers correctly.
-fn world_content_candidates(about: &serde_json::Value) -> Vec<String> {
+fn world_content_candidates(about: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |prefix: String| {
         let prefix = if prefix.ends_with('/') {
@@ -445,7 +451,7 @@ fn world_content_candidates(about: &serde_json::Value) -> Vec<String> {
 /// Rewrites only what the explorer's portable lookup consumes
 /// (`configurations.scenesUrn`): every other field keeps its upstream value so
 /// unexpected flows fail against the real host instead of a local 404.
-fn rewrite_scenes_urn(about: &mut serde_json::Value, local_contents_prefix: &str) {
+fn rewrite_scenes_urn(about: &mut Value, local_contents_prefix: &str) {
     let Some(urns) = about
         .pointer_mut("/configurations/scenesUrn")
         .and_then(|v| v.as_array_mut())
@@ -455,7 +461,7 @@ fn rewrite_scenes_urn(about: &mut serde_json::Value, local_contents_prefix: &str
     for urn in urns {
         if let Some(s) = urn.as_str() {
             if let Some((head, _)) = s.split_once("baseUrl=") {
-                *urn = serde_json::Value::String(format!("{head}baseUrl={local_contents_prefix}"));
+                *urn = Value::String(format!("{head}baseUrl={local_contents_prefix}"));
             }
         }
     }
@@ -463,27 +469,15 @@ fn rewrite_scenes_urn(about: &mut serde_json::Value, local_contents_prefix: &str
 
 /// Same-origin mirror of a world's /about, so a browser explorer can load a
 /// portable world without the CORS wall around the public worlds host. Content
-/// moves to `/world-content/…`, which the permissive CORS layer already covers.
-pub(super) async fn world_about(
-    axum::extract::Path(name): axum::extract::Path<String>,
-    headers: HeaderMap,
-) -> Response {
+/// moves to `/world-content/…`, which the permissive CORS layer covers.
+pub(super) async fn world_about(AxPath(name): AxPath<String>, headers: HeaderMap) -> Response {
     if !valid_world_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid world name").into_response();
     }
-    let mut about = match fetch_world_about(&name).await {
-        Ok(v) => v,
+    let mut about = match learn_world(&name).await {
+        Ok((about, _)) => about,
         Err(resp) => return resp,
     };
-    let candidates = world_content_candidates(&about);
-    if candidates.is_empty() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            "world about carries no content base",
-        )
-            .into_response();
-    }
-    world_upstreams().insert(name.to_ascii_lowercase(), candidates);
     rewrite_scenes_urn(
         &mut about,
         &format!(
@@ -498,8 +492,8 @@ pub(super) async fn world_about(
 /// `.dcl-cache` LRU the catalyst back-fill uses and never revalidate.
 pub(super) async fn world_content(
     method: Method,
-    axum::extract::State(st): axum::extract::State<std::sync::Arc<super::AppState>>,
-    axum::extract::Path((name, hash)): axum::extract::Path<(String, String)>,
+    State(st): State<Arc<AppState>>,
+    AxPath((name, hash)): AxPath<(String, String)>,
 ) -> Response {
     if !valid_world_name(&name) || !hash.chars().all(|c| c.is_ascii_alphanumeric()) {
         return (StatusCode::BAD_REQUEST, "invalid world content path").into_response();
@@ -510,24 +504,11 @@ pub(super) async fn world_content(
             return hit;
         }
     }
-    let cached = world_upstreams().get(&name.to_ascii_lowercase()).cloned();
-    let candidates = match cached {
+    let known = world_upstreams().get(&name.to_ascii_lowercase()).cloned();
+    let candidates = match known {
         Some(c) => c,
-        None => match fetch_world_about(&name).await.map(|a| {
-            let c = world_content_candidates(&a);
-            if !c.is_empty() {
-                world_upstreams().insert(name.to_ascii_lowercase(), c.clone());
-            }
-            c
-        }) {
-            Ok(c) if !c.is_empty() => c,
-            Ok(_) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    "world about carries no content base",
-                )
-                    .into_response()
-            }
+        None => match learn_world(&name).await {
+            Ok((_, c)) => c,
             Err(resp) => return resp,
         },
     };
@@ -584,23 +565,19 @@ pub(super) async fn world_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn an_unreachable_upstream_is_explained_once_per_base_not_once_per_request() {
         let base = "http://127.0.0.1:59999";
-        complained_bases().lock().unwrap().remove(&base.to_string());
+        COMPLAINED.lock().unwrap().remove(base);
         note_upstream_unreachable(base);
-        assert!(complained_bases().lock().unwrap().contains(base));
+        assert!(COMPLAINED.lock().unwrap().contains(base));
         note_upstream_unreachable(base);
         note_upstream_unreachable(base);
         let other = "http://127.0.0.1:59998";
-        complained_bases()
-            .lock()
-            .unwrap()
-            .remove(&other.to_string());
+        COMPLAINED.lock().unwrap().remove(other);
         note_upstream_unreachable(other);
-        let seen = complained_bases().lock().unwrap();
+        let seen = COMPLAINED.lock().unwrap();
         assert!(seen.contains(base) && seen.contains(other));
     }
 
@@ -674,7 +651,7 @@ mod tests {
         assert!(world_content_candidates(&bare)
             .contains(&"https://worlds.example/contents/".to_string()));
 
-        let unique: std::collections::HashSet<_> = candidates.iter().collect();
+        let unique: HashSet<_> = candidates.iter().collect();
         assert_eq!(unique.len(), candidates.len());
     }
 

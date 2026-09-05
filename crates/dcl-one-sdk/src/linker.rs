@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 pub struct LinkerDeploy {
-    /// The scene root, so the browser flow can serve the scene it is about to
-    /// publish: the signing page is the preview server's landing page.
+    /// The scene root: the signing page is the preview server's landing page.
     pub dir: PathBuf,
     pub prepared: Prepared,
     pub target_content: String,
@@ -22,16 +21,15 @@ pub struct LinkerDeploy {
     pub scene_title: String,
     pub base_parcel: String,
     pub multi_scene: bool,
-    pub check_permissions: bool,
+    pub gate: deploy::PermissionGate,
 }
 
 pub struct LinkerOptions {
     pub port: Option<u16>,
     pub open_browser: bool,
     pub timeout: Duration,
-    /// When set, the caller hosts the signing routes on a server it already
-    /// runs (the preview server mounts them under /deploy/sign/): no listener
-    /// is bound here and no browser is opened — the page owns the hand-off.
+    /// The caller hosts the signing routes on a server it already runs (the
+    /// preview server's /deploy/sign/): no listener bound, no browser opened.
     pub host: Option<HostSigner>,
 }
 
@@ -58,15 +56,15 @@ struct PendingEntity {
     delete_payload: Option<String>,
 }
 
-type DoneSender = tokio::sync::oneshot::Sender<Result<String>>;
+pub(crate) type DoneSender = tokio::sync::oneshot::Sender<Result<String>>;
 
 pub struct LinkerState {
     dep: LinkerDeploy,
     pending: Mutex<HashMap<String, PendingEntity>>,
     done: Mutex<Option<DoneSender>>,
     /// The address that signed, kept past the upload: the preview pages
-    /// personalize on "the wallet you sign with", and a signature is the one
-    /// moment that wallet names itself.
+    /// personalize on it, and a signature is the one moment a wallet names
+    /// itself.
     signer: Mutex<Option<String>>,
 }
 
@@ -82,8 +80,8 @@ impl LinkerState {
             .clone()
     }
 
-    /// What [`sign`] does the moment a signature arrives, callable by tests
-    /// that need a "the wallet already answered" state without a wallet.
+    /// What [`sign`] does the moment a signature arrives, for tests that need
+    /// a "the wallet already answered" state without a wallet.
     #[cfg(test)]
     pub(crate) fn note_signer_for_tests(&self, address: &str) {
         *self.signer.lock().unwrap_or_else(PoisonError::into_inner) = Some(address.to_string());
@@ -108,13 +106,10 @@ pub fn new_state(
     )
 }
 
-/// The signing panel, rendered by the server that hosts the publish — the
-/// landing page and /deploy of the preview interface both draw it from here.
-/// Every fact is in the markup and the entity is minted NOW: the id printed is
-/// the id the wallet signs, registered pending so `sign` recognises it. The
-/// browser is left exactly one job, the wallet hand-off, which is the one
-/// thing that cannot happen without JavaScript. `api` is the absolute
-/// prefix-carrying path the script POSTs the signature to.
+/// The signing panel. The entity is minted NOW and registered pending, so
+/// the id printed is the id the wallet signs; the browser is left exactly one
+/// job, the wallet hand-off. `api` is the absolute path the script POSTs the
+/// signature to.
 pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
     use crate::start::chrome::{esc, kv};
     let d = &st.dep;
@@ -150,16 +145,16 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
     // anything self-hosted its play URL silently drops the realm and boots
     // Genesis instead.
     let realm_url = match &d.world {
-        Some(w) => catalyrst_types::world_realm_url(&d.target_content, w),
+        Some(w) => catalyrst_auth_chain::world_realm_url(&d.target_content, w),
         None => d
             .target_content
             .trim_end_matches('/')
             .trim_end_matches("/content")
             .to_string(),
     };
-    let deep_link = catalyrst_types::realm_deep_link(
+    let deep_link = catalyrst_auth_chain::realm_deep_link(
         &realm_url,
-        catalyrst_types::parse_position(Some(&d.base_parcel)),
+        catalyrst_auth_chain::parse_position(Some(&d.base_parcel)),
     );
     let where_to = match &d.world {
         Some(w) if d.multi_scene => format!("world {w} (multi-scene, additive)"),
@@ -174,6 +169,19 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
     the removal.</p>"#
         }
         None => "",
+    };
+    let parcels = if d.prepared.pointers.len() > 6 {
+        format!(
+            "{} parcels · base {}",
+            d.prepared.pointers.len(),
+            d.base_parcel
+        )
+    } else {
+        format!(
+            "{}  (base {})",
+            d.prepared.pointers.join("  "),
+            d.base_parcel
+        )
     };
     format!(
         r#"<div class="panel" id="sign-panel" data-api="{api}" data-entity-id="{id}"{delete_attr} data-deep-link="{deep}">
@@ -196,25 +204,7 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
         deep = esc(&deep_link),
         scene = kv("Scene", esc(&d.scene_title)),
         where_kv = kv("Deploying to", esc(&where_to)),
-        // A handful of parcels earn their list; a big footprint is a count —
-        // the same altitude the /deploy hint speaks at, and the layout map is
-        // where the full shape lives.
-        parcels = kv(
-            "Parcels",
-            esc(&if d.prepared.pointers.len() > 6 {
-                format!(
-                    "{} parcels · base {}",
-                    d.prepared.pointers.len(),
-                    d.base_parcel
-                )
-            } else {
-                format!(
-                    "{}  (base {})",
-                    d.prepared.pointers.join("  "),
-                    d.base_parcel
-                )
-            }),
-        ),
+        parcels = kv("Parcels", esc(&parcels)),
         entity = kv("Entity", format!("<code>{}</code>", esc(&entity_id))),
         payload = kv(
             "Payload",
@@ -238,6 +228,17 @@ pub(crate) struct SignReq {
     delete_signature: Option<String>,
 }
 
+fn retry(error: &str) -> Json<Value> {
+    Json(json!({ "ok": false, "fatal": false, "error": error }))
+}
+
+/// Resolve the CLI with the error and tell the page it is over.
+fn fatal(st: &Arc<LinkerState>, e: anyhow::Error) -> Json<Value> {
+    let msg = crate::ux::render(&e, false, false);
+    finish(&st.done, Err(e));
+    Json(json!({ "ok": false, "fatal": true, "error": msg }))
+}
+
 pub(crate) async fn sign(
     State(st): State<Arc<LinkerState>>,
     Json(req): Json<SignReq>,
@@ -248,59 +249,43 @@ pub(crate) async fn sign(
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&req.entity_id);
     let Some(pending) = pending else {
-        return Json(json!({
-            "ok": false,
-            "fatal": false,
-            "error": "unknown or stale entity id — reload the page and sign again"
-        }));
+        return retry("unknown or stale entity id — reload the page and sign again");
     };
-    // Recorded before the outcome is known: even a refused upload was signed
-    // by this wallet, and that is the fact the pages personalize on.
     *st.signer.lock().unwrap_or_else(PoisonError::into_inner) = Some(req.address.clone());
-    if st.dep.check_permissions {
-        if let Some(w) = st.dep.world.as_deref() {
-            if let Err(e) = deploy::enforce_world_permission(
-                &st.dep.target_content,
-                w,
-                &req.address,
-                &st.dep.prepared.pointers,
-            )
-            .await
-            {
-                let msg = crate::ux::render(&e, false, false);
-                finish(&st, Err(e));
-                return Json(json!({ "ok": false, "fatal": true, "error": msg }));
-            }
-        }
+    let world = st.dep.world.as_deref();
+    if let Err(e) = st.dep.gate.verify(&req.address).await {
+        return fatal(&st, e);
     }
     if let Some(payload) = &pending.delete_payload {
         let Some(dsig) = &req.delete_signature else {
-            return Json(json!({
-                "ok": false,
-                "fatal": false,
-                "error": "this deploy also removes the existing world scenes and needs the second signature — reload and sign both prompts"
-            }));
+            return retry("this deploy also removes the existing world scenes and needs the second signature — reload and sign both prompts");
         };
         let chain = deploy::simple_auth_chain(&req.address, payload, dsig);
-        if let Err(e) = deploy::send_world_delete(
-            &st.dep.target_content,
-            st.dep.world.as_deref().unwrap_or_default(),
-            &chain,
-        )
-        .await
+        if let Err(e) =
+            deploy::send_world_delete(&st.dep.target_content, world.unwrap_or_default(), &chain)
+                .await
         {
-            let msg = crate::ux::render(&e, false, false);
-            finish(&st, Err(e));
-            return Json(json!({ "ok": false, "fatal": true, "error": msg }));
+            return fatal(&st, e);
         }
     }
-    match deploy::upload_entity(
+    let destination = match st.dep.world.as_deref() {
+        Some(name) => deploy::UploadDestination::World {
+            name,
+            multi_scene: st.dep.multi_scene,
+        },
+        None => deploy::UploadDestination::Land {
+            base: &st.dep.base_parcel,
+            parcels: st.dep.prepared.pointers.len(),
+        },
+    };
+    match deploy::upload_entity_to(
         &st.dep.target_content,
         &req.entity_id,
         pending.bytes.clone(),
         &st.dep.prepared.files,
         &req.address,
         &req.signature,
+        destination,
     )
     .await
     {
@@ -310,23 +295,17 @@ pub(crate) async fn sign(
                     tracing::warn!("could not write --entity-out {}: {e}", path.display());
                 }
             }
-            finish(&st, Ok(message.clone()));
+            finish(&st.done, Ok(message.clone()));
             Json(json!({ "ok": true, "message": message }))
         }
-        Err(e) => {
-            let msg = crate::ux::render(&e, false, false);
-            finish(&st, Err(e));
-            Json(json!({ "ok": false, "fatal": true, "error": msg }))
-        }
+        Err(e) => fatal(&st, e),
     }
 }
 
-fn finish(st: &Arc<LinkerState>, result: Result<String>) {
-    let tx = st
-        .done
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take();
+/// Hand the outcome to the CLI once, after a beat so the page's response
+/// lands first.
+pub(crate) fn finish(done: &Mutex<Option<DoneSender>>, result: Result<String>) {
+    let tx = done.lock().unwrap_or_else(PoisonError::into_inner).take();
     if let Some(tx) = tx {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -414,9 +393,6 @@ pub async fn run(dep: LinkerDeploy, opts: LinkerOptions) -> Result<String> {
     let dir = dep.dir.clone();
     let (state, rx) = new_state(dep);
     if let Some(host) = opts.host {
-        // No terminal narration: the hosting page owns the hand-off, and its
-        // URL printed into the preview terminal was the noise a page-driven
-        // publish used to make.
         (host.register)(state);
         return await_outcome(rx, opts.timeout, &host.url).await;
     }
@@ -426,34 +402,9 @@ pub async fn run(dep: LinkerDeploy, opts: LinkerOptions) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deploy::TempTree;
     use crate::scene::Project;
     use std::path::Path;
-
-    struct TempTree(PathBuf);
-
-    impl TempTree {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "dcl-one-sdk-linker-test-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            TempTree(dir)
-        }
-
-        fn write(&self, rel: &str, contents: &str) {
-            let p = self.0.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, contents).unwrap();
-        }
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn fixture(tag: &str, world: Option<&str>) -> (TempTree, LinkerDeploy) {
         let t = TempTree::new(tag);
@@ -481,17 +432,41 @@ mod tests {
             scene_title: "Linker Smoke".to_string(),
             base_parcel: "0,0".to_string(),
             multi_scene: false,
-            check_permissions: false,
+            gate: deploy::PermissionGate::off(),
         };
         (t, dep)
     }
 
-    /// The id the rendered panel carries — which is also the pending key,
-    /// because minting happens at render time.
+    /// The id the rendered panel carries, which is also the pending key.
     fn minted_entity_id(section: &str) -> String {
         let marker = r#"data-entity-id=""#;
         let at = section.find(marker).expect("panel carries the entity id") + marker.len();
         section[at..].split('"').next().unwrap().to_string()
+    }
+
+    async fn sign_as(
+        state: &Arc<LinkerState>,
+        address: String,
+        signature: String,
+        entity_id: String,
+    ) -> Value {
+        sign(
+            State(state.clone()),
+            Json(SignReq {
+                address,
+                signature,
+                entity_id,
+                delete_signature: None,
+            }),
+        )
+        .await
+        .0
+    }
+
+    async fn sign_minted(state: &Arc<LinkerState>, signer: &catalyrst_crypto::Wallet) -> Value {
+        let entity_id = minted_entity_id(&sign_section(state, "/deploy/sign"));
+        let sig = signer.sign_message(entity_id.as_bytes()).unwrap();
+        sign_as(state, signer.address(), sig, entity_id).await
     }
 
     #[test]
@@ -523,39 +498,18 @@ mod tests {
             "the rendered id is registered pending"
         );
 
-        let stale = sign(
-            State(state.clone()),
-            Json(SignReq {
-                address: "0x0".into(),
-                signature: "0x0".into(),
-                entity_id: "bogus".into(),
-                delete_signature: None,
-            }),
-        )
-        .await;
-        assert_eq!(stale.0["ok"], false);
-        assert_eq!(stale.0["fatal"], false);
+        let stale = sign_as(&state, "0x0".into(), "0x0".into(), "bogus".into()).await;
+        assert_eq!(stale["ok"], false);
+        assert_eq!(stale["fatal"], false);
     }
 
     #[tokio::test]
     async fn unreachable_target_fails_fatal_and_resolves_cli() {
         let (_t, dep) = fixture("fatal", None);
         let (state, rx) = new_state(dep);
-        let entity_id = minted_entity_id(&sign_section(&state, "/deploy/sign"));
-        let signer = crate::random_test_wallet();
-        let sig = signer.sign_message(entity_id.as_bytes()).unwrap();
-        let resp = sign(
-            State(state.clone()),
-            Json(SignReq {
-                address: signer.address(),
-                signature: sig,
-                entity_id,
-                delete_signature: None,
-            }),
-        )
-        .await;
-        assert_eq!(resp.0["ok"], false);
-        assert_eq!(resp.0["fatal"], true);
+        let resp = sign_minted(&state, &crate::random_test_wallet()).await;
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["fatal"], true);
         let outcome = rx.await.unwrap();
         assert!(outcome.is_err());
     }
@@ -576,19 +530,8 @@ mod tests {
         let (_t, mut dep) = fixture("worlds", Some(&world));
         dep.target_content = target;
         let (state, rx) = new_state(dep);
-        let entity_id = minted_entity_id(&sign_section(&state, "/deploy/sign"));
-        let sig = signer.sign_message(entity_id.as_bytes()).unwrap();
-        let resp = sign(
-            State(state.clone()),
-            Json(SignReq {
-                address: signer.address(),
-                signature: sig,
-                entity_id,
-                delete_signature: None,
-            }),
-        )
-        .await;
-        assert_eq!(resp.0["ok"], true, "sign flow failed: {}", resp.0);
+        let resp = sign_minted(&state, &signer).await;
+        assert_eq!(resp["ok"], true, "sign flow failed: {}", resp);
         let outcome = rx.await.unwrap();
         let message = outcome.unwrap();
         assert!(

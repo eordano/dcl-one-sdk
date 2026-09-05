@@ -30,8 +30,13 @@ const MAX_THUMBNAIL_BYTES: usize = 2 * 1024 * 1024;
 /// fields.
 static WRITE: Mutex<()> = Mutex::new(());
 
+/// Every answer here is a status and one line of text.
+fn reply(status: StatusCode, why: impl std::fmt::Display) -> Response {
+    (status, format!("{why}\n")).into_response()
+}
+
 fn refuse(why: &str) -> Response {
-    (StatusCode::FORBIDDEN, format!("{why}\n")).into_response()
+    reply(StatusCode::FORBIDDEN, why)
 }
 
 /// The shared write gates, with no remote escape: scene.json is the
@@ -48,7 +53,7 @@ fn refused(peer: SocketAddr, headers: &HeaderMap) -> Option<Response> {
 
 /// Every field the page has an editor for, and nothing else. All optional:
 /// a request names only what it changes.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct SceneEdit {
     title: Option<String>,
@@ -98,10 +103,10 @@ pub(super) async fn scene_json(
     }
     let edit = match body {
         Ok(Json(edit)) => edit,
-        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, format!("{e}\n")).into_response(),
+        Err(e) => return reply(StatusCode::UNPROCESSABLE_ENTITY, e),
     };
     let Some(project) = st.first_project() else {
-        return (StatusCode::NOT_FOUND, "no scene loaded\n").into_response();
+        return reply(StatusCode::NOT_FOUND, "no scene loaded");
     };
     let outcome = tokio::task::spawn_blocking(move || {
         edit_scene_json(&st, &project.root, |scene| apply(scene, &edit))
@@ -109,19 +114,15 @@ pub(super) async fn scene_json(
     .await;
     match outcome {
         Ok(Ok(scene)) => Json(scene).into_response(),
-        Ok(Err((status, why))) => (status, format!("{why}\n")).into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the edit did not finish\n",
-        )
-            .into_response(),
+        Ok(Err((status, why))) => reply(status, why),
+        Err(_) => reply(StatusCode::INTERNAL_SERVER_ERROR, "the edit did not finish"),
     }
 }
 
 /// The read-modify-write every scene.json writer shares (the landing
 /// editors here, and /target's destination pointer). Disk is the source of
-/// truth read here — not the in-memory copy — so a hand edit made since the
-/// last watch batch is carried forward rather than overwritten.
+/// truth — not the in-memory copy — so a hand edit made since the last watch
+/// batch is carried forward rather than overwritten.
 pub(super) fn edit_scene_json(
     st: &AppState,
     root: &Path,
@@ -169,8 +170,7 @@ pub(super) fn edit_scene_json(
     Ok(scene)
 }
 
-/// One line of plain text: trimmed, capped, no control characters. The shape
-/// every text field here validates.
+/// One line of plain text: trimmed, capped, no control characters.
 fn plain_text<'a>(s: &'a str, max: usize, what: &str) -> Result<&'a str, String> {
     let s = s.trim();
     if s.chars().count() > max || s.chars().any(char::is_control) {
@@ -238,7 +238,7 @@ fn apply_parcels(scene: &mut Value, edit: &SceneEdit) -> Result<(), String> {
         Some(given) => {
             let mut parsed: Vec<(i64, i64)> = Vec::new();
             for p in given {
-                let Some(xy) = catalyrst_types::pointer::parse_pointer(p) else {
+                let Some(xy) = catalyrst_auth_chain::pointer::parse_pointer(p) else {
                     return Err(format!("\"{}\" is not an x,y parcel", p.escape_default()));
                 };
                 if !parsed.contains(&xy) {
@@ -256,7 +256,7 @@ fn apply_parcels(scene: &mut Value, edit: &SceneEdit) -> Result<(), String> {
         return Err("the parcels must form one edge-connected shape".into());
     }
     let base = match &edit.base {
-        Some(b) => catalyrst_types::pointer::parse_pointer(b)
+        Some(b) => catalyrst_auth_chain::pointer::parse_pointer(b)
             .ok_or_else(|| format!("\"{}\" is not an x,y base parcel", b.escape_default()))?,
         None => current.1,
     };
@@ -278,8 +278,7 @@ fn apply_parcels(scene: &mut Value, edit: &SceneEdit) -> Result<(), String> {
 }
 
 /// Deploy refuses a scattered layout, so the editor must too. It is the only
-/// shape rule there is: parcel count and extent are the deployer's business,
-/// not this endpoint's.
+/// shape rule: parcel count and extent are the deployer's business.
 fn connected(parcels: &[(i64, i64)]) -> bool {
     let set: std::collections::HashSet<(i64, i64)> = parcels.iter().copied().collect();
     let mut seen = std::collections::HashSet::new();
@@ -297,9 +296,9 @@ fn connected(parcels: &[(i64, i64)]) -> bool {
     seen.len() == set.len()
 }
 
-/// A permission is kept only if the page offered it — the known list — or the
-/// scene already required it, so an exotic key survives a toggle of its
-/// neighbours without this endpoint becoming a way to write arbitrary strings.
+/// A permission is kept only if the page offered it or the scene already
+/// required it, so an exotic key survives a toggle of its neighbours without
+/// this endpoint becoming a way to write arbitrary strings.
 fn apply_permissions(scene: &mut Value, permissions: &[String]) -> Result<(), String> {
     let existing: Vec<String> = scene
         .get("requiredPermissions")
@@ -396,20 +395,7 @@ fn ensure_object<'a>(scene: &'a mut Value, key: &str) -> &'a mut Map<String, Val
         .expect("just inserted")
 }
 
-fn set_display(scene: &mut Value, key: &str, value: Option<Value>) {
-    let display = ensure_object(scene, "display");
-    match value {
-        Some(v) => {
-            display.insert(key.to_string(), v);
-        }
-        None => {
-            display.remove(key);
-        }
-    }
-}
-
-fn set_key(scene: &mut Value, key: &str, value: Option<Value>) {
-    let obj = scene.as_object_mut().expect("checked in edit_scene_json");
+fn set_or_remove(obj: &mut Map<String, Value>, key: &str, value: Option<Value>) {
     match value {
         Some(v) => {
             obj.insert(key.to_string(), v);
@@ -418,6 +404,15 @@ fn set_key(scene: &mut Value, key: &str, value: Option<Value>) {
             obj.remove(key);
         }
     }
+}
+
+fn set_display(scene: &mut Value, key: &str, value: Option<Value>) {
+    set_or_remove(ensure_object(scene, "display"), key, value);
+}
+
+fn set_key(scene: &mut Value, key: &str, value: Option<Value>) {
+    let obj = scene.as_object_mut().expect("checked in edit_scene_json");
+    set_or_remove(obj, key, value);
 }
 
 /// (content type, file extensions it may keep, magic prefix)
@@ -446,51 +441,47 @@ pub(super) async fn thumbnail(
         .trim()
         .to_ascii_lowercase();
     let Some((_, exts, magic)) = THUMBNAIL_TYPES.iter().find(|(t, _, _)| *t == content_type) else {
-        return (
+        return reply(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "the thumbnail must be a png, jpeg or webp\n",
-        )
-            .into_response();
+            "the thumbnail must be a png, jpeg or webp",
+        );
     };
     if body.len() > MAX_THUMBNAIL_BYTES {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "a thumbnail caps at 2 MB\n").into_response();
+        return reply(StatusCode::PAYLOAD_TOO_LARGE, "a thumbnail caps at 2 MB");
     }
     if !body.starts_with(magic)
         || (content_type == "image/webp" && body.get(8..12) != Some(b"WEBP"))
     {
-        return (
+        return reply(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            format!("the bytes are not {content_type}\n"),
-        )
-            .into_response();
+            format!("the bytes are not {content_type}"),
+        );
     }
     let Some(project) = st.first_project() else {
-        return (StatusCode::NOT_FOUND, "no scene loaded\n").into_response();
+        return reply(StatusCode::NOT_FOUND, "no scene loaded");
     };
     let rel = thumbnail_rel(&project.scene_json, exts);
     let abs = project.root.join(&rel);
     if let Some(parent) = abs.parent() {
         if std::fs::create_dir_all(parent).is_err() {
-            return (
+            return reply(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "the thumbnail folder could not be created\n",
-            )
-                .into_response();
+                "the thumbnail folder could not be created",
+            );
         }
     }
     if std::fs::write(&abs, &body).is_err() {
-        return (
+        return reply(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "the thumbnail could not be written\n",
-        )
-            .into_response();
+            "the thumbnail could not be written",
+        );
     }
     let repoint = edit_scene_json(&st, &project.root, |scene| {
         set_display(scene, "navmapThumbnail", Some(json!(rel)));
         Ok(())
     });
     if let Err((status, why)) = repoint {
-        return (status, format!("{why}\n")).into_response();
+        return reply(status, why);
     }
     let prefix = forwarded_prefix(&headers);
     let hash = b64_content_hash(&abs.display().to_string(), &st.machine);
@@ -502,9 +493,8 @@ pub(super) async fn thumbnail(
 }
 
 /// Overwrite the thumbnail scene.json already names when its extension
-/// matches the upload; otherwise a fresh `scene-thumbnail.{ext}` at the root,
-/// leaving the old file to its owner. A named path that steps outside the
-/// project is never written to — the fallback name is used instead.
+/// matches the upload; otherwise a fresh `scene-thumbnail.{ext}` at the root.
+/// A named path that steps outside the project is never written to.
 fn thumbnail_rel(scene_json: &Value, exts: &[&str]) -> String {
     let current = scene_json
         .get("display")
@@ -535,18 +525,6 @@ fn safe_rel(rel: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn edit() -> SceneEdit {
-        SceneEdit {
-            title: None,
-            description: None,
-            tags: None,
-            parcels: None,
-            base: None,
-            required_permissions: None,
-            spawn_points: None,
-        }
-    }
-
     #[test]
     fn a_title_is_trimmed_and_a_blank_one_refused() {
         let mut scene = json!({});
@@ -554,7 +532,7 @@ mod tests {
             &mut scene,
             &SceneEdit {
                 title: Some("  Gathering Stage  ".into()),
-                ..edit()
+                ..Default::default()
             },
         );
         assert!(ok.is_ok());
@@ -565,7 +543,7 @@ mod tests {
                     &mut scene,
                     &SceneEdit {
                         title: Some(bad.into()),
-                        ..edit()
+                        ..Default::default()
                     }
                 )
                 .is_err(),
@@ -586,7 +564,7 @@ mod tests {
             &SceneEdit {
                 description: Some("  ".into()),
                 tags: Some(vec!["  ".into(), String::new()]),
-                ..edit()
+                ..Default::default()
             },
         )
         .unwrap();
@@ -606,70 +584,52 @@ mod tests {
             &mut scene,
             &SceneEdit {
                 tags: Some(vec!["events".into(), " theatre ".into(), "events".into()]),
-                ..edit()
+                ..Default::default()
             },
         )
         .unwrap();
         assert_eq!(scene["tags"], json!(["events", "theatre"]));
     }
 
+    fn parcels(parcels: &[&str]) -> SceneEdit {
+        SceneEdit {
+            parcels: Some(parcels.iter().map(|p| p.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn parcels_must_stay_connected_and_keep_the_base() {
         let mut scene = json!({ "scene": { "parcels": ["0,0"], "base": "0,0" } });
-        apply(
-            &mut scene,
-            &SceneEdit {
-                parcels: Some(vec!["0,0".into(), "0,1".into()]),
-                ..edit()
-            },
-        )
-        .unwrap();
+        apply(&mut scene, &parcels(&["0,0", "0,1"])).unwrap();
         assert_eq!(scene["scene"]["parcels"], json!(["0,0", "0,1"]));
         assert_eq!(scene["scene"]["base"], json!("0,0"));
 
-        let scattered = SceneEdit {
-            parcels: Some(vec!["0,0".into(), "2,2".into()]),
-            ..edit()
-        };
-        assert!(apply(&mut scene, &scattered)
+        assert!(apply(&mut scene, &parcels(&["0,0", "2,2"]))
             .unwrap_err()
             .contains("edge-connected"));
 
-        let corner = SceneEdit {
-            parcels: Some(vec!["0,0".into(), "1,1".into()]),
-            ..edit()
-        };
         assert!(
-            apply(&mut scene, &corner).is_err(),
+            apply(&mut scene, &parcels(&["0,0", "1,1"])).is_err(),
             "diagonal adjacency is not adjacency"
         );
 
-        let sans_base = SceneEdit {
-            parcels: Some(vec!["0,1".into(), "0,2".into()]),
-            ..edit()
-        };
-        assert!(apply(&mut scene, &sans_base)
+        assert!(apply(&mut scene, &parcels(&["0,1", "0,2"]))
             .unwrap_err()
             .contains("base parcel"));
 
         let rebase = SceneEdit {
-            parcels: Some(vec!["0,1".into(), "0,0".into()]),
             base: Some("0,1".into()),
-            ..edit()
+            ..parcels(&["0,1", "0,0"])
         };
         apply(&mut scene, &rebase).unwrap();
         assert_eq!(scene["scene"]["base"], json!("0,1"));
 
-        let junk = SceneEdit {
-            parcels: Some(vec!["a,b".into()]),
-            ..edit()
-        };
-        assert!(apply(&mut scene, &junk).is_err());
-        let gone = SceneEdit {
-            parcels: Some(vec![]),
-            ..edit()
-        };
-        assert!(apply(&mut scene, &gone).is_err(), "a scene keeps a parcel");
+        assert!(apply(&mut scene, &parcels(&["a,b"])).is_err());
+        assert!(
+            apply(&mut scene, &parcels(&[])).is_err(),
+            "a scene keeps a parcel"
+        );
     }
 
     /// There is no parcel-count or span cap here: a 500-parcel strip is a
@@ -683,7 +643,7 @@ mod tests {
             &mut scene,
             &SceneEdit {
                 parcels: Some(strip),
-                ..edit()
+                ..Default::default()
             },
         )
         .unwrap();
@@ -692,34 +652,23 @@ mod tests {
 
     #[test]
     fn permissions_allow_the_offered_and_the_already_present_only() {
+        let perms = |keys: &[&str]| SceneEdit {
+            required_permissions: Some(keys.iter().map(|k| k.to_string()).collect()),
+            ..Default::default()
+        };
         let mut scene = json!({ "requiredPermissions": ["CUSTOM_X"] });
-        apply(
-            &mut scene,
-            &SceneEdit {
-                required_permissions: Some(vec!["USE_FETCH".into(), "CUSTOM_X".into()]),
-                ..edit()
-            },
-        )
-        .unwrap();
+        apply(&mut scene, &perms(&["USE_FETCH", "CUSTOM_X"])).unwrap();
         assert_eq!(
             scene["requiredPermissions"],
             json!(["USE_FETCH", "CUSTOM_X"])
         );
 
-        let forged = SceneEdit {
-            required_permissions: Some(vec!["CUSTOM_Y".into()]),
-            ..edit()
-        };
-        assert!(apply(&mut scene, &forged).is_err(), "a key never offered");
+        assert!(
+            apply(&mut scene, &perms(&["CUSTOM_Y"])).is_err(),
+            "a key never offered"
+        );
 
-        apply(
-            &mut scene,
-            &SceneEdit {
-                required_permissions: Some(vec![]),
-                ..edit()
-            },
-        )
-        .unwrap();
+        apply(&mut scene, &perms(&[])).unwrap();
         assert!(scene.get("requiredPermissions").is_none());
     }
 
@@ -739,44 +688,31 @@ mod tests {
             position: xyz(8.0, 0.0, 8.5),
             camera_target: Some(xyz(16.0, 1.0, 16.0)),
         };
+        let spawns = |spawns: Vec<SpawnEdit>| SceneEdit {
+            spawn_points: Some(spawns),
+            ..Default::default()
+        };
         let mut scene = json!({});
-        apply(
-            &mut scene,
-            &SceneEdit {
-                spawn_points: Some(vec![spawn("main"), spawn("side")]),
-                ..edit()
-            },
-        )
-        .unwrap();
-        let spawns = scene["spawnPoints"].as_array().unwrap();
-        assert_eq!(spawns.len(), 2);
-        assert_eq!(spawns[0]["default"], json!(true));
-        assert!(spawns[1].get("default").is_none(), "false is absence");
+        apply(&mut scene, &spawns(vec![spawn("main"), spawn("side")])).unwrap();
+        let written = scene["spawnPoints"].as_array().unwrap();
+        assert_eq!(written.len(), 2);
+        assert_eq!(written[0]["default"], json!(true));
+        assert!(written[1].get("default").is_none(), "false is absence");
         assert_eq!(
-            spawns[0]["position"],
+            written[0]["position"],
             json!({ "x": 8, "y": 0, "z": 8.5 }),
             "whole coordinates write as integers"
         );
-        assert_eq!(spawns[0]["cameraTarget"]["x"], json!(16));
+        assert_eq!(written[0]["cameraTarget"]["x"], json!(16));
 
-        let twins = SceneEdit {
-            spawn_points: Some(vec![spawn("main"), spawn("main")]),
-            ..edit()
-        };
+        let twins = spawns(vec![spawn("main"), spawn("main")]);
         assert!(apply(&mut scene, &twins).unwrap_err().contains("main"));
         let far = SpawnEdit {
             position: xyz(1e6, 0.0, 0.0),
             camera_target: None,
             ..spawn("far")
         };
-        assert!(apply(
-            &mut scene,
-            &SceneEdit {
-                spawn_points: Some(vec![far]),
-                ..edit()
-            }
-        )
-        .is_err());
+        assert!(apply(&mut scene, &spawns(vec![far])).is_err());
 
         let ranged = SpawnEdit {
             position: Xyz {
@@ -787,28 +723,14 @@ mod tests {
             camera_target: None,
             ..spawn("area")
         };
-        apply(
-            &mut scene,
-            &SceneEdit {
-                spawn_points: Some(vec![ranged]),
-                ..edit()
-            },
-        )
-        .unwrap();
+        apply(&mut scene, &spawns(vec![ranged])).unwrap();
         assert_eq!(
             scene["spawnPoints"][0]["position"],
             json!({ "x": [0, 3], "y": 0, "z": [1.5, 2] }),
             "a range survives the round trip"
         );
 
-        apply(
-            &mut scene,
-            &SceneEdit {
-                spawn_points: Some(vec![]),
-                ..edit()
-            },
-        )
-        .unwrap();
+        apply(&mut scene, &spawns(vec![])).unwrap();
         assert!(
             scene.get("spawnPoints").is_none(),
             "empty means the default spawn"

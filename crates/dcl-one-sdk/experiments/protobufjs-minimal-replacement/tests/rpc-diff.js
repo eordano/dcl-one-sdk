@@ -12,7 +12,7 @@
 //
 //   rpc/datalayer/data-layer.gen.js = @dcl/inspector/data-layer.gen.js
 //        the 22-method DataService descriptor's message codecs, as vendored by
-//        `build_service_descriptor()` in scripts/build-base-blob.py.
+//        `build_service_descriptor()` in scripts/blob_overlays.py.
 //
 // Neither had ever been round-tripped against pbmin: the corpus phase only ever loaded
 // `@dcl/ecs/dist-cjs`. Same loader, same alias hook, same assertions.

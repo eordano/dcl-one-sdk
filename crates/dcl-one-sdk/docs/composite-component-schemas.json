@@ -1,7 +1,7 @@
 {
   "source": "@dcl/ecs dist-cjs engine component definitions (schema.jsonSchema)",
-  "ecsVersion": "7.26.0",
-  "generatedAt": "2026-08-13T22:08:29.196Z",
+  "ecsVersion": "7.27.0",
+  "generatedAt": "2026-09-04T08:37:16.189Z",
   "registrationErrors": [],
   "componentCount": 68,
   "components": [

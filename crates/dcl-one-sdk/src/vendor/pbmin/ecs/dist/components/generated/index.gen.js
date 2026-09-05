@@ -16,6 +16,7 @@ import { BillboardSchema } from './Billboard.gen';
 import { CameraModeSchema } from './CameraMode.gen';
 import { CameraModeAreaSchema } from './CameraModeArea.gen';
 import { EngineInfoSchema } from './EngineInfo.gen';
+import { ExplorerUiEventsResultSchema } from './ExplorerUiEventsResult.gen';
 import { GltfContainerSchema } from './GltfContainer.gen';
 import { GltfContainerLoadingStateSchema } from './GltfContainerLoadingState.gen';
 import { GltfNodeModifiersSchema } from './GltfNodeModifiers.gen';
@@ -39,6 +40,7 @@ import { RaycastResultSchema } from './RaycastResult.gen';
 import { RealmInfoSchema } from './RealmInfo.gen';
 import { SkyboxTimeSchema } from './SkyboxTime.gen';
 import { TextShapeSchema } from './TextShape.gen';
+import { TouchScreenControlsSchema } from './TouchScreenControls.gen';
 import { TriggerAreaSchema } from './TriggerArea.gen';
 import { TriggerAreaResultSchema } from './TriggerAreaResult.gen';
 import { TweenSchema } from './Tween.gen';
@@ -49,6 +51,7 @@ import { UiCanvasInformationSchema } from './UiCanvasInformation.gen';
 import { UiDropdownSchema } from './UiDropdown.gen';
 import { UiDropdownResultSchema } from './UiDropdownResult.gen';
 import { UiInputSchema } from './UiInput.gen';
+import { UiInputBindingSchema } from './UiInputBinding.gen';
 import { UiInputResultSchema } from './UiInputResult.gen';
 import { UiTextSchema } from './UiText.gen';
 import { UiTransformSchema } from './UiTransform.gen';
@@ -74,6 +77,7 @@ export * from './pb/decentraland/sdk/components/billboard.gen';
 export * from './pb/decentraland/sdk/components/camera_mode.gen';
 export * from './pb/decentraland/sdk/components/camera_mode_area.gen';
 export * from './pb/decentraland/sdk/components/engine_info.gen';
+export * from './pb/decentraland/sdk/components/explorer_ui_events_result.gen';
 export * from './pb/decentraland/sdk/components/gltf_container.gen';
 export * from './pb/decentraland/sdk/components/gltf_container_loading_state.gen';
 export * from './pb/decentraland/sdk/components/gltf_node_modifiers.gen';
@@ -97,6 +101,7 @@ export * from './pb/decentraland/sdk/components/raycast_result.gen';
 export * from './pb/decentraland/sdk/components/realm_info.gen';
 export * from './pb/decentraland/sdk/components/skybox_time.gen';
 export * from './pb/decentraland/sdk/components/text_shape.gen';
+export * from './pb/decentraland/sdk/components/touch_screen_controls.gen';
 export * from './pb/decentraland/sdk/components/trigger_area.gen';
 export * from './pb/decentraland/sdk/components/trigger_area_result.gen';
 export * from './pb/decentraland/sdk/components/tween.gen';
@@ -107,6 +112,7 @@ export * from './pb/decentraland/sdk/components/ui_canvas_information.gen';
 export * from './pb/decentraland/sdk/components/ui_dropdown.gen';
 export * from './pb/decentraland/sdk/components/ui_dropdown_result.gen';
 export * from './pb/decentraland/sdk/components/ui_input.gen';
+export * from './pb/decentraland/sdk/components/ui_input_binding.gen';
 export * from './pb/decentraland/sdk/components/ui_input_result.gen';
 export * from './pb/decentraland/sdk/components/ui_text.gen';
 export * from './pb/decentraland/sdk/components/ui_transform.gen';
@@ -156,6 +162,10 @@ export * from './pb/decentraland/sdk/components/visibility_component.gen';
 /* @__PURE__ */ engine.defineComponentFromSchema("core::CameraModeArea", CameraModeAreaSchema);
 /** @public */ export const EngineInfo = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::EngineInfo", EngineInfoSchema);
+/** @public */ export const ExplorerUiEventsResult = (engine) => /* @__PURE__ */ engine.defineValueSetComponentFromSchema("core::ExplorerUiEventsResult", ExplorerUiEventsResultSchema, {
+    timestampFunction: (t) => t.timestamp,
+    maxElements: 100
+});
 /** @public */ export const GltfContainer = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::GltfContainer", GltfContainerSchema);
 /** @public */ export const GltfContainerLoadingState = engine => 
@@ -204,6 +214,8 @@ export * from './pb/decentraland/sdk/components/visibility_component.gen';
 /* @__PURE__ */ engine.defineComponentFromSchema("core::SkyboxTime", SkyboxTimeSchema);
 /** @public */ export const TextShape = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::TextShape", TextShapeSchema);
+/** @public */ export const TouchScreenControls = engine => 
+/* @__PURE__ */ engine.defineComponentFromSchema("core::TouchScreenControls", TouchScreenControlsSchema);
 /** @public */ export const TriggerArea = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::TriggerArea", TriggerAreaSchema);
 /** @public */ export const TriggerAreaResult = (engine) => /* @__PURE__ */ engine.defineValueSetComponentFromSchema("core::TriggerAreaResult", TriggerAreaResultSchema, {
@@ -226,6 +238,8 @@ export * from './pb/decentraland/sdk/components/visibility_component.gen';
 /* @__PURE__ */ engine.defineComponentFromSchema("core::UiDropdownResult", UiDropdownResultSchema);
 /** @public */ export const UiInput = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::UiInput", UiInputSchema);
+/** @public */ export const UiInputBinding = engine => 
+/* @__PURE__ */ engine.defineComponentFromSchema("core::UiInputBinding", UiInputBindingSchema);
 /** @public */ export const UiInputResult = engine => 
 /* @__PURE__ */ engine.defineComponentFromSchema("core::UiInputResult", UiInputResultSchema);
 /** @public */ export const UiText = engine => 
@@ -262,6 +276,7 @@ export const componentDefinitionByName = /* @__PURE__ */ {
     "core::CameraMode": CameraMode,
     "core::CameraModeArea": CameraModeArea,
     "core::EngineInfo": EngineInfo,
+    "core::ExplorerUiEventsResult": ExplorerUiEventsResult,
     "core::GltfContainer": GltfContainer,
     "core::GltfContainerLoadingState": GltfContainerLoadingState,
     "core::GltfNodeModifiers": GltfNodeModifiers,
@@ -285,6 +300,7 @@ export const componentDefinitionByName = /* @__PURE__ */ {
     "core::RealmInfo": RealmInfo,
     "core::SkyboxTime": SkyboxTime,
     "core::TextShape": TextShape,
+    "core::TouchScreenControls": TouchScreenControls,
     "core::TriggerArea": TriggerArea,
     "core::TriggerAreaResult": TriggerAreaResult,
     "core::Tween": Tween,
@@ -295,6 +311,7 @@ export const componentDefinitionByName = /* @__PURE__ */ {
     "core::UiDropdown": UiDropdown,
     "core::UiDropdownResult": UiDropdownResult,
     "core::UiInput": UiInput,
+    "core::UiInputBinding": UiInputBinding,
     "core::UiInputResult": UiInputResult,
     "core::UiText": UiText,
     "core::UiTransform": UiTransform,

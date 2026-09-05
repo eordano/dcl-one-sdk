@@ -25,15 +25,16 @@ if (!doorUrl) {
 }
 const sceneJson = JSON.parse(fs.readFileSync(path.join(root, 'scene.json'), 'utf8'))
 const mainFile = sceneJson.main
-const log = (...a) => console.log('[multiplayer]', ...a)
-// indented detail under a headline, the way a person reads a log
-const tech = (...a) => console.log('  -> technical info:', ...a)
+// Mark harness lifecycle events for Rust to render with the SDK's timestamp
+// and continuation gutter. Scene console output remains untouched.
+const log = (...a) => console.log('DCL_ONE_MULTIPLAYER:status:' + a.join(' '))
+const tech = (...a) => console.log('DCL_ONE_MULTIPLAYER:detail:' + a.join(' '))
 // one headline no matter which side of the boot/welcome race prints first
 let announced = false
 const announce = () => {
   if (announced) return
   announced = true
-  log('scene started with multiplayer support')
+  log('host joined the room')
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +134,7 @@ async function learnSceneId() {
       // explorers stamp as Scene.scene_id (adoption from the first client
       // packet corrects this if the guess is ever wrong)
       sceneId = String(urn).replace(/^urn:decentraland:entity:/, '').split('?')[0]
-      if (welcomed) tech('scene id is', sceneId)
+      if (welcomed) tech('scene: ' + sceneId + ' (updated)')
     }
   } catch {}
 }
@@ -177,10 +178,8 @@ function connect() {
         peers.set(Number(alias), String(address).toLowerCase())
       if (rejoin) log('rejoined the multiplayer room')
       else announce()
-      tech(
-        'scene id is ' + (sceneId || '(pending)') + ' (alias ' + frame.alias + ') at ' + doorUrl +
-          (peers.size ? ', ' + peers.size + ' player(s) already here' : '')
-      )
+      tech('scene: ' + (sceneId || '(pending)') + ' (alias ' + frame.alias + ')')
+      tech('room: ' + doorUrl + (peers.size ? ' (' + peers.size + ' player(s) here)' : ''))
       onPresence()
     } else if (frame.type === 'join') {
       peers.set(Number(frame.alias), String(frame.address).toLowerCase())
@@ -201,7 +200,7 @@ function connect() {
       if (unwrapped) {
         if (!sceneId && unwrapped.sceneId) {
           sceneId = unwrapped.sceneId
-          tech('scene id corrected from a client packet: ' + sceneId)
+          tech('scene: ' + sceneId + ' (from client)')
         }
         if (sceneId && unwrapped.sceneId && unwrapped.sceneId !== sceneId) return
         body = unwrapped.data
@@ -355,12 +354,13 @@ function reconcilePresence() {
   if (!reg) return
   let engine, PlayerIdentityData
   try {
-    engine = reg['@dcl/sdk/ecs'].engine
-    PlayerIdentityData = reg['@dcl/sdk/ecs'].components.PlayerIdentityData
+    const ecs = reg['@dcl/sdk/ecs']
+    engine = ecs.engine
+    PlayerIdentityData = ecs.PlayerIdentityData || ecs.components.PlayerIdentityData(engine)
   } catch {
     return
   }
-  if (!engine || !PlayerIdentityData) return
+  if (!engine || !PlayerIdentityData || typeof PlayerIdentityData.create !== 'function') return
   const want = new Set(peers.values())
   for (const [addr, ent] of presenceEntities)
     if (!want.has(addr)) {

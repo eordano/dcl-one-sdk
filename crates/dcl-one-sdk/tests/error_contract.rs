@@ -5,6 +5,8 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_dcl-one-sdk");
 
 /// Every child this file spawns is bounded by this.
@@ -71,7 +73,7 @@ fn cli(args: &[&str], envs: &[(&str, &str)]) -> Command {
         "DCL_PRIVATE_KEY",
         "RUST_LOG",
         "NO_COLOR",
-        "DCL_ONE_SDK_DEFAULT_TARGET",
+        "DCL_ONE_SDK_TARGET_SERVER",
         "DCL_ONE_SDK_LINKER_TIMEOUT_SECS",
     ] {
         cmd.env_remove(k);
@@ -425,8 +427,8 @@ fn g9_headless_key_requires_explicit_target() {
     let out = run(&args, &[key]);
     assert_contract(&out, f.path(), "no deploy target given");
     let err = stderr_of(&out);
-    assert!(err.contains("--target-content"));
-    assert!(err.contains("DCL_ONE_SDK_DEFAULT_TARGET"));
+    assert!(err.contains("--target"));
+    assert!(err.contains("DCL_ONE_SDK_TARGET_SERVER"));
     assert_verbose_chain(&args, &[key]);
 }
 
@@ -821,7 +823,7 @@ fn g25_target_and_target_content_conflict() {
         "http://127.0.0.1:9",
     ];
     let out = run(&args, &[]);
-    assert_contract(&out, f.path(), "not both");
+    assert_contract(&out, f.path(), "pass the target once");
     assert_verbose_chain(&args, &[]);
 }
 
@@ -837,12 +839,12 @@ fn g26_catalyst_about_probe_failure() {
         &dir,
         "--skip-build",
         "--target",
-        "http://127.0.0.1:9",
+        "127.0.0.1:9",
     ];
     let out = run(&args, &[]);
     assert_contract(&out, f.path(), "could not resolve the catalyst");
     assert!(
-        stderr_of(&out).contains("--target-content"),
+        stderr_of(&out).contains("with the scheme"),
         "stderr: {}",
         stderr_of(&out)
     );
@@ -978,7 +980,7 @@ fn g32_dir_does_not_exist() {
 /// testgate rather than `expect`, so `--include-ignored` without the variable
 /// fails naming the variable and pointing at the opt-out, instead of unwrapping.
 fn provisioned_scene() -> Option<PathBuf> {
-    catalyrst_testgate::require_env("DCL_ONE_SDK_TEST_SCENE").map(PathBuf::from)
+    common::testgate::require_env("DCL_ONE_SDK_TEST_SCENE").map(PathBuf::from)
 }
 
 #[test]

@@ -9,6 +9,7 @@ export { cyclicParentingChecker } from './systems/cyclicParentingChecker';
 export * from './systems/events';
 export * from './systems/raycast';
 export * from './systems/videoEvents';
+export * from './systems/audioEvents';
 export * from './systems/assetLoad';
 export * from './systems/async-task';
 export * from './systems/tween';
@@ -39,6 +40,8 @@ export const LightSource = /* @__PURE__*/ components.LightSource(engine);
 export const TriggerArea = /* @__PURE__*/ components.TriggerArea(engine);
 export const ParticleSystem = 
 /* @__PURE__*/ components.ParticleSystem(engine);
+export const TouchScreenControls = 
+/* @__PURE__*/ components.TouchScreenControls(engine);
 /**
  * @alpha
  * This is going to be used for sync components through a server.

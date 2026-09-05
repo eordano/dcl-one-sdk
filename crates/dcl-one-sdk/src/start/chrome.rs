@@ -52,21 +52,18 @@ pub(crate) fn html(body: String) -> Response {
         .into_response()
 }
 
-/// The four sections every page links between, plus what the bar shows for
-/// this render: which link is current, the deploy run badge, the account
-/// pill or its connect button, and the server host pill. `None` renders the
-/// bare mark — the CLI's standalone signing server has no sections to offer.
+/// What the header bar shows for this render. `None` renders the bare mark —
+/// the CLI's standalone signing server has no sections to offer.
 pub(crate) struct Nav<'a> {
     pub active: &'a str,
     pub badge: &'a str,
     pub host: &'a str,
-    /// The remembered account, drawn as a pill linking to /target. `None`
-    /// draws the connect button instead — the account is a server-wide fact,
-    /// so its handle lives in the bar, not inside one page's card.
+    /// The remembered account, drawn as a pill linking to /target; `None`
+    /// draws the connect button. A server-wide fact, so it lives in the bar.
     pub account: Option<String>,
-    /// The page token the connect button's POST carries; the POST is gated
-    /// exactly like the publish button, so rendering this to every reader
-    /// gives a stranger nothing a loopback check does not take back.
+    /// The page token the connect POST carries; gated exactly like the
+    /// publish button, so rendering it to every reader gives a stranger
+    /// nothing a loopback check does not take back.
     pub token: &'a str,
 }
 
@@ -88,10 +85,10 @@ const SECTIONS: [(&str, &str, &str); 4] = [
 fn pgnav(prefix: &str, nav: &Nav) -> String {
     let mut out = String::from(r#"<nav class="pgnav" aria-label="Sections">"#);
     for (key, path, label) in SECTIONS {
-        let href = match (prefix.is_empty(), path) {
-            (true, "/") => "/".to_string(),
-            (false, "/") => prefix.to_string(),
-            _ => format!("{prefix}{path}"),
+        let href = if path == "/" && !prefix.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix}{path}")
         };
         let current = if *key == *nav.active {
             r#" aria-current="page""#
@@ -112,9 +109,6 @@ fn pgnav(prefix: &str, nav: &Nav) -> String {
     }
     out.push_str("</nav>");
     match &nav.account {
-        // The pill names the account and links to /target; the sliver beside
-        // it disconnects. No caption anywhere — the connection worked, and
-        // the pages below are what it bought.
         Some(addr) => out.push_str(&format!(
             r#"<span class="bar__acct bar__acct--split"><a class="bar__cta" href="{href}" title="{full}">{short}</a><form method="post" action="{action}"><input type="hidden" name="token" value="{tok}"><input type="hidden" name="address" value=""><button class="bar__cta" type="submit" title="Disconnect">×</button></form></span>"#,
             href = esc(&format!("{prefix}/target")),
@@ -141,9 +135,8 @@ fn pgnav(prefix: &str, nav: &Nav) -> String {
     out
 }
 
-/// The chrome every page on this server shares: one stylesheet, one header
-/// with the section nav, one skip link — so the four sections read as one
-/// server, not four pages.
+/// One stylesheet, one header with the section nav, one skip link — so the
+/// four sections read as one server, not four pages.
 pub(crate) fn document(
     title: &str,
     prefix: &str,

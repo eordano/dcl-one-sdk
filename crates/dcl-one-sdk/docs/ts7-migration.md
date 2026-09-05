@@ -60,7 +60,7 @@ targets must be relative once `baseUrl` is gone — `"@dcl/asset-packs/*":
 ## What upstream must change (pending)
 
 File: `node_modules/@dcl/sdk/types/tsconfig.ecs7.json`, shipped inside
-`src/vendor/node_modules.zip` (@dcl/sdk 7.26.0). Upstream home:
+`src/vendor/node_modules.zip` (@dcl/sdk 7.27.0). Upstream home:
 `decentraland/js-sdk-toolchain`, `packages/@dcl/sdk/types/tsconfig.ecs7.json`.
 `tsconfig.ecs7.strict.json` needs nothing — it is
 `{"compilerOptions":{},"extends":"./tsconfig.ecs7.json"}`.
@@ -101,35 +101,23 @@ Why each line is safe:
 * `moduleResolution` — same rationale as the scaffold override; this arm is
   what fixes scenes that already exist and never get a new tsconfig.
 
-Because the blob is a pure registry install, this must land either upstream (so
-a re-vendor picks it up) or as an explicit overlay step in
-`scripts/build-base-blob.py`, applied next to the other post-extract rewrites,
-with a guard so a regen fails loudly if upstream has already fixed it:
-
-```python
-ECS7 = 'node_modules/@dcl/sdk/types/tsconfig.ecs7.json'
-
-def patch_ecs7_tsconfig(files: dict[str, bytes]) -> None:
-    """Drop the two options TS 7 removes and modernise moduleResolution.
-
-    downlevelIteration is emit-only and dead at target es2020 (set two lines
-    above it) and under our `tsc --noEmit`; suppressExcessPropertyErrors is
-    the compiler default and inert since TS 5.5. TS 6 errors TS5101/TS5107 on
-    them, TS 7 removes them outright (TS5102/TS5023/TS5108) and
-    `ignoreDeprecations` cannot silence a removed option.
-    """
-    raw = files[ECS7].decode('utf-8')
-    out = (raw
-           .replace('    "downlevelIteration": true,\n', '', 1)
-           .replace('    "suppressExcessPropertyErrors": false,\n', '', 1)
-           .replace('"moduleResolution": "node"', '"moduleResolution": "bundler"', 1))
-    assert out != raw, 'ecs7 tsconfig already patched upstream — drop this overlay'
-    json.loads(out)
-    files[ECS7] = out.encode('utf-8')
-```
-
-This makes the blob no longer "a pure registry install — no overlays"; that
-sentence in `src/vendor/README.md` has to change when the overlay lands.
+Until it lands upstream (so a re-vendor picks it up) it is an explicit overlay
+step of the blob build: `patch_ecs7_tsconfig()` in `scripts/blob_overlays.py`,
+run by `scripts/build-base-blob.py` beside the other rewrites that module holds
+and named with them in `src/vendor/README.md`. The function makes exactly the
+three edits above on the collected `tsconfig.ecs7.json`, then re-parses the
+result and fails the build if either removed option survived, if
+`moduleResolution` did not become `bundler`, if `module` is not `esnext` (the
+only setting under which `bundler` is legal), or if any other compiler option
+shifted. Each edit (`ECS7_EDITS`) must also match exactly once: one that finds
+nothing on a file already reading the way it would leave it is that part of the
+upstream fix having shipped, and the build fails naming the edit to drop; once
+all three find nothing it fails with the instruction to delete the overlay,
+so it cannot idle unnoticed, not even partially. Any other match count is
+upstream having changed the option's shape, and fails asking for the edit to
+be re-derived. The blob is therefore no longer "a pure
+registry install - no overlays"; the README's table is the complete list of
+what the build rewrites.
 
 ## Why not `ignoreDeprecations`
 
@@ -167,7 +155,7 @@ Two further gaps, for whoever picks up TS 7 later:
 ## Verification
 
 Fresh `dcl-one-sdk init --project scene`, `node_modules` from the current
-`src/vendor/node_modules.zip` (@dcl/sdk 7.26.0), driven through
+`src/vendor/node_modules.zip` (@dcl/sdk 7.27.0), driven through
 `dcl-one-sdk build --dir <scene> --production`. No `ignoreDeprecations`
 anywhere.
 

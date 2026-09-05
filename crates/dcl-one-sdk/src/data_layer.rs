@@ -14,11 +14,10 @@ const DUMP_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Clone)]
 pub struct DataLayerState {
     pub port_rx: watch::Receiver<u16>,
-    /// Where the editor's browser bundle lives, if one is installed. `None` is
-    /// normal: the data layer and the UI are separable, so `--data-layer`
-    /// without `@dcl/inspector` still serves the protocol and 404s
-    /// `/inspector/*`. Treating that as fatal made the vendored host
-    /// unreachable, since a real `@dcl/inspector` wins at `require()` time.
+    /// The editor's browser bundle, if installed. `None` is normal: the data
+    /// layer still serves the protocol and 404s `/inspector/*`; treating it as
+    /// fatal made the vendored host unreachable, since a real `@dcl/inspector`
+    /// wins at `require()` time.
     pub public_dir: Option<PathBuf>,
 }
 
@@ -64,9 +63,8 @@ pub fn inspector_config_json(ws_url: &str) -> String {
     json!({ "dataLayerRpcWsUrl": ws_url }).to_string()
 }
 
-/// Where an inspector asset actually lives on disk. The vendored blob stores
-/// the big bundles `.gz` (11 MB unpacked instead of 73 MB); an npm-installed
-/// `@dcl/inspector` has them plain, so plain wins and `.gz` is the fallback.
+/// The vendored blob stores the big bundles `.gz` (11 MB instead of 73 MB); an
+/// npm-installed `@dcl/inspector` has them plain, so plain wins.
 pub enum Asset {
     Plain(PathBuf),
     Gzipped(PathBuf),
@@ -140,8 +138,8 @@ pub fn inspector_mime(path: &Path) -> &'static str {
 }
 
 pub fn write_driver(root: &Path) -> Result<PathBuf> {
-    let dir = root.join(".dcl-one");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let dir = crate::scene::work_dir(root)
+        .with_context(|| format!("creating {}", root.join(".dcl-one").display()))?;
     let path = dir.join("data-layer-host.mjs");
     std::fs::write(&path, DRIVER_TEMPLATE)
         .with_context(|| format!("writing {}", path.display()))?;
@@ -360,20 +358,20 @@ pub async fn dump_crdt(root: &Path) -> Result<u64> {
         .unwrap_or(0))
 }
 
-/// Which generator produced main.crdt. User-visible: the fallback shells out to
-/// node and needs `@dcl/inspector` resolvable, so it is slower and fails more.
+/// Which generator produced main.crdt; the node fallback is slower and needs
+/// `@dcl/inspector` resolvable, so the build reports it.
 pub enum CrdtRegen {
     /// Generated in-process, from this many composite files.
     Native(u64),
-    /// The node data-layer's summary carries no composite count we can trust,
-    /// so none is reported rather than a zero that reads as "nothing included".
+    /// The node summary carries no trustworthy composite count, so none is
+    /// reported rather than a zero that reads as "nothing included".
     NodeDataLayer,
 }
 
-/// Re-run the node data-layer and shout if its bytes differ from the ones we
-/// just wrote; a `DCL_ONE_CRDT_VERIFY=1` soak that reports nothing is the gate
-/// for deleting the node fallback. The driver only ever writes
-/// `<root>/main.crdt`, so this borrows that path and restores it afterwards.
+/// Re-run the node data-layer and shout if its bytes differ from the native
+/// ones; a `DCL_ONE_CRDT_VERIFY=1` soak that reports nothing is the gate for
+/// deleting the node fallback. The driver only writes `<root>/main.crdt`, so
+/// that path is borrowed and restored afterwards.
 async fn shadow_verify(root: &Path, native: &[u8]) {
     let main_crdt = root.join("main.crdt");
     let outcome = match dump_crdt(root).await {
@@ -443,32 +441,7 @@ pub async fn regenerate_main_crdt(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct Tmp(PathBuf);
-
-    impl Tmp {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "dcl-one-sdk-datalayer-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Tmp(dir)
-        }
-
-        fn write(&self, rel: &str, contents: &str) {
-            let p = self.0.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, contents).unwrap();
-        }
-    }
-
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::crdt_gen::TestDir;
 
     #[test]
     fn config_injection_rewrites_only_the_assignment() {
@@ -483,7 +456,7 @@ mod tests {
 
     #[test]
     fn locate_walks_up_to_find_the_inspector_public_dir() {
-        let t = Tmp::new("locate");
+        let t = TestDir::new("datalayer-locate");
         t.write(
             "node_modules/@dcl/inspector/public/index.html",
             "<html>$CONFIG</html>",
@@ -506,7 +479,7 @@ mod tests {
 
     #[test]
     fn resolve_prefers_a_plain_asset_and_falls_back_to_the_gzipped_one() {
-        let t = Tmp::new("resolve");
+        let t = TestDir::new("datalayer-resolve");
         t.write("public/index.html", "<html></html>");
         t.write("public/bundle.js.gz", "not really gzip");
         t.write("public/plain.js", "console.log(1)");
@@ -529,7 +502,7 @@ mod tests {
 
     #[test]
     fn resolve_refuses_paths_that_escape_the_public_dir() {
-        let t = Tmp::new("escape");
+        let t = TestDir::new("datalayer-escape");
         t.write("public/index.html", "<html></html>");
         t.write("secret.txt", "nope");
         let dir = t.0.join("public");

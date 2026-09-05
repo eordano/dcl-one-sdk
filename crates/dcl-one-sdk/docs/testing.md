@@ -31,7 +31,9 @@ DCL_ONE_SDK_TEST_SCENE=/path/to/scene \
 
 Under `--include-ignored` the gate is *armed*: a variable that is missing makes
 the test **fail** naming the variable, rather than passing silently. That is
-`catalyrst-testgate`, and it is the point of the crate — asking for the
+the testgate in `tests/common/testgate.rs` (the monorepo's `catalyrst-testgate`,
+copied so the standalone workspace needs no extra crate), and it is the point
+of the gate — asking for the
 heavyweight suite and getting a green run that skipped it is the failure mode it
 exists to stop.
 
@@ -59,7 +61,7 @@ fails naming `node` and pointing at the opt-out below.
 
 | variable | effect |
 | --- | --- |
-| `ALLOW_SKIPPED_INTEGRATION=1` | a missing dependency returns instead of failing. The test then reports `ok` having asserted nothing, so `catalyrst-testgate` prints a `SKIPPED <test>: ...` line straight to fd 2 — outside libtest's output capture, which discards the stderr of passing tests. Use it in a CI matrix leg that genuinely cannot host the dependency, and read the SKIPPED lines. |
+| `ALLOW_SKIPPED_INTEGRATION=1` | a missing dependency returns instead of failing. The test then reports `ok` having asserted nothing, so the testgate prints a `SKIPPED <test>: ...` line straight to fd 2 — outside libtest's output capture, which discards the stderr of passing tests. Use it in a CI matrix leg that genuinely cannot host the dependency, and read the SKIPPED lines. |
 | `CATALYRST_TESTGATE_SKIPLOG` | a file every skip is appended to, one `test<TAB>requirement<TAB>detail` record per line. Read this instead of the pass tally when the hatch is open. |
 
 ## Other knobs

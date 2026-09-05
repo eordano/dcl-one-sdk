@@ -16,8 +16,9 @@ times vary with hardware):
 - `init` scaffolds a working scene fully offline in about 0.2 s — the vendored
   node_modules (422 files, ~14 MB unpacked) ships inside the binary as a 2.3 MB
   zip
-- `build` bundles and type-checks in about half a second; `start` is serving the
-  preview ~0.1 s after launch
+- `build` bundles and type-checks in about half a second cold and ~40 ms when
+  nothing changed since the last pass; `start` serves the preview ~0.1 s after
+  launch and rebuilds a save within ~50 ms
 - a production scene is a ~1 KB scene chunk and a 5.7 KB loader stub beside a
   shared, immutable 464 KB SDK-runtime chunk, vs upstream's ~938 KB single-file
   production bundle
@@ -127,7 +128,7 @@ are glibc-linked), and for testing an abgen from source.
 
 ## Upstream parity notes
 
-`start` serves the same preview surface as `@dcl/sdk-commands` 7.26.0, with two
+`start` serves the same preview surface as `@dcl/sdk-commands` 7.27.0, with two
 deliberate differences, both about not baking in someone else's infrastructure:
 
 - **`/feature-flags/{file}`** — upstream proxies to a hardcoded

@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-crypto"
-version = "0.20.0"
+version = "0.22.2"
 edition = "2021"
 description = "Rust port of the Decentraland @dcl/crypto auth chain verification"
 
@@ -8,7 +8,7 @@ description = "Rust port of the Decentraland @dcl/crypto auth chain verification
 test-signer = []
 
 [dependencies]
-catalyrst-types = { path = "../catalyrst-types", default-features = false }
+catalyrst-auth-chain = { workspace = true }
 alloy-primitives = { workspace = true, features = ["k256"] }
 k256 = "0.13"
 sha2 = { workspace = true }

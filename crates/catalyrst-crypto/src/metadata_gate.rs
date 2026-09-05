@@ -27,6 +27,36 @@ pub enum SignerGateError {
     NotCanonical(String),
 }
 
+#[derive(Debug, Error)]
+pub enum FieldGateError {
+    #[error("gate on \"{field}\" requires at least one value")]
+    NoValues { field: String },
+    #[error(
+        "gate on \"{field}\" expects non-empty canonical (trimmed, lowercase) values, got: {value}"
+    )]
+    NotCanonical { field: String, value: String },
+}
+
+enum ArgumentFault {
+    NoValues,
+    NotCanonical(String),
+}
+
+/// A non-canonical argument could never match a value that passed the
+/// canonical check, so the gate would silently never fire; every constructor
+/// below makes that a startup failure instead.
+fn check_canonical_arguments(values: &[&str]) -> Result<(), ArgumentFault> {
+    if values.is_empty() {
+        return Err(ArgumentFault::NoValues);
+    }
+    for value in values {
+        if value.is_empty() || !is_canonical(value) {
+            return Err(ArgumentFault::NotCanonical(truncate_detail(value)));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn truncate_detail(value: &str) -> String {
     if value.chars().count() > DETAIL_MAX_CHARS {
         let head: String = value.chars().take(DETAIL_MAX_CHARS).collect();
@@ -59,21 +89,51 @@ pub struct SignerGate {
     rejected: Vec<String>,
 }
 
+/// Whether any key of `object` folds to `field` without being spelled exactly
+/// that. Refused rather than read as absent: the exact-key read sees no
+/// `signer` in `{"Signer": ...}`, and the 6.x payload is no backstop when the
+/// client signs the re-spelled key from the start. Nothing is folded on the
+/// way through - the request is refused, never read under a spelling it did
+/// not sign.
+fn has_folded_variant(object: &Map<String, Value>, field: &str) -> bool {
+    let folded = field.to_lowercase();
+    object
+        .keys()
+        .any(|key| key != field && key.to_lowercase() == folded)
+}
+
+/// Upstream's `canonicalField(field)`: form only. Absent passes - absence is a
+/// question for the gate this is combined with - and a present value passes
+/// only as a canonical string. Reads `field` as an own key of the metadata
+/// object, which `serde_json::Map` gives structurally: there is no prototype
+/// chain for a value the client never sent to arrive through.
+pub fn field_is_canonical(metadata: &Value, field: &str) -> bool {
+    let Some(object) = metadata.as_object() else {
+        return true;
+    };
+    if has_folded_variant(object, field) {
+        return false;
+    }
+    match object.get(field) {
+        None => true,
+        Some(Value::String(value)) => is_canonical(value),
+        Some(_) => false,
+    }
+}
+
+fn own_string<'a>(metadata: &'a Value, field: &str) -> Option<&'a str> {
+    metadata.as_object()?.get(field)?.as_str()
+}
+
 impl SignerGate {
-    /// Reads `signer` as an own key of the metadata object, which
-    /// `serde_json::Map` gives structurally - there is no prototype chain for a
-    /// value the client never sent to arrive through.
+    /// Upstream's `rejectIfSigner`: [`field_is_canonical`] over `signer`, then
+    /// the exact comparison, so a value the form check refused is never
+    /// compared and a key that only folds to `signer` is refused rather than
+    /// read as absent.
     pub fn permits(&self, metadata: &Value) -> bool {
-        let Some(object) = metadata.as_object() else {
-            return true;
-        };
-        let Some(declared) = object.get(SIGNER_KEY) else {
-            return true;
-        };
-        let Some(signer) = declared.as_str() else {
-            return false;
-        };
-        is_canonical(signer) && !self.rejected.iter().any(|value| value == signer)
+        field_is_canonical(metadata, SIGNER_KEY)
+            && !own_string(metadata, SIGNER_KEY)
+                .is_some_and(|signer| self.rejected.iter().any(|value| value == signer))
     }
 }
 
@@ -81,16 +141,58 @@ impl SignerGate {
 /// a value that passed the canonical check, so it must be a startup failure
 /// rather than a gate that silently never fires.
 pub fn reject_if_signer(signers: &[&str]) -> Result<SignerGate, SignerGateError> {
-    if signers.is_empty() {
-        return Err(SignerGateError::NoValues);
-    }
-    for signer in signers {
-        if signer.is_empty() || !is_canonical(signer) {
-            return Err(SignerGateError::NotCanonical(truncate_detail(signer)));
-        }
-    }
+    check_canonical_arguments(signers).map_err(|fault| match fault {
+        ArgumentFault::NoValues => SignerGateError::NoValues,
+        ArgumentFault::NotCanonical(value) => SignerGateError::NotCanonical(value),
+    })?;
     Ok(SignerGate {
         rejected: signers.iter().map(|signer| (*signer).to_string()).collect(),
+    })
+}
+
+/// The "this endpoint is only for these callers" gate: upstream's
+/// `requireCanonicalField(field, ...values)` and, over `signer`,
+/// `requireSigner(...)`. Fails closed: absent, a key that only folds to
+/// `field`, a non-string, a non-canonical value and an unlisted one are all
+/// refused. The read, the form check and the comparison happen here so no
+/// plain field read at a call site can reintroduce a value the gate refused.
+#[derive(Debug, Clone)]
+pub struct RequiredFieldGate {
+    field: String,
+    accepted: Vec<String>,
+}
+
+impl RequiredFieldGate {
+    pub fn permits(&self, metadata: &Value) -> bool {
+        field_is_canonical(metadata, &self.field)
+            && own_string(metadata, &self.field)
+                .is_some_and(|value| self.accepted.iter().any(|accepted| accepted == value))
+    }
+}
+
+pub fn require_canonical_field(
+    field: &str,
+    values: &[&str],
+) -> Result<RequiredFieldGate, FieldGateError> {
+    check_canonical_arguments(values).map_err(|fault| match fault {
+        ArgumentFault::NoValues => FieldGateError::NoValues {
+            field: field.to_string(),
+        },
+        ArgumentFault::NotCanonical(value) => FieldGateError::NotCanonical {
+            field: field.to_string(),
+            value,
+        },
+    })?;
+    Ok(RequiredFieldGate {
+        field: field.to_string(),
+        accepted: values.iter().map(|value| (*value).to_string()).collect(),
+    })
+}
+
+pub fn require_signer(signers: &[&str]) -> Result<RequiredFieldGate, SignerGateError> {
+    require_canonical_field(SIGNER_KEY, signers).map_err(|err| match err {
+        FieldGateError::NoValues { .. } => SignerGateError::NoValues,
+        FieldGateError::NotCanonical { value, .. } => SignerGateError::NotCanonical(value),
     })
 }
 
@@ -233,6 +335,15 @@ mod tests {
     }
 
     #[test]
+    fn gate_refuses_a_key_that_folds_to_signer_instead_of_reading_it_as_absent() {
+        assert!(!scene_gate().permits(&json!({ "Signer": SCENE_SIGNER })));
+        assert!(!scene_gate().permits(&json!({ "SIGNER": SCENE_SIGNER })));
+        assert!(!scene_gate().permits(&json!({ "Signer": "dcl:explorer" })));
+        assert!(!scene_gate().permits(&json!({ "signer": "dcl:explorer", "Signer": SCENE_SIGNER })));
+        assert!(scene_gate().permits(&json!({ "signerId": SCENE_SIGNER, "sign": SCENE_SIGNER })));
+    }
+
+    #[test]
     fn gate_refuses_a_signer_wrapped_in_a_byte_order_mark() {
         let bom = format!("\u{FEFF}{SCENE_SIGNER}");
         assert!(!scene_gate().permits(&json!({ "signer": bom })));
@@ -368,5 +479,103 @@ mod tests {
         let metadata = json!({ "Realm": { "serverName": "LocalPreview" } });
         assert!(assert_legacy_metadata_keys(&metadata, &["realm.serverName"]).is_err());
         assert!(assert_legacy_metadata_keys(&metadata, &["Realm"]).is_ok());
+    }
+
+    const HANDSHAKE_INTENT: &str = "dcl:explorer:comms-handshake";
+
+    fn scene_only() -> RequiredFieldGate {
+        require_signer(&[SCENE_SIGNER]).unwrap()
+    }
+
+    fn handshake_intent() -> RequiredFieldGate {
+        require_canonical_field("intent", &[HANDSHAKE_INTENT]).unwrap()
+    }
+
+    /// Upstream's `metadataValidators.spec.ts` shapes for crypto-middleware
+    /// 6.3.0: a key that case-folds to the field without being spelled it is a
+    /// refusal in every predicate, never an absence.
+    #[test]
+    fn every_predicate_refuses_a_key_that_folds_to_its_field() {
+        for metadata in [
+            json!({ "Signer": SCENE_SIGNER }),
+            json!({ "SIGNER": SCENE_SIGNER }),
+            json!({ "signer": "dcl:explorer", "Signer": SCENE_SIGNER }),
+        ] {
+            assert!(!scene_gate().permits(&metadata), "{metadata}");
+            assert!(!scene_only().permits(&metadata), "{metadata}");
+            assert!(!field_is_canonical(&metadata, "signer"), "{metadata}");
+        }
+        assert!(!handshake_intent().permits(&json!({ "Intent": HANDSHAKE_INTENT })));
+    }
+
+    #[test]
+    fn every_predicate_still_accepts_metadata_spelled_as_declared() {
+        assert!(scene_gate().permits(&json!({ "signer": "dcl:explorer" })));
+        assert!(field_is_canonical(
+            &json!({ "signer": "dcl:explorer" }),
+            "signer"
+        ));
+        assert!(handshake_intent().permits(&json!({ "intent": HANDSHAKE_INTENT })));
+        assert!(scene_only().permits(&json!({ "signer": SCENE_SIGNER })));
+    }
+
+    #[test]
+    fn canonical_field_passes_absence_and_refuses_a_present_non_canonical_form() {
+        assert!(field_is_canonical(&json!({}), "signer"));
+        assert!(field_is_canonical(&Value::Null, "signer"));
+        assert!(field_is_canonical(&json!({ "signer": "" }), "signer"));
+        assert!(!field_is_canonical(
+            &json!({ "signer": "Dcl:Explorer" }),
+            "signer"
+        ));
+        assert!(!field_is_canonical(
+            &json!({ "signer": " dcl:explorer" }),
+            "signer"
+        ));
+        assert!(!field_is_canonical(&json!({ "signer": 42 }), "signer"));
+        assert!(!field_is_canonical(&json!({ "signer": null }), "signer"));
+        assert!(!field_is_canonical(
+            &json!({ "signer": "\u{FEFF}dcl:explorer" }),
+            "signer"
+        ));
+    }
+
+    #[test]
+    fn required_field_fails_closed() {
+        let gate = scene_only();
+        assert!(!gate.permits(&json!({})));
+        assert!(!gate.permits(&Value::Null));
+        assert!(!gate.permits(&json!({ "signer": "dcl:explorer" })));
+        assert!(!gate.permits(&json!({ "signer": "Decentraland-Kernel-Scene" })));
+        assert!(!gate.permits(&json!({ "signer": [SCENE_SIGNER] })));
+        assert!(!gate.permits(&json!({ "signer": "" })));
+
+        let either = require_signer(&[SCENE_SIGNER, "dcl:authoritative-server"]).unwrap();
+        assert!(either.permits(&json!({ "signer": "dcl:authoritative-server" })));
+        assert!(!either.permits(&json!({ "signer": "dcl:explorer" })));
+    }
+
+    #[test]
+    fn required_field_construction_refuses_a_non_canonical_or_empty_declaration() {
+        assert!(matches!(
+            require_signer(&[]),
+            Err(SignerGateError::NoValues)
+        ));
+        assert!(matches!(
+            require_signer(&["Decentraland-Kernel-Scene"]),
+            Err(SignerGateError::NotCanonical(_))
+        ));
+        assert!(matches!(
+            require_canonical_field("intent", &[]),
+            Err(FieldGateError::NoValues { .. })
+        ));
+        assert!(matches!(
+            require_canonical_field("intent", &["Dcl:Intent"]),
+            Err(FieldGateError::NotCanonical { .. })
+        ));
+        assert!(matches!(
+            require_canonical_field("intent", &[""]),
+            Err(FieldGateError::NotCanonical { .. })
+        ));
     }
 }

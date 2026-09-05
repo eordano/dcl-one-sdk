@@ -15,6 +15,8 @@ export interface PBEngineInfo {
     totalRuntime: number;
     /** tick counter of the scene as per ADR-148 */
     tickNumber: number;
+    /** visibility state of the scene regarding Explorer fullscreen UI */
+    sceneHidden: boolean;
 }
 /**
  * @public

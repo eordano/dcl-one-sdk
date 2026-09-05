@@ -7,13 +7,17 @@ export function createAssetLoadLoadingStateSystem(engine) {
     const assetLoadLoadingStateComponent = components.AssetLoadLoadingState(engine);
     const entitiesCallbackAssetLoadLoadingStateMap = new Map();
     function registerAssetLoadLoadingStateEntity(entity, callback) {
-        entitiesCallbackAssetLoadLoadingStateMap.set(entity, { callback: callback, lastLoadingStateLength: 0 });
+        const existing = entitiesCallbackAssetLoadLoadingStateMap.get(entity);
+        entitiesCallbackAssetLoadLoadingStateMap.set(entity, {
+            callback: callback,
+            lastLoadingStateLength: existing?.lastLoadingStateLength ?? 0
+        });
     }
     function removeAssetLoadLoadingStateEntity(entity) {
         entitiesCallbackAssetLoadLoadingStateMap.delete(entity);
     }
     // @internal
-    engine.addSystem(function EventSystem() {
+    engine.addSystem(function AssetLoadEventSystem() {
         const garbageEntries = [];
         for (const [entity, data] of entitiesCallbackAssetLoadLoadingStateMap) {
             if (engine.getEntityState(entity) === EntityState.Removed) {

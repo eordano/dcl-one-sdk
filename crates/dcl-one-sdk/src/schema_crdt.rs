@@ -1,13 +1,9 @@
-//! The @dcl/ecs `ISchema` encoder — the second serializer a composite needs.
+//! The @dcl/ecs `ISchema` encoder: core components are protobuf (see
+//! crdt_gen); everything else (`core-schema::*`, `inspector::*`,
+//! `asset-packs::*`, user names) is a tagless, positional, little-endian
+//! format driven entirely by the `jsonSchema` the composite carries.
 //!
-//! Core components ride on protobuf (see crdt_gen); everything the editor and
-//! the asset packs define (`core-schema::*`, `inspector::*`, `asset-packs::*`,
-//! and arbitrary user component names) is serialized by @dcl/ecs's own schema
-//! runtime: a tagless, positional, little-endian format driven entirely by the
-//! `jsonSchema` the composite carries, which is what makes user-defined
-//! components work with no static component table.
-//!
-//! Verified against @dcl/ecs 7.26.0 (`schemas/`, `components/component-number.js`,
+//! Verified against @dcl/ecs 7.27.0 (`schemas/`, `components/component-number.js`,
 //! `serialization/ByteBuffer`). JS semantics reproduced deliberately:
 //! - map: properties back to back in declaration order — no count, no tags, no
 //!   lengths (`Map.js`)
@@ -54,10 +50,8 @@ impl std::fmt::Display for SchemaError {
 impl std::error::Error for SchemaError {}
 
 /// The component id @dcl/ecs derives for a name it has no static mapping for.
-///
-/// The window is not a limit check: `utf8.write` keeps writing past the end of
-/// the typed array, where the writes are dropped, so a longer name is hashed
-/// truncated — possibly mid-character.
+/// `utf8.write` keeps writing past the end of the typed array, where the writes
+/// are dropped, so a longer name is hashed truncated — possibly mid-character.
 pub fn component_number_from_name(name: &str) -> u32 {
     let mut buf = [0u8; NAME_WINDOW];
     let bytes = name.as_bytes();
@@ -83,13 +77,16 @@ pub enum Schema {
     Entity,
     F32,
     F64,
-    Vector3,
-    Quaternion,
-    Color3,
-    Color4,
+    /// A fixed tuple of f32 properties: vector3, quaternion, color3, color4.
+    Floats(&'static [&'static str]),
     EnumInt(Option<i64>),
     EnumStr(Option<String>),
 }
+
+const VECTOR3: &[&str] = &["x", "y", "z"];
+const QUATERNION: &[&str] = &["x", "y", "z", "w"];
+const COLOR3: &[&str] = &["r", "g", "b"];
+const COLOR4: &[&str] = &["r", "g", "b", "a"];
 
 /// Compile a composite's `jsonSchema`, mirroring `jsonSchemaToSchema`: dispatch
 /// is on `serializationType` alone, and anything unknown is a hard stop.
@@ -119,10 +116,10 @@ pub fn compile(js: &JsValue) -> Result<Schema, SchemaError> {
         "entity" => Schema::Entity,
         "float32" => Schema::F32,
         "float64" => Schema::F64,
-        "vector3" => Schema::Vector3,
-        "quaternion" => Schema::Quaternion,
-        "color3" => Schema::Color3,
-        "color4" => Schema::Color4,
+        "vector3" => Schema::Floats(VECTOR3),
+        "quaternion" => Schema::Floats(QUATERNION),
+        "color3" => Schema::Floats(COLOR3),
+        "color4" => Schema::Floats(COLOR4),
         "enum-int" => Schema::EnumInt(match js.get("default") {
             None | Some(JsValue::Null) => None,
             Some(JsValue::Number(n)) if n.fract() == 0.0 && n.is_finite() => Some(*n as i64),
@@ -225,26 +222,14 @@ pub fn create_default(schema: &Schema) -> Option<Value> {
             Value::from(0)
         }
         Schema::F32 | Schema::F64 => Value::from(0.0),
-        Schema::Vector3 => zeroed(VECTOR3),
-        Schema::Quaternion => zeroed(QUATERNION),
-        Schema::Color3 => zeroed(COLOR3),
-        Schema::Color4 => zeroed(COLOR4),
+        Schema::Floats(keys) => Value::Object(
+            keys.iter()
+                .map(|k| ((*k).to_string(), Value::from(0.0)))
+                .collect(),
+        ),
         Schema::EnumInt(default) => Value::from((*default)?),
         Schema::EnumStr(default) => Value::String(default.clone()?),
     })
-}
-
-const VECTOR3: &[&str] = &["x", "y", "z"];
-const QUATERNION: &[&str] = &["x", "y", "z", "w"];
-const COLOR3: &[&str] = &["r", "g", "b"];
-const COLOR4: &[&str] = &["r", "g", "b", "a"];
-
-fn zeroed(keys: &[&str]) -> Value {
-    Value::Object(
-        keys.iter()
-            .map(|k| ((*k).to_string(), Value::from(0.0)))
-            .collect(),
-    )
 }
 
 /// Serialize one component value, applying the top-level `extend` first.
@@ -336,10 +321,13 @@ pub fn encode(
         Schema::Int64 => out.extend_from_slice(&to_big_int64(value)?.to_le_bytes()),
         Schema::F32 => out.extend_from_slice(&(to_number(value) as f32).to_le_bytes()),
         Schema::F64 => out.extend_from_slice(&to_number(value).to_le_bytes()),
-        Schema::Vector3 => write_floats(value, VECTOR3, out)?,
-        Schema::Quaternion => write_floats(value, QUATERNION, out)?,
-        Schema::Color3 => write_floats(value, COLOR3, out)?,
-        Schema::Color4 => write_floats(value, COLOR4, out)?,
+        Schema::Floats(keys) => {
+            let obj = property_source(value, "vector")?;
+            for key in *keys {
+                let component = to_number(obj.and_then(|o| o.get(*key))) as f32;
+                out.extend_from_slice(&component.to_le_bytes());
+            }
+        }
     }
     Ok(())
 }
@@ -372,19 +360,6 @@ fn write_utf8_string(value: Option<&Value>, out: &mut Vec<u8>) -> Result<(), Sch
     };
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
     out.extend_from_slice(text.as_bytes());
-    Ok(())
-}
-
-fn write_floats(
-    value: Option<&Value>,
-    keys: &[&str],
-    out: &mut Vec<u8>,
-) -> Result<(), SchemaError> {
-    let obj = property_source(value, "vector")?;
-    for key in keys {
-        let component = to_number(obj.and_then(|o| o.get(*key))) as f32;
-        out.extend_from_slice(&component.to_le_bytes());
-    }
     Ok(())
 }
 
@@ -451,6 +426,17 @@ fn join_element(value: &Value) -> String {
     }
 }
 
+/// The `0x`/`0o`/`0b` radix prefix of a numeric string and the digits after it.
+fn radix_prefix(t: &str) -> Option<(u32, &str)> {
+    let radix = match t.get(..2)?.to_ascii_lowercase().as_str() {
+        "0x" => 16,
+        "0o" => 8,
+        "0b" => 2,
+        _ => return None,
+    };
+    Some((radix, &t[2..]))
+}
+
 /// ECMAScript ToNumber over a string (the StringNumericLiteral grammar).
 ///
 /// `f64::from_str` misses the radix prefixes silently: "0x10" fails to parse,
@@ -461,14 +447,8 @@ fn string_to_number(s: &str) -> f64 {
     if t.is_empty() {
         return 0.0;
     }
-    let radix = match t.get(..2).map(str::to_ascii_lowercase).as_deref() {
-        Some("0x") => Some(16),
-        Some("0o") => Some(8),
-        Some("0b") => Some(2),
-        _ => None,
-    };
-    if let Some(radix) = radix {
-        return u64::from_str_radix(&t[2..], radix).map_or(f64::NAN, |v| v as f64);
+    if let Some((radix, digits)) = radix_prefix(t) {
+        return u64::from_str_radix(digits, radix).map_or(f64::NAN, |v| v as f64);
     }
     match t {
         "Infinity" | "+Infinity" => f64::INFINITY,
@@ -536,11 +516,9 @@ fn string_to_big_int(s: &str) -> Result<i64, SchemaError> {
     if t.is_empty() {
         return Ok(0);
     }
-    let (radix, digits, negative) = match t.get(..2).map(str::to_ascii_lowercase).as_deref() {
-        Some("0x") => (16, &t[2..], false),
-        Some("0o") => (8, &t[2..], false),
-        Some("0b") => (2, &t[2..], false),
-        _ => match t.strip_prefix('-') {
+    let (radix, digits, negative) = match radix_prefix(t) {
+        Some((radix, digits)) => (radix, digits, false),
+        None => match t.strip_prefix('-') {
             Some(rest) => (10, rest, true),
             None => (10, t.strip_prefix('+').unwrap_or(t), false),
         },
@@ -775,9 +753,8 @@ mod tests {
         assert_eq!(to_int32(1e300), 0);
     }
 
-    /// Coercion, not layout, is where a silently wrong byte hides: nothing
-    /// errors, the scene just loads with a different value. Each case was
-    /// checked against @dcl/ecs rather than read off the spec.
+    /// Coercion, not layout, is where a silently wrong byte hides; each case
+    /// was checked against @dcl/ecs rather than read off the spec.
     #[test]
     fn to_number_matches_the_javascript_grammar_on_the_awkward_shapes() {
         assert_eq!(string_to_number("0x10"), 16.0);
@@ -800,10 +777,7 @@ mod tests {
         assert!(to_number(Some(&json!([1, 2]))).is_nan());
     }
 
-    /// `writeUtf8String` is `@protobufjs/utf8` with no type check in front of
-    /// it, so an ill-typed value is not an error there — it is an empty string,
-    /// which is a silently wrong byte rather than a loud one. Each expectation
-    /// was read off @dcl/ecs, not off the spec.
+    /// Each expectation was read off @dcl/ecs, not off the spec.
     #[test]
     fn a_non_string_on_a_string_leaf_writes_the_empty_string() {
         let s = schema(json!({ "type": "string", "serializationType": "utf8-string" }));
@@ -831,9 +805,6 @@ mod tests {
         assert_eq!(enc(&s, &json!({ "length": 0 })), vec![0, 0, 0, 0]);
     }
 
-    /// A string on an int64 leaf goes through `BigInt`, not `Number`: it keeps
-    /// every digit (where `Number` has already rounded), reads the radix
-    /// prefixes, and throws where `Number` would have produced NaN.
     #[test]
     fn int64_coerces_through_bigint_rather_than_number() {
         assert_eq!(to_big_int64(Some(&json!("0x10"))).unwrap(), 16);
@@ -873,10 +844,8 @@ mod tests {
         }
     }
 
-    /// An array leaf writes `value.length` and then iterates `value`. A string
-    /// satisfies both, so it serializes as an array of its characters — and the
-    /// count is UTF-16 code units while the iteration walks code points, which
-    /// is why an astral character writes one more than it produces.
+    /// The array count is UTF-16 code units while the iteration walks code
+    /// points, so an astral character writes one more than it produces.
     #[test]
     fn a_string_on_an_array_leaf_serializes_as_its_characters() {
         let ints = schema(json!({

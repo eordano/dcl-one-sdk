@@ -1,14 +1,19 @@
 use super::*;
 use crate::deploy::WORLDS_CONTENT_SERVER;
+use crate::start::deploy_rights::{Holdings, ParcelRight, WorldRow};
 use crate::start::deploy_status::*;
 use axum::body::to_bytes;
 use axum::http::{header, StatusCode};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::net::{Ipv4Addr, SocketAddrV4};
 
-/// A real directory with real files, because the property being tested is
-/// about what a rendered payload list says: the previous version of this
-/// test pointed at a path that did not exist, so nothing was listed and
+const ADDR: &str = "0x1234567890abcdef1234567890abcdef12345678";
+const LAN: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 9), 51000));
+const LOCAL: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 51000));
+
+/// A real directory with real files: an earlier version of these tests
+/// pointed at a path that did not exist, so nothing was listed and
 /// `!contains("somebody")` passed without proving anything.
 struct Tree(std::path::PathBuf);
 
@@ -41,22 +46,144 @@ fn scene(tag: &str, mut scene_json: serde_json::Value) -> (Tree, Project) {
     (Tree(base), project)
 }
 
-/// `start::mod`'s `AppState` is private to `start`, and this module is one
-/// of its children, so the page can be driven through its real route
-/// without touching the file that owns the type.
+fn gather(tag: &str) -> (Tree, Project) {
+    scene(tag, json!({ "display": { "title": "Gather" } }))
+}
+
+fn state(project: Project) -> Arc<AppState> {
+    Arc::new(crate::start::testkit::state(vec![project]))
+}
+
+async fn body_of(resp: Response) -> String {
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+async fn json_of(resp: Response) -> serde_json::Value {
+    serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+}
+
+/// The preview cache is process-wide, so a test that wants a fresh walk
+/// drops its own entry and leaves the rest alone.
+fn forget(st: &Arc<AppState>) {
+    let root = st.projects()[0].root.clone();
+    cache(st).retain(|(p, _, _)| *p != root);
+}
+
+/// Everything a visitor of `/deploy` receives, fetched the way they fetch it:
+/// this suite once rebuilt the page's strings for itself and stayed green
+/// while `page` printed the absolute path of the scene.
+async fn served(st: &Arc<AppState>) -> String {
+    forget(st);
+    let resp = route(State(st.clone()), ConnectInfo(LOCAL), HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    body_of(resp).await
+}
+
+async fn served_target(st: &Arc<AppState>) -> String {
+    body_of(target_page(st, &HeaderMap::new()).await).await
+}
+
+fn status(remote: Remote) -> LiveStatus {
+    LiveStatus {
+        remote,
+        reuse: None,
+    }
+}
+
+fn reuse(reused_files: usize, reused_bytes: u64, upload_files: usize, upload_bytes: u64) -> Reuse {
+    Reuse {
+        reused_files,
+        reused_bytes,
+        upload_files,
+        upload_bytes,
+    }
+}
+
+fn remote_scene(title: &str, coords: Vec<(i64, i64)>) -> RemoteScene {
+    RemoteScene {
+        title: title.into(),
+        parcels: coords.len(),
+        coords,
+        size: None,
+    }
+}
+
+fn current_scene(title: &str, timestamp: Option<i64>, coords: Vec<(i64, i64)>) -> CurrentScene {
+    CurrentScene {
+        title: title.into(),
+        timestamp,
+        parcels: coords.len(),
+        coords,
+        size: None,
+    }
+}
+
+fn world_row(name: &str, scenes: Option<i64>, title: Option<&str>) -> WorldRow {
+    WorldRow {
+        name: name.to_string(),
+        scenes,
+        last_deployed: None,
+        title: title.map(str::to_string),
+        owned: true,
+    }
+}
+
+fn owner_of(worlds: Vec<WorldRow>) -> Rights {
+    Rights {
+        verdict: Verdict::May("you own this name".into()),
+        worlds,
+        ..Rights::unchecked(ADDR, "")
+    }
+}
+
+fn linker_deploy(target: &str, world: Option<&str>) -> crate::linker::LinkerDeploy {
+    crate::linker::LinkerDeploy {
+        dir: std::env::temp_dir(),
+        prepared: deploy::Prepared {
+            files: vec![],
+            pointers: vec!["0,0".into()],
+            metadata: crate::jsjson::parse("{}").unwrap(),
+        },
+        target_content: target.into(),
+        world: world.map(str::to_string),
+        needs_delete: false,
+        timestamp_override: None,
+        entity_out: None,
+        scene_title: "Gather".into(),
+        base_parcel: "0,0".into(),
+        multi_scene: true,
+        gate: crate::deploy::PermissionGate::off(),
+    }
+}
+
+/// A live signer with no wallet answer yet.
+fn parked_signer() -> Arc<crate::linker::LinkerState> {
+    crate::linker::new_state(linker_deploy(
+        "https://worlds-content-server.decentraland.org",
+        Some("w.dcl.eth"),
+    ))
+    .0
+}
+
 /// The loopback gate, which the router tests cannot reach: their client is
-/// always 127.0.0.1, and this machine's firewall refuses a real inbound
-/// connection to its own LAN address, so the only honest way to put a
-/// non-loopback peer in front of the handler is to hand it one.
+/// always 127.0.0.1, so the only honest way to put a non-loopback peer in
+/// front of the handler is to hand it one.
 #[tokio::test]
 async fn a_peer_off_this_machine_cannot_publish() {
-    let (_tree, project) = scene("remote", json!({ "display": { "title": "Gather" } }));
+    let (_tree, project) = gather("remote");
     let st = state(project);
-    let lan: SocketAddr = ([192, 168, 1, 9], 51000).into();
 
     let refused = start(
         State(st.clone()),
-        ConnectInfo(lan),
+        ConnectInfo(LAN),
         HeaderMap::new(),
         Form(DeployForm {
             token: token(&st).to_string(),
@@ -70,11 +197,7 @@ async fn a_peer_off_this_machine_cannot_publish() {
         "a correct token from off-machine is still not allowed to publish"
     );
 
-    let page = page(&st, &HeaderMap::new(), false).await;
-    let body = axum::body::to_bytes(page.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body = String::from_utf8(body.to_vec()).unwrap();
+    let body = body_of(page(&st, &HeaderMap::new(), false).await).await;
     assert!(
         !body.contains(r#"id="publish""#),
         "no publish button for a remote reader"
@@ -85,46 +208,11 @@ async fn a_peer_off_this_machine_cannot_publish() {
     );
 }
 
-fn state(project: Project) -> Arc<AppState> {
-    Arc::new(crate::start::testkit::state(vec![project]))
-}
-
-/// The preview cache is process-wide, so a test that wants a fresh walk
-/// drops its own entry and leaves the rest alone.
-fn forget(st: &Arc<AppState>) {
-    let root = st.projects()[0].root.clone();
-    cache(st).retain(|(p, _, _)| *p != root);
-}
-
-/// Everything a visitor of `/deploy` actually receives, fetched the way
-/// they fetch it. Tests that rebuild the page's strings for themselves
-/// prove nothing about the page: this suite used to do exactly that, and
-/// stayed green while `page` printed the absolute path of the scene.
-async fn served(st: &Arc<AppState>) -> String {
-    forget(st);
-    let resp = route(
-        State(st.clone()),
-        ConnectInfo(([127, 0, 0, 1], 0).into()),
-        HeaderMap::new(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .starts_with("text/html"));
-    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    String::from_utf8(bytes.to_vec()).unwrap()
-}
-
 /// This page is served to anything that can reach the port, so the one
 /// thing it must never answer is where the scene lives on disk.
 #[tokio::test]
 async fn the_deploy_page_never_names_the_scene_directory() {
-    let (dir, project) = scene("names", json!({ "display": { "title": "Gather" } }));
+    let (dir, project) = gather("names");
     let root = project.root.clone();
     let html = served(&state(project)).await;
     assert!(html.contains("dcl-one-sdk deploy"));
@@ -136,15 +224,12 @@ async fn the_deploy_page_never_names_the_scene_directory() {
     assert!(html.contains("in the scene folder"));
 }
 
-/// The page is one landing-language card: the destination as the card's
-/// headline, the live/upload split as its two columns, and the publish
-/// button in its footer bar. The scene's name rides the page sub, not a kv
-/// row, and the headline is the ONLY place the card names the target — the
-/// old host pill duplicated it and is gone.
+/// One landing-language card: the destination as the headline (the ONLY
+/// place the card names the target), the publish button in its footer.
 #[tokio::test]
 async fn the_page_is_one_card_with_the_target_in_its_headline() {
     let _guard = crate::deploy::ENV_LOCK.lock().await;
-    let (_dir, project) = scene("card", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("card");
     let html = served(&state(project)).await;
     assert!(
         !html.contains(r#"<h1 class="page__title">Deploy</h1>"#),
@@ -189,10 +274,8 @@ async fn the_page_is_one_card_with_the_target_in_its_headline() {
     );
 }
 
-/// This page adds layout the shared sheet has no rule for, and that is the
-/// whole licence it has: the moment it names a colour, a case or a
-/// tracking of its own, `/deploy` starts looking like a different server
-/// than `/`.
+/// The page-local sheet adds layout only: a colour, case or tracking of its
+/// own would make `/deploy` look like a different server than `/`.
 #[test]
 fn the_page_local_css_adds_layout_and_never_a_second_palette() {
     for banned in [
@@ -215,9 +298,8 @@ fn the_page_local_css_adds_layout_and_never_a_second_palette() {
     );
 }
 
-/// The destination is resolved the way the deploy itself resolves it: env
-/// override first, then the world name onto the public worlds server,
-/// then Genesis.
+/// Env override first, then the world name onto the public worlds server,
+/// then Genesis — the way the deploy itself resolves it.
 #[test]
 fn the_destination_resolves_like_the_deploy_will() {
     let world = json!({ "worldConfiguration": { "name": "gather.dcl.eth" } });
@@ -255,7 +337,7 @@ fn the_destination_resolves_like_the_deploy_will() {
         "{}",
         env.server_line
     );
-    assert!(env.server_line.contains("DCL_ONE_SDK_DEFAULT_TARGET"));
+    assert!(env.server_line.contains("DCL_ONE_SDK_TARGET_SERVER"));
     assert_eq!(
         env.read_bases,
         [
@@ -285,9 +367,9 @@ fn the_destination_resolves_like_the_deploy_will() {
     assert!(rot.server_line.contains("DCL_ONE_SDK_CATALYST_ROTATION"));
 }
 
-/// The worlds `/scenes` answer, in the shape the public server actually
-/// returns: the scene on our parcels is the current one, the rest are the
-/// neighbours `multi_scene: true` preserves.
+/// The worlds `/scenes` answer in the public server's shape: the scene on
+/// our parcels is current, the rest are the neighbours `multi_scene: true`
+/// preserves.
 #[test]
 fn a_world_answer_splits_into_current_and_preserved_scenes() {
     let body = json!({ "scenes": [
@@ -328,8 +410,8 @@ fn a_world_answer_splits_into_current_and_preserved_scenes() {
     ));
 }
 
-/// The Genesis answer: the entity on the base parcel headlines, and any
-/// other entity under the deploying pointers is named as replaced.
+/// The entity on the base parcel headlines; any other entity under the
+/// deploying pointers is named as replaced.
 #[test]
 fn a_genesis_answer_headlines_the_base_parcel_entity() {
     let entities = vec![
@@ -350,8 +432,8 @@ fn a_genesis_answer_headlines_the_base_parcel_entity() {
     assert!(matches!(genesis_remote(&[], "85,40"), Remote::Empty));
 }
 
-/// Each remote state renders one honest sentence or the kv rows — and the
-/// preserved/replaced copy follows the destination, because the POST's
+/// Each remote state renders one honest sentence or the kv rows, and the
+/// preserved/replaced copy follows the destination: the POST's
 /// `multi_scene: true` only holds on a worlds server.
 #[test]
 fn every_remote_state_renders_and_names_the_fate_of_neighbours() {
@@ -365,25 +447,15 @@ fn every_remote_state_renders_and_names_the_fate_of_neighbours() {
         None,
         None,
     );
-    let known = LiveStatus {
-        remote: Remote::Known(RemoteState {
-            current: Some(CurrentScene {
-                title: "Gathering Stage".into(),
-                timestamp: Some(deploy::now_ms() - 3 * 86_400_000),
-                parcels: 4,
-                coords: vec![(0, 0), (0, 1), (1, 0), (1, 1)],
-                size: None,
-            }),
-            others: vec![RemoteScene {
-                title: "Bazaar".into(),
-                parcels: 3,
-                coords: vec![(5, 5), (5, 6), (6, 5)],
-                size: None,
-            }],
-            hashes: HashSet::new(),
-        }),
-        reuse: None,
-    };
+    let known = status(Remote::Known(RemoteState {
+        current: Some(current_scene(
+            "Gathering Stage",
+            Some(deploy::now_ms() - 3 * 86_400_000),
+            vec![(0, 0), (0, 1), (1, 0), (1, 1)],
+        )),
+        others: vec![remote_scene("Bazaar", vec![(5, 5), (5, 6), (6, 5)])],
+        hashes: HashSet::new(),
+    }));
     let html = server_panel(&world, &known);
     assert!(html.contains("Gathering Stage"), "{html}");
     assert!(html.contains("3 days ago"), "{html}");
@@ -396,22 +468,16 @@ fn every_remote_state_renders_and_names_the_fate_of_neighbours() {
     let html = server_panel(&land, &known);
     assert!(html.contains("replaced by this publish"), "{html}");
 
-    let empty = LiveStatus {
-        remote: Remote::Empty,
-        reuse: None,
-    };
+    let empty = status(Remote::Empty);
     assert!(
         server_panel(&world, &empty).contains("Nothing is deployed here yet"),
         "{}",
         server_panel(&world, &empty)
     );
 
-    let down = LiveStatus {
-        remote: Remote::Unreachable(
-            "could not reach worlds-content-server.decentraland.org".into(),
-        ),
-        reuse: None,
-    };
+    let down = status(Remote::Unreachable(
+        "could not reach worlds-content-server.decentraland.org".into(),
+    ));
     let html = server_panel(&world, &down);
     assert!(html.contains("Could not check what is live"), "{html}");
     assert!(html.contains("Publishing may still work"), "{html}");
@@ -424,9 +490,8 @@ fn every_remote_state_renders_and_names_the_fate_of_neighbours() {
     );
 }
 
-/// The reuse split over synthetic hash sets: a file the server holds
-/// transfers nothing, a file with no hash is an upload, and the bytes
-/// follow the files.
+/// A file the server holds transfers nothing, a file with no hash is an
+/// upload, and the bytes follow the files.
 #[test]
 fn the_reuse_split_counts_files_and_bytes_by_server_hash() {
     let files = vec![
@@ -454,16 +519,11 @@ fn the_reuse_split_counts_files_and_bytes_by_server_hash() {
 /// split to say.
 #[test]
 fn the_upload_column_says_the_split_in_one_line() {
-    let (_dir, project) = scene("upline", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("upline");
     let p = deploy::preview(&project).unwrap();
     let with = LiveStatus {
         remote: Remote::Empty,
-        reuse: Some(Reuse {
-            reused_files: 2,
-            reused_bytes: 2000,
-            upload_files: 1,
-            upload_bytes: 79,
-        }),
+        reuse: Some(reuse(2, 2000, 1, 79)),
     };
     let html = upload_panel(&p, &with);
     assert!(
@@ -474,12 +534,7 @@ fn the_upload_column_says_the_split_in_one_line() {
 
     let fresh = LiveStatus {
         remote: Remote::Empty,
-        reuse: Some(Reuse {
-            reused_files: 0,
-            reused_bytes: 0,
-            upload_files: 3,
-            upload_bytes: 2079,
-        }),
+        reuse: Some(reuse(0, 0, 3, 2079)),
     };
     let html = upload_panel(&p, &fresh);
     assert!(html.contains("All 3 files upload"), "{html}");
@@ -493,12 +548,11 @@ fn the_upload_column_says_the_split_in_one_line() {
     );
 }
 
-/// The local hashes are the publish-time CIDs: the same fixture bytes the
-/// deploy golden test pins must hash to the same ids here, or the reuse
-/// split would compare apples to invented oranges.
+/// The same fixture bytes the deploy golden test pins must hash to the same
+/// ids here, or the reuse split would compare apples to invented oranges.
 #[tokio::test]
 async fn the_reuse_hashes_are_the_publish_time_cids() {
-    let (_dir, project) = scene("cids", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("cids");
     std::fs::write(
         project.root.join("bin/index.js"),
         "console.log(\"golden\");\n",
@@ -532,23 +586,21 @@ fn ago_reads_like_a_person() {
     );
 }
 
-/// The page follows a run both ways: the `<noscript>` meta refresh rides
-/// the Running state and only the Running state (the no-JS fallback), and
-/// the region's `data-state`/`data-signing` are the shape the script compares
-/// before swapping. A live signer renders the wallet panel inline — there is
-/// no signing page of its own.
+/// The `<noscript>` meta refresh rides the Running state only, the region's
+/// `data-state`/`data-signing` are the shape the script compares before
+/// swapping, and a live signer renders the wallet panel inline.
 #[test]
 fn the_run_region_marks_its_state_for_the_script_and_the_no_js_refresh() {
     const PANEL: &str =
         r#"<div class="panel" id="sign-panel" data-api="/t/abc/deploy/sign">…</div>"#;
     let mut run = Run {
-        id: 1,
-        started: Instant::now(),
-        target: "https://worlds-content-server.decentraland.org".into(),
         signing: Some("/deploy".into()),
-        auto: false,
-        print: "abc123".into(),
-        state: RunState::Running,
+        ..Run::new(
+            1,
+            "https://worlds-content-server.decentraland.org".into(),
+            false,
+            "abc123".into(),
+        )
     };
     let html = run_region_for("/t/abc", Some(&run), None, Some(PANEL));
     assert!(
@@ -573,7 +625,7 @@ fn the_run_region_marks_its_state_for_the_script_and_the_no_js_refresh() {
     );
     run.signing = Some("/deploy".into());
 
-    run.state = RunState::Done;
+    run.state = RunState::Done("Deployed bafy (HTTP 200)".into());
     let html = run_region_for(
         "",
         Some(&run),
@@ -605,13 +657,12 @@ fn the_run_region_marks_its_state_for_the_script_and_the_no_js_refresh() {
     );
 }
 
-/// The page ships exactly its own script and nothing else executable, the
-/// same posture the landing page holds: no src, no `javascript:` url, no
-/// inline handler, no alert — and the no-JS path keeps its POSTing form
-/// with the token and the fingerprint.
+/// Exactly its own script and nothing else executable — no src, no
+/// `javascript:` url, no inline handler, no alert — and the no-JS path keeps
+/// its POSTing form with the token and the fingerprint.
 #[tokio::test]
 async fn the_page_ships_exactly_its_own_script_and_no_handlers() {
-    let (_dir, project) = scene("script", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("script");
     let html = served(&state(project)).await;
     let lower = html.to_lowercase();
     assert_eq!(lower.matches("<script").count(), 1, "one inline script");
@@ -647,12 +698,10 @@ async fn the_page_ships_exactly_its_own_script_and_no_handlers() {
     );
 }
 
-/// The destination is said ONCE, in the card's header — the old Server
-/// field restated it and is gone. A world deploy needs no flag, so the
+/// The destination is said ONCE, in the card's header, and a world deploy's
 /// terminal line is the bare command. `None` is passed for the default
-/// target on purpose: reading the environment here would make this test
-/// say something different on a machine that exports
-/// `DCL_ONE_SDK_DEFAULT_TARGET`, which the README tells people to do.
+/// target on purpose: reading the environment would make this test say
+/// something different on a machine that exports `DCL_ONE_SDK_TARGET_SERVER`.
 #[tokio::test]
 async fn the_card_names_the_destination_once_and_the_bare_command() {
     let (_dir, project) = scene(
@@ -684,8 +733,8 @@ async fn the_card_names_the_destination_once_and_the_bare_command() {
     );
 }
 
-/// The target page: one card, one sub-tab per destination shape, with the
-/// world tab checked for a world scene and honest empty states elsewhere.
+/// One card, one sub-tab per destination shape, the world tab checked for a
+/// world scene and honest empty states elsewhere.
 #[tokio::test]
 async fn the_target_page_offers_the_four_destination_shapes() {
     let _guard = crate::deploy::ENV_LOCK.lock().await;
@@ -693,12 +742,7 @@ async fn the_target_page_offers_the_four_destination_shapes() {
         "targetpg",
         json!({ "display": { "title": "Gather" }, "worldConfiguration": { "name": "my.dcl.eth" } }),
     );
-    let st = state(project);
-    let resp = target_page(&st, &HeaderMap::new()).await;
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8(body.to_vec()).unwrap();
+    let html = served_target(&state(project)).await;
     assert!(
         !html.contains("<h2>Deploy target</h2>"),
         "the card leads with its tabs, not a header restating the nav: {html}"
@@ -735,16 +779,13 @@ async fn the_target_page_offers_the_four_destination_shapes() {
 }
 
 /// One signing endpoint, hosted by this server and gated like the POST that
-/// starts a run. The panel it answers is server-rendered inline on `/deploy`
-/// (and the landing page) once a run hands the signer over — a page-driven
-/// publish involves exactly one server and no signing page of its own.
+/// starts a run; its panel is server-rendered inline once a run hands the
+/// signer over.
 #[tokio::test]
 async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
     let _guard = crate::deploy::ENV_LOCK.lock().await;
-    let (_dir, project) = scene("signhost", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("signhost");
     let st = state(project);
-    let lan: SocketAddr = ([192, 168, 1, 9], 40000).into();
-    let local: SocketAddr = ([127, 0, 0, 1], 40000).into();
 
     let sig_req = || -> Result<
         axum::Json<crate::linker::SignReq>,
@@ -760,7 +801,7 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
 
     let blocked = sign_submit(
         State(st.clone()),
-        ConnectInfo(lan),
+        ConnectInfo(LAN),
         HeaderMap::new(),
         sig_req(),
     )
@@ -778,7 +819,7 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
     );
     let idle = sign_submit(
         State(st.clone()),
-        ConnectInfo(local),
+        ConnectInfo(LOCAL),
         HeaderMap::new(),
         sig_req(),
     )
@@ -789,24 +830,7 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
         "an idle signer refuses instead of pretending"
     );
 
-    let (state_arc, _rx) = crate::linker::new_state(crate::linker::LinkerDeploy {
-        dir: std::env::temp_dir(),
-        prepared: deploy::Prepared {
-            files: vec![],
-            pointers: vec!["0,0".into()],
-            metadata: crate::jsjson::parse("{}").unwrap(),
-        },
-        target_content: "https://worlds-content-server.decentraland.org".into(),
-        world: Some("w.dcl.eth".into()),
-        needs_delete: false,
-        timestamp_override: None,
-        entity_out: None,
-        scene_title: "Gather".into(),
-        base_parcel: "0,0".into(),
-        multi_scene: true,
-        check_permissions: false,
-    });
-    adopt_cli_signing(&st, state_arc);
+    adopt_cli_signing(&st, parked_signer());
     let panel = pending_sign_panel(&st, "/t/abc").expect("a live signer renders the panel");
     assert!(
         panel.contains(r#"data-api="/t/abc/deploy/sign""#),
@@ -825,13 +849,7 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
     );
 
     forget(&st);
-    let remote = route(State(st.clone()), ConnectInfo(lan), HeaderMap::new()).await;
-    let remote = String::from_utf8_lossy(
-        &axum::body::to_bytes(remote.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .into_owned();
+    let remote = body_of(route(State(st.clone()), ConnectInfo(LAN), HeaderMap::new()).await).await;
     assert!(
         !remote.contains(r#"id="sign-panel""#),
         "a peer the signing gate refuses gets no payload facts: {remote}"
@@ -845,11 +863,10 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
 }
 
 /// The count that matters is what `.dclignore` removed from a directory
-/// that IS published — not the seventeen thousand files under a
-/// node_modules the walk never enters.
+/// that IS published, not the files under a node_modules the walk never enters.
 #[tokio::test]
 async fn ignored_names_the_files_you_excluded_not_the_tree_you_never_ship() {
-    let (_dir, project) = scene("ignored", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("ignored");
     let modules = project.root.join("node_modules/pkg");
     std::fs::create_dir_all(&modules).unwrap();
     for i in 0..50 {
@@ -869,7 +886,7 @@ async fn ignored_names_the_files_you_excluded_not_the_tree_you_never_ship() {
 /// without the page ever reading the bytes.
 #[test]
 fn the_payload_totals_the_files_it_would_upload() {
-    let (_dir, project) = scene("totals", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("totals");
     let p = deploy::preview(&project).expect("preview");
     let listed: u64 = p.files.iter().filter_map(|(_, len)| *len).sum();
     assert_eq!(listed, p.total_bytes);
@@ -887,11 +904,10 @@ fn the_payload_totals_the_files_it_would_upload() {
 }
 
 /// The truncated tail folds instead of vanishing: its summary carries the
-/// byte sum of the folded files (the only number that makes the panel add
-/// up), and one click shows every row.
+/// byte sum of the folded files, and one click shows every row.
 #[tokio::test]
 async fn a_long_payload_lists_eight_and_folds_the_rest() {
-    let (_dir, project) = scene("truncate", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("truncate");
     for i in 1..=12u64 {
         std::fs::write(
             project.root.join(format!("assets/a{i:02}.glb")),
@@ -931,11 +947,10 @@ async fn a_long_payload_lists_eight_and_folds_the_rest() {
     );
 }
 
-/// A file over the per-file limit is the deploy failing, and the panel
-/// saying so has never rendered until this fixture existed.
+/// A file over the per-file limit is the deploy failing.
 #[tokio::test]
 async fn an_oversize_file_gets_a_warning_before_the_wallet() {
-    let (_dir, project) = scene("oversize", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("oversize");
     let big = project.root.join("assets/huge.glb");
     std::fs::File::create(&big)
         .unwrap()
@@ -950,13 +965,12 @@ async fn an_oversize_file_gets_a_warning_before_the_wallet() {
     assert!(html.contains("50.0 MB"), "{html}");
 }
 
-/// A publishable file whose size cannot be read is the deploy stopping
-/// after the wallet has signed. Reporting it as 0 bytes made the page say
-/// the deploy was fine.
+/// A publishable file whose size cannot be read stops the deploy after the
+/// wallet has signed; reporting it as 0 bytes made the page say all was fine.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_file_that_cannot_be_read_is_not_called_zero_bytes() {
-    let (_dir, project) = scene("dangling", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("dangling");
     std::os::unix::fs::symlink(
         project.root.join("assets/gone.bin"),
         project.root.join("assets/dangling.glb"),
@@ -982,11 +996,11 @@ async fn a_file_that_cannot_be_read_is_not_called_zero_bytes() {
     );
 }
 
-/// "You have not built yet" is the most likely reason a real deploy fails,
-/// and `prepare` refuses it — after the wallet prompt.
+/// "You have not built yet" is the likeliest reason a real deploy fails,
+/// and `prepare` refuses it after the wallet prompt.
 #[tokio::test]
 async fn a_scene_that_was_never_built_says_so() {
-    let (_dir, project) = scene("unbuilt", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("unbuilt");
     std::fs::remove_file(project.root.join("bin/index.js")).unwrap();
     let p = deploy::preview(&project).unwrap();
     assert_eq!(p.main, MainBundle::Missing("bin/index.js".to_string()));
@@ -997,13 +1011,26 @@ async fn a_scene_that_was_never_built_says_so() {
     assert!(!html.contains("somebody"), "{html}");
 }
 
-/// The built scene must NOT carry the alarm, or the one above proves only
-/// that the panel is always there. Asserted on the alarm titles rather
-/// than the warn class, because the run-status panel is process-global and
-/// a parallel test's failed run may legitimately wear it.
+#[tokio::test]
+async fn a_world_section_that_names_no_world_gets_a_warning_before_the_wallet() {
+    let (_dir, project) = scene(
+        "nameless-world",
+        json!({ "display": { "title": "Gather" }, "worldConfiguration": { "name": "" } }),
+    );
+    let p = deploy::preview(&project).unwrap();
+    assert!(p.nameless_world);
+    let html = served(&state(project)).await;
+    assert!(html.contains(r#"class="panel panel--warn""#), "{html}");
+    assert!(html.contains("names no world"), "{html}");
+    assert!(html.contains("Genesis City LAND"), "{html}");
+}
+
+/// Asserted on the alarm titles rather than the warn class, because the
+/// run-status panel is process-global and a parallel test's failed run may
+/// legitimately wear it.
 #[tokio::test]
 async fn a_built_scene_carries_no_alarm() {
-    let (_dir, project) = scene("built", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("built");
     let p = deploy::preview(&project).unwrap();
     assert_eq!(p.main, MainBundle::Present("bin/index.js".to_string()));
     let html = served(&state(project)).await;
@@ -1017,34 +1044,27 @@ async fn a_built_scene_carries_no_alarm() {
     }
 }
 
-/// The walk is the expensive half of this route and the route is
-/// unauthenticated: the answer is reused for a moment rather than redone
-/// per request.
+/// The walk is the expensive half of an unauthenticated route: the answer
+/// is reused for a moment rather than redone per request.
 #[tokio::test]
 async fn the_walk_is_reused_for_a_moment() {
-    let (_dir, project) = scene("cache", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("cache");
     let st = state(project.clone());
     let first = served(&st).await;
     std::fs::write(project.root.join("assets/late.glb"), vec![1u8; 4096]).unwrap();
-    let resp = route(
-        State(st.clone()),
-        ConnectInfo(([127, 0, 0, 1], 0).into()),
-        HeaderMap::new(),
-    )
-    .await;
-    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let cached = String::from_utf8(bytes.to_vec()).unwrap();
+    let cached =
+        body_of(route(State(st.clone()), ConnectInfo(LOCAL), HeaderMap::new()).await).await;
     assert_eq!(cached, first, "the second request did not walk again");
     assert!(!cached.contains("late.glb"));
     let fresh = served(&st).await;
     assert!(fresh.contains("late.glb"), "an expired entry walks again");
 }
 
-/// The error branch is a page too, served on the same open port, and it
-/// is held to the same rule: say what is wrong, never say where.
+/// The error branch is a page on the same open port, held to the same rule:
+/// say what is wrong, never say where.
 #[tokio::test]
 async fn the_error_page_names_the_pattern_and_not_the_path() {
-    let (dir, project) = scene("badignore", json!({ "display": { "title": "Gather" } }));
+    let (dir, project) = gather("badignore");
     std::fs::write(project.root.join(".dclignore"), "assets/[z-a].png\n").unwrap();
     let root = project.root.clone();
     assert!(deploy::preview(&project).is_err(), "the matcher refuses it");
@@ -1056,8 +1076,6 @@ async fn the_error_page_names_the_pattern_and_not_the_path() {
     assert!(!html.contains(&dir.0.display().to_string()), "{html}");
 }
 
-/// Whatever an error chain from further down carries, the page does not
-/// pass a filesystem path on to the visitor.
 #[test]
 fn a_path_in_an_error_chain_is_taken_back_out() {
     let root = std::path::Path::new("/home/somebody/scenes/gather");
@@ -1072,48 +1090,31 @@ fn a_path_in_an_error_chain_is_taken_back_out() {
     assert!(!scrub_paths("under /home/somebody/scenes/other", root).contains("somebody"));
 }
 
-/// The address form is gated exactly like the publish POST — it only changes
-/// what an open page renders, but a stranger on the LAN does not get to pick
-/// whose holdings this preview looks up.
+/// The address form only changes what an open page renders, but a stranger
+/// on the LAN does not get to pick whose holdings this preview looks up.
 #[tokio::test]
 async fn the_address_form_is_gated_like_the_publish_post() {
-    let (_dir, project) = scene("addrgate", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("addrgate");
     let st = state(project);
-    let lan: SocketAddr = ([192, 168, 1, 9], 51000).into();
-    let local: SocketAddr = ([127, 0, 0, 1], 51000).into();
-    const ADDR: &str = "0x1234567890abcdef1234567890abcdef12345678";
-    let form = |token: &str, address: &str| {
-        Form(AddressForm {
-            token: token.to_string(),
-            address: address.to_string(),
-        })
+    let submit = |peer: SocketAddr, token: &str, address: &str| {
+        target_address(
+            State(st.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Form(AddressForm {
+                token: token.to_string(),
+                address: address.to_string(),
+            }),
+        )
     };
 
-    let refused = target_address(
-        State(st.clone()),
-        ConnectInfo(lan),
-        HeaderMap::new(),
-        form(token(&st), ADDR),
-    )
-    .await;
+    let refused = submit(LAN, token(&st), ADDR).await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 
-    let refused = target_address(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form("wrong", ADDR),
-    )
-    .await;
+    let refused = submit(LOCAL, "wrong", ADDR).await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 
-    let garbage = target_address(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form(token(&st), "vitalik.eth"),
-    )
-    .await;
+    let garbage = submit(LOCAL, token(&st), "vitalik.eth").await;
     assert_eq!(
         garbage.status(),
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1121,13 +1122,7 @@ async fn the_address_form_is_gated_like_the_publish_post() {
     );
     assert!(address_slot(&st).is_none());
 
-    let set = target_address(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form(token(&st), &ADDR.to_uppercase().replace("0X", "0x")),
-    )
-    .await;
+    let set = submit(LOCAL, token(&st), &ADDR.to_uppercase().replace("0X", "0x")).await;
     assert_eq!(set.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         address_slot(&st).as_deref(),
@@ -1135,22 +1130,14 @@ async fn the_address_form_is_gated_like_the_publish_post() {
         "stored lowercased, the spelling every lookup uses"
     );
 
-    let cleared = target_address(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form(token(&st), "  "),
-    )
-    .await;
+    let cleared = submit(LOCAL, token(&st), "  ").await;
     assert_eq!(cleared.status(), StatusCode::SEE_OTHER);
     assert!(address_slot(&st).is_none(), "an empty submit forgets");
 }
 
-/// The account lives in the page bar: a split pill when none is known — the
-/// browser wallet directly, or the Decentraland sign-in — and a pill naming
-/// the account once one is. The card adds its own row only when it has
-/// something to say. The dry-run seam keeps the checks an honest sentence
-/// instead of a fetch.
+/// The account lives in the page bar: a split pill when none is known and a
+/// pill naming the account once one is. The card adds its own row only when
+/// it has something to say; the dry-run seam keeps the checks a sentence.
 #[tokio::test]
 async fn the_bar_connects_an_account_and_the_page_checks_with_it() {
     let _guard = crate::deploy::ENV_LOCK.lock().await;
@@ -1159,14 +1146,7 @@ async fn the_bar_connects_an_account_and_the_page_checks_with_it() {
         json!({ "display": { "title": "Gather" }, "worldConfiguration": { "name": "my.dcl.eth" } }),
     );
     let st = state(project);
-    let page = target_page(&st, &HeaderMap::new()).await;
-    let html = String::from_utf8(
-        axum::body::to_bytes(page.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
+    let html = served_target(&st).await;
     assert!(
         html.contains(">Connect Wallet</button>")
             && html.contains(">Connect with DCL</button>")
@@ -1186,16 +1166,8 @@ async fn the_bar_connects_an_account_and_the_page_checks_with_it() {
         "the world list says what it is waiting on: {html}"
     );
 
-    const ADDR: &str = "0x1234567890abcdef1234567890abcdef12345678";
     *address_slot(&st) = Some(ADDR.to_string());
-    let page = target_page(&st, &HeaderMap::new()).await;
-    let html = String::from_utf8(
-        axum::body::to_bytes(page.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
+    let html = served_target(&st).await;
     assert!(
         html.contains("0x1234\u{2026}5678") && html.contains(&format!(r#"title="{ADDR}""#)),
         "the bar pill names the account, full address on hover: {html}"
@@ -1224,41 +1196,26 @@ async fn the_bar_connects_an_account_and_the_page_checks_with_it() {
 /// auth-server request.
 #[tokio::test]
 async fn the_connect_post_is_gated_and_off_in_dry_runs() {
-    let (_dir, project) = scene("connectgate", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("connectgate");
     let st = state(project);
-    let lan: SocketAddr = ([192, 168, 1, 9], 51000).into();
-    let local: SocketAddr = ([127, 0, 0, 1], 51000).into();
-    let form = |token: &str| {
-        Form(ConnectForm {
-            token: token.to_string(),
-        })
+    let submit = |peer: SocketAddr, token: &str| {
+        target_connect(
+            State(st.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Form(ConnectForm {
+                token: token.to_string(),
+            }),
+        )
     };
 
-    let refused = target_connect(
-        State(st.clone()),
-        ConnectInfo(lan),
-        HeaderMap::new(),
-        form(token(&st)),
-    )
-    .await;
+    let refused = submit(LAN, token(&st)).await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 
-    let refused = target_connect(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form("wrong"),
-    )
-    .await;
+    let refused = submit(LOCAL, "wrong").await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 
-    let off = target_connect(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form(token(&st)),
-    )
-    .await;
+    let off = submit(LOCAL, token(&st)).await;
     assert_eq!(
         off.status(),
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1271,54 +1228,94 @@ async fn the_connect_post_is_gated_and_off_in_dry_runs() {
 /// next one, and the History tab tells both the same way.
 #[tokio::test]
 async fn a_finished_run_lands_in_history_and_survives_a_restart() {
-    let (_dir, project) = scene("history", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("history");
     let root = project.root.clone();
     let st = state(project.clone());
     let id =
         claim(&st, "World w.dcl.eth".into(), false, "abc123".into()).expect("nothing is running");
-    finish(&st, id, RunState::Done);
+    finish(&st, id, RunState::Done("Deployed bafy (HTTP 200)".into()));
     let id =
         claim(&st, "World w.dcl.eth".into(), false, "abc123".into()).expect("done is not running");
     finish(&st, id, RunState::Stale(vec![]));
+    let id = claim(
+        &st,
+        "Parcels 2,12\u{2013}7,15".into(),
+        false,
+        "abc124".into(),
+    )
+    .expect("stale is not running");
+    finish(
+        &st,
+        id,
+        RunState::Failed(
+            "the content server rejected this deployment (HTTP 400)\n  \
+             {\"error\":\"Bad request\",\"message\":\"must be number\"}\n  \
+             \u{2192} try: read the server message above\n  \
+             \u{2192} try: re-run with --verbose for the full response\n"
+                .into(),
+        ),
+    );
     {
         let held = history_slot(&st);
-        assert_eq!(held.len(), 2);
-        assert_eq!(held[0].outcome, "nothing published", "newest first");
-        assert_eq!(held[1].outcome, "published");
+        assert_eq!(held.len(), 3);
+        assert_eq!(held[0].outcome, "failed", "newest first");
+        assert_eq!(held[1].outcome, "nothing published");
+        assert_eq!(held[2].outcome, "published");
+        assert_eq!(
+            held[2].detail.as_deref(),
+            Some("Deployed bafy (HTTP 200)"),
+            "a publish records what went up"
+        );
+        assert_eq!(
+            held[1].detail.as_deref(),
+            Some("the scene changed while the page was open")
+        );
     }
     let pane = history_rows_pane(&history_rows(&st, &root));
     assert!(pane.contains("World w.dcl.eth"), "{pane}");
     assert!(pane.contains("published"), "{pane}");
+    assert!(pane.contains("Deployed bafy (HTTP 200)"), "{pane}");
+    assert!(
+        pane.contains("rejected this deployment (HTTP 400)") && pane.contains("must be number"),
+        "a failure row says why: {pane}"
+    );
+    assert!(
+        !pane.contains("try:"),
+        "the try steps are advice for the moment, not history: {pane}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(root.join(".dcl-one").join(".gitignore")).unwrap(),
+        "*\n",
+        "the record's directory ignores itself, whatever the scene's .gitignore says"
+    );
 
     let fresh = state(project);
     let rows = history_rows(&fresh, &root);
-    assert_eq!(rows.len(), 2, "the on-disk record outlives the process");
-    assert_eq!(rows[0].outcome, "nothing published");
+    assert_eq!(rows.len(), 3, "the on-disk record outlives the process");
+    assert_eq!(rows[0].outcome, "failed");
+    assert!(
+        rows[0]
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("HTTP 400")),
+        "the why survives the restart: {:?}",
+        rows[0].detail
+    );
+    assert_eq!(rows[1].outcome, "nothing published");
     assert!(
         history_rows_pane(&[]).contains("No deployments yet"),
         "no history is still a pane"
     );
 }
 
-/// The after-map: ours in the accent with the base marked, neighbours kept,
-/// the replaced footprint dashed — and past the span cap, no grid at all
-/// rather than an unreadable one.
+/// Ours in the accent with the base marked, neighbours kept, the replaced
+/// footprint dashed — and past the span cap, no grid at all.
 #[test]
 fn the_after_map_draws_kept_replaced_and_ours() {
     let state = RemoteState {
-        current: Some(CurrentScene {
-            title: "Old".into(),
-            timestamp: None,
-            parcels: 2,
-            coords: vec![(0, 0), (1, 0)],
-            size: None,
-        }),
-        others: vec![RemoteScene {
-            title: "Bazaar".into(),
-            parcels: 2,
-            coords: vec![(2, 0), (2, 1)],
-            size: None,
-        }],
+        current: Some(current_scene("Old", None, vec![(0, 0), (1, 0)])),
+        others: vec![remote_scene("Bazaar", vec![(2, 0), (2, 1)])],
         hashes: HashSet::new(),
     };
     let ours = [(0, 0), (0, 1)];
@@ -1343,12 +1340,7 @@ fn the_after_map_draws_kept_replaced_and_ours() {
 
     let sprawling = RemoteState {
         current: None,
-        others: vec![RemoteScene {
-            title: "Far".into(),
-            parcels: 2,
-            coords: vec![(0, 0), (40, 40)],
-            size: None,
-        }],
+        others: vec![remote_scene("Far", vec![(0, 0), (40, 40)])],
         hashes: HashSet::new(),
     };
     assert_eq!(
@@ -1358,8 +1350,8 @@ fn the_after_map_draws_kept_replaced_and_ours() {
     );
 }
 
-/// The multiscene pane says what the world's scenes hold only from sizes the
-/// server actually reported, and each row names its fate.
+/// The multiscene pane sums only sizes the server reported, and each row
+/// names its fate.
 #[test]
 fn the_multiscene_pane_sums_only_reported_sizes() {
     let body = json!({ "scenes": [
@@ -1377,12 +1369,7 @@ fn the_multiscene_pane_sums_only_reported_sizes() {
     );
     let status = LiveStatus {
         remote: world_remote(&body, &dest.pointers),
-        reuse: Some(Reuse {
-            reused_files: 0,
-            reused_bytes: 0,
-            upload_files: 1,
-            upload_bytes: 500,
-        }),
+        reuse: Some(reuse(0, 0, 1, 500)),
     };
     let html = multiscene_pane(&dest, &status);
     assert!(
@@ -1407,52 +1394,37 @@ fn the_multiscene_pane_sums_only_reported_sizes() {
     );
 }
 
-/// Pointing the scene rewrites the file a deploy actually reads: a world
-/// name lands in worldConfiguration.name, an empty value strips it — and
-/// the gates are the scene editors', never opened by --allow-remote-deploy.
+/// Pointing the scene rewrites the file a deploy reads: a world name lands
+/// in worldConfiguration.name, an empty value strips it — and the gates are
+/// the scene editors', never opened by --allow-remote-deploy.
 #[tokio::test]
 async fn pointing_the_scene_rewrites_its_destination_in_scene_json() {
-    let (_dir, project) = scene("point", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("point");
     let root = project.root.clone();
     let st = state(project);
-    let local: SocketAddr = ([127, 0, 0, 1], 51000).into();
-    let lan: SocketAddr = ([192, 168, 1, 9], 51000).into();
-    let form = |token: &str, world: &str| {
-        Form(PointForm {
-            token: token.to_string(),
-            world: world.to_string(),
-        })
+    let submit = |peer: SocketAddr, world: &str| {
+        target_point(
+            State(st.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Form(PointForm {
+                token: token(&st).to_string(),
+                world: world.to_string(),
+            }),
+        )
     };
 
-    let refused = target_point(
-        State(st.clone()),
-        ConnectInfo(lan),
-        HeaderMap::new(),
-        form(token(&st), "w.dcl.eth"),
-    )
-    .await;
+    let refused = submit(LAN, "w.dcl.eth").await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 
-    let garbage = target_point(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form(token(&st), "javascript:alert(1)"),
-    )
-    .await;
+    let garbage = submit(LOCAL, "javascript:alert(1)").await;
     assert_eq!(
         garbage.status(),
         StatusCode::UNPROCESSABLE_ENTITY,
         "only a world name may enter the file"
     );
 
-    let ok = target_point(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form(token(&st), "Gather.DCL.eth"),
-    )
-    .await;
+    let ok = submit(LOCAL, "Gather.DCL.eth").await;
     assert_eq!(ok.status(), StatusCode::SEE_OTHER);
     let on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("scene.json")).unwrap()).unwrap();
@@ -1466,13 +1438,7 @@ async fn pointing_the_scene_rewrites_its_destination_in_scene_json() {
         "the running preview follows the file"
     );
 
-    let back = target_point(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        form(token(&st), "  "),
-    )
-    .await;
+    let back = submit(LOCAL, "  ").await;
     assert_eq!(back.status(), StatusCode::SEE_OTHER);
     let on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("scene.json")).unwrap()).unwrap();
@@ -1486,28 +1452,13 @@ async fn pointing_the_scene_rewrites_its_destination_in_scene_json() {
 /// the target itself does not — the row says so instead.
 #[test]
 fn the_world_rows_offer_the_re_aim() {
-    use crate::start::deploy_rights::{Rights, Verdict, WorldRow};
     let dest = resolve_dest(
         &json!({ "worldConfiguration": { "name": "my.dcl.eth" } }),
         None,
         None,
     );
-    let row = |name: &str| WorldRow {
-        name: name.to_string(),
-        scenes: Some(1),
-        last_deployed: None,
-        title: Some("My World".to_string()),
-        owned: true,
-    };
-    let rights = Rights {
-        address: "0x1234567890abcdef1234567890abcdef12345678".into(),
-        verdict: Verdict::May("you own this name".into()),
-        worlds: vec![row("my.dcl.eth"), row("other.dcl.eth")],
-        worlds_note: None,
-        holdings: None,
-        parcel_rights: Vec::new(),
-        unchecked_parcels: 0,
-    };
+    let row = |name: &str| world_row(name, Some(1), Some("My World"));
+    let rights = owner_of(vec![row("my.dcl.eth"), row("other.dcl.eth")]);
     let html = your_worlds("/t", "tok", &dest, Some(&rights));
     let my = html.find("my.dcl.eth").unwrap();
     let other = html.find("other.dcl.eth").unwrap();
@@ -1527,36 +1478,20 @@ fn the_world_rows_offer_the_re_aim() {
     );
 }
 
-/// The current target leads the list — it is the row the eye came for —
-/// and the listing cap can never be the reason it is missing.
+/// The current target leads the list, so the listing cap can never be the
+/// reason it is missing: eleven other worlds sort ahead of it alphabetically.
 #[test]
 fn the_current_target_leads_your_worlds() {
-    use crate::start::deploy_rights::{Rights, Verdict, WorldRow};
     let dest = resolve_dest(
         &json!({ "worldConfiguration": { "name": "zz-last.dcl.eth" } }),
         None,
         None,
     );
-    let row = |name: &str| WorldRow {
-        name: name.to_string(),
-        scenes: None,
-        last_deployed: None,
-        title: None,
-        owned: true,
-    };
-    // Eleven other worlds ahead of it: alphabetical order alone would push
-    // the target past the ten-row cap and off the page entirely.
-    let mut worlds: Vec<WorldRow> = (0..11).map(|i| row(&format!("w{i:02}.dcl.eth"))).collect();
-    worlds.push(row("zz-last.dcl.eth"));
-    let rights = Rights {
-        address: "0x1234567890abcdef1234567890abcdef12345678".into(),
-        verdict: Verdict::May("you own this name".into()),
-        worlds,
-        worlds_note: None,
-        holdings: None,
-        parcel_rights: Vec::new(),
-        unchecked_parcels: 0,
-    };
+    let mut worlds: Vec<WorldRow> = (0..11)
+        .map(|i| world_row(&format!("w{i:02}.dcl.eth"), None, None))
+        .collect();
+    worlds.push(world_row("zz-last.dcl.eth", None, None));
+    let rights = owner_of(worlds);
     let html = your_worlds("/t", "tok", &dest, Some(&rights));
     let target = html.find("zz-last.dcl.eth").expect("the target is listed");
     let first_other = html.find("w00.dcl.eth").expect("others still listed");
@@ -1565,11 +1500,10 @@ fn the_current_target_leads_your_worlds() {
 }
 
 /// An auto-started run nobody signed vanishes: no failure panel, no history
-/// row — the page was opened and left, which is not an event. The same
-/// timeout on a button-press run keeps its failure, because a person asked.
+/// row. The same timeout on a button-press run keeps its failure.
 #[tokio::test]
 async fn an_unsigned_auto_run_ends_quietly() {
-    let (_dir, project) = scene("autoquiet", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("autoquiet");
     let root = project.root.clone();
     let st = state(project);
     const TIMEOUT: &str = "no signature arrived within 10 minutes \u{2014} deployment abandoned";
@@ -1589,35 +1523,12 @@ async fn an_unsigned_auto_run_ends_quietly() {
     );
 }
 
-/// A live signer with no wallet answer yet, for run-slot tests that need one.
-fn parked_signer() -> Arc<crate::linker::LinkerState> {
-    let (state, _rx) = crate::linker::new_state(crate::linker::LinkerDeploy {
-        dir: std::env::temp_dir(),
-        prepared: deploy::Prepared {
-            files: vec![],
-            pointers: vec!["0,0".into()],
-            metadata: crate::jsjson::parse("{}").unwrap(),
-        },
-        target_content: "https://worlds-content-server.decentraland.org".into(),
-        world: Some("w.dcl.eth".into()),
-        needs_delete: false,
-        timestamp_override: None,
-        entity_out: None,
-        scene_title: "Gather".into(),
-        base_parcel: "0,0".into(),
-        multi_scene: true,
-        check_permissions: false,
-    });
-    state
-}
-
-/// The wallet only ever signs the tree as it is: a pending run whose payload
-/// moved after its build finished re-mints — new id, current fingerprint,
-/// the signer slot emptied so the panel cannot route to the stale entity —
-/// and keeps its provenance (an auto run re-mints auto).
+/// A pending run whose payload moved after its build finished re-mints —
+/// new id, current fingerprint, the signer slot emptied — and keeps its
+/// provenance.
 #[tokio::test]
 async fn a_drifted_pending_run_is_reminted_before_the_wallet_sees_it() {
-    let (_dir, project) = scene("drift", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("drift");
     let st = state(project);
     let old = claim(&st, "World w.dcl.eth".into(), true, "aaaa".into()).expect("free slot");
     runs(&st).as_mut().expect("just claimed").signing = Some("/deploy".into());
@@ -1637,12 +1548,11 @@ async fn a_drifted_pending_run_is_reminted_before_the_wallet_sees_it() {
 }
 
 /// ...and it declines everywhere a re-mint would be wrong: a build still
-/// running (two builds over one release tree can sign mid-write bytes), an
-/// unchanged payload, a wallet that already answered (past recall), and an
-/// adopted CLI signing (that publish belongs to a terminal).
+/// running, an unchanged payload, a wallet that already answered, and an
+/// adopted CLI signing.
 #[tokio::test]
 async fn the_remint_declines_matching_midbuild_cli_and_signed_runs() {
-    let (_dir, project) = scene("driftno", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("driftno");
     let st = state(project);
 
     claim(&st, "World w.dcl.eth".into(), true, "aaaa".into()).expect("free slot");
@@ -1674,12 +1584,11 @@ async fn the_remint_declines_matching_midbuild_cli_and_signed_runs() {
     );
 }
 
-/// A superseded deploy's tail cannot touch the newer run: its timeout writes
-/// no state onto a slot it no longer owns, wipes no signer the newer run
-/// registered, and records no history.
+/// A superseded deploy's tail writes no state onto a slot it no longer owns,
+/// wipes no signer the newer run registered, and records no history.
 #[tokio::test]
 async fn a_superseded_deploy_cannot_touch_the_newer_run() {
-    let (_dir, project) = scene("driftsup", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("driftsup");
     let root = project.root.clone();
     let st = state(project);
     let old = claim(&st, "World w.dcl.eth".into(), true, "aaaa".into()).expect("free slot");
@@ -1709,13 +1618,12 @@ async fn a_superseded_deploy_cannot_touch_the_newer_run() {
 }
 
 /// A cold cache never makes the page wait: the first render answers NOW
-/// with "checking" placeholders and the warming mark the reload script keys
-/// on — a connected wallet reads "checking", never "you have nothing" — and
-/// because every fetch outcome is a cached value, failures included, the
-/// reloads converge on a final render with no mark in bounded time.
+/// with "checking" placeholders and the warming mark, and because every
+/// fetch outcome is cached, failures included, the reloads converge on a
+/// final render with no mark in bounded time.
 #[tokio::test]
 async fn a_cold_cache_renders_now_and_the_reloads_converge() {
-    let (_dir, project) = scene("warming", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("warming");
     let mut st = crate::start::testkit::state(vec![project.clone()]);
     st.deploy_dry_run = false;
     let st = Arc::new(st);
@@ -1738,8 +1646,6 @@ async fn a_cold_cache_renders_now_and_the_reloads_converge() {
     );
     assert_eq!(rights.address, "0x00000000000000000000000000000000000000ab");
 
-    // The spawned warm-ups fail fast against the dead port and cache their
-    // failure sentences; the "reload" (a second call) lands on them.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let (status, _, warming) = status_and_rights(&st, &project, &dest, &preview, "aaaa").await;
@@ -1768,13 +1674,11 @@ async fn a_cold_cache_renders_now_and_the_reloads_converge() {
     );
 }
 
-/// A delegated identity is used while it is live and dropped the moment it
-/// lapses: `live_identity` hands back an unexpired one and forgets an
-/// expired one, so a deploy signs itself for the hour and falls back to the
-/// wallet after.
+/// `live_identity` hands back an unexpired identity and forgets an expired
+/// one, so a deploy signs itself for the hour and falls back to the wallet after.
 #[test]
 fn a_delegated_identity_is_used_while_live_and_dropped_when_it_lapses() {
-    let (_dir, project) = scene("identity", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("identity");
     let st = state(project);
     let mk = |exp_ms: i64| deploy::DeployIdentity {
         signer: "0xe7f78d2c9a9375153476834d2db32632384b01e1".into(),
@@ -1803,55 +1707,38 @@ fn a_delegated_identity_is_used_while_live_and_dropped_when_it_lapses() {
 }
 
 /// The preflight is the refusal moved in front of the signature: gated like
-/// the signing routes, honest about a dry run, and never an answer for a
-/// string that is not an address.
+/// the signing routes, honest about a dry run, never an answer for a string
+/// that is not an address — and a shrug for a target the oracle has no
+/// authority over (a self-hosted node with its own deploy policy), never a
+/// mainnet-keyed refusal that would block a server about to say yes.
 #[tokio::test]
 async fn the_preflight_answers_before_the_wallet_signs() {
-    let (_dir, project) = scene("preflight", json!({ "display": { "title": "Gather" } }));
+    let (_dir, project) = gather("preflight");
     let st = state(project);
-    let lan: SocketAddr = ([192, 168, 1, 9], 40000).into();
-    let local: SocketAddr = ([127, 0, 0, 1], 40000).into();
-    let req =
-        |addr: &str| -> Result<axum::Json<PreflightReq>, axum::extract::rejection::JsonRejection> {
+    let ask = |peer: SocketAddr, addr: &str| {
+        preflight(
+            State(st.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
             Ok(axum::Json(
                 serde_json::from_value(json!({ "address": addr })).unwrap(),
-            ))
-        };
+            )),
+        )
+    };
 
-    let blocked = preflight(
-        State(st.clone()),
-        ConnectInfo(lan),
-        HeaderMap::new(),
-        req("0x1234567890abcdef1234567890abcdef12345678"),
-    )
-    .await;
+    let blocked = ask(LAN, ADDR).await;
     assert_eq!(
         blocked.status(),
         StatusCode::FORBIDDEN,
         "the check runs where the signature runs"
     );
 
-    let garbage = preflight(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        req("vitalik.eth"),
-    )
-    .await;
+    let garbage = ask(LOCAL, "vitalik.eth").await;
     assert_eq!(garbage.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-    let off = preflight(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        req("0x1234567890abcdef1234567890abcdef12345678"),
-    )
-    .await;
+    let off = ask(LOCAL, ADDR).await;
     assert_eq!(off.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(off.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let v = json_of(off).await;
     assert_eq!(
         v["verdict"], "unchecked",
         "a dry run says so instead of guessing: {v}"
@@ -1861,59 +1748,20 @@ async fn the_preflight_answers_before_the_wallet_signs() {
         "the sign flow asks before personal_sign and stops on a refusal"
     );
 
-    // A pending run with an explicit target the oracle has no authority
-    // over — a self-hosted node with its own deploy policy — gets a shrug,
-    // never a mainnet-keyed refusal that would block a server about to
-    // say yes.
-    let dep = |target: &str| crate::linker::LinkerDeploy {
-        dir: std::env::temp_dir(),
-        prepared: deploy::Prepared {
-            files: vec![],
-            pointers: vec!["0,0".into()],
-            metadata: crate::jsjson::parse("{}").unwrap(),
-        },
-        target_content: target.into(),
-        world: None,
-        needs_delete: false,
-        timestamp_override: None,
-        entity_out: None,
-        scene_title: "Gather".into(),
-        base_parcel: "0,0".into(),
-        multi_scene: true,
-        check_permissions: false,
-    };
-    let (foreign, _rx) = crate::linker::new_state(dep("https://my-node.example.com/content"));
+    let (foreign, _rx) =
+        crate::linker::new_state(linker_deploy("https://my-node.example.com/content", None));
     *signer_slot(&st) = Some(foreign);
-    let shrug = preflight(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        req("0x1234567890abcdef1234567890abcdef12345678"),
-    )
-    .await;
-    let body = axum::body::to_bytes(shrug.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let v = json_of(ask(LOCAL, ADDR).await).await;
     assert_eq!(v["verdict"], "unchecked", "{v}");
     assert!(
         v["why"].as_str().unwrap().contains("my-node.example.com"),
         "the shrug names the server that decides: {v}"
     );
 
-    let (upstream, _rx) = crate::linker::new_state(dep("https://interconnected.online/content"));
+    let (upstream, _rx) =
+        crate::linker::new_state(linker_deploy("https://interconnected.online/content", None));
     *signer_slot(&st) = Some(upstream);
-    let judged = preflight(
-        State(st.clone()),
-        ConnectInfo(local),
-        HeaderMap::new(),
-        req("0x1234567890abcdef1234567890abcdef12345678"),
-    )
-    .await;
-    let body = axum::body::to_bytes(judged.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let v = json_of(ask(LOCAL, ADDR).await).await;
     assert_eq!(
         v["why"], "live checks are off for this run",
         "a Genesis-network target is the oracle's to judge (the dry-run seam answers here): {v}"
@@ -1923,21 +1771,21 @@ async fn the_preflight_answers_before_the_wallet_signs() {
 
 #[test]
 fn translate_footprint_moves_the_whole_shape() {
-    let mut scene = serde_json::json!({
+    let mut scene = json!({
         "scene": { "parcels": ["0,0", "1,0", "0,1"], "base": "0,0" }
     });
     translate_footprint(&mut scene, (20, -30)).unwrap();
-    assert_eq!(scene["scene"]["base"], serde_json::json!("20,-30"));
+    assert_eq!(scene["scene"]["base"], json!("20,-30"));
     assert_eq!(
         scene["scene"]["parcels"],
-        serde_json::json!(["20,-30", "21,-30", "20,-29"]),
+        json!(["20,-30", "21,-30", "20,-29"]),
         "every parcel rides the same delta, shape intact"
     );
 }
 
 #[test]
 fn translate_footprint_refuses_to_leave_the_genesis_map() {
-    let mut scene = serde_json::json!({
+    let mut scene = json!({
         "scene": { "parcels": ["0,0", "5,0"], "base": "0,0" }
     });
     let why = translate_footprint(&mut scene, (160, 0)).unwrap_err();
@@ -1947,22 +1795,113 @@ fn translate_footprint_refuses_to_leave_the_genesis_map() {
     );
     assert_eq!(
         scene["scene"]["parcels"],
-        serde_json::json!(["0,0", "5,0"]),
+        json!(["0,0", "5,0"]),
         "a refused move changes nothing"
     );
     translate_footprint(&mut scene, (158, 163)).unwrap();
     assert_eq!(
         scene["scene"]["base"],
-        serde_json::json!("158,163"),
+        json!("158,163"),
         "the expansion districts past 150 are still the map"
     );
 }
 
 #[test]
 fn translate_footprint_same_base_is_a_no_op() {
-    let mut scene = serde_json::json!({
+    let mut scene = json!({
         "scene": { "parcels": ["3,4"], "base": "3,4" }
     });
     translate_footprint(&mut scene, (3, 4)).unwrap();
-    assert_eq!(scene["scene"]["parcels"], serde_json::json!(["3,4"]));
+    assert_eq!(scene["scene"]["parcels"], json!(["3,4"]));
+}
+
+#[test]
+fn a_failure_detail_is_the_why_without_the_advice() {
+    let why = "the content server rejected this deployment (HTTP 400)\n  \
+               {\"error\":\"Bad request\"}\n  \u{2192} try: read the server message above\n\n";
+    assert_eq!(
+        failure_detail(why),
+        "the content server rejected this deployment (HTTP 400)\n  {\"error\":\"Bad request\"}"
+    );
+    let long = "x".repeat(DETAIL_CAP + 50);
+    let cut = failure_detail(&long);
+    assert!(cut.ends_with('\u{2026}') && cut.chars().count() == DETAIL_CAP + 1);
+
+    let legacy =
+        json!({ "at_ms": 1, "target": "World w.dcl.eth", "signer": null, "outcome": "published" });
+    let (_dir, project) = scene("legacy-history", json!({}));
+    let path = history_path(&project.root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("{legacy}\n")).unwrap();
+    let rows = history_rows(&state(project.clone()), &project.root);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].detail.is_none());
+    let pane = history_rows_pane(&rows);
+    assert!(
+        pane.contains("World w.dcl.eth \u{2014} published"),
+        "{pane}"
+    );
+}
+
+#[test]
+fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
+    let land = json!({ "scene": { "parcels": ["5,-3", "6,-3"], "base": "5,-3" } });
+    let dest = resolve_dest(&land, Some("worlds-content-server.decentraland.org"), None);
+    let mut owned: Vec<(i64, i64)> = (0..30).map(|i| (100 + i, 7)).collect();
+    owned.insert(0, (5, -3));
+    owned.insert(1, (6, -3));
+    let rights = Rights {
+        verdict: Verdict::May("rights held on all 2 declared parcels".into()),
+        holdings: Some(Holdings {
+            parcels: 32,
+            estates: 0,
+            operated: 1,
+            coords: owned.iter().copied().chain([(9, 9)]).collect(),
+            owned: owned.clone(),
+            operated_coords: vec![(9, 9)],
+        }),
+        parcel_rights: vec![
+            ParcelRight { pointer: "5,-3".into(), leg: Some("owner") },
+            ParcelRight { pointer: "6,-3".into(), leg: Some("owner") },
+        ],
+        parcels_note: Some(
+            "worlds-content-server.decentraland.org answered HTTP 404 \u{2014} parcel rights read from peer.decentraland.org"
+                .into(),
+        ),
+        ..Rights::unchecked(ADDR, "")
+    };
+    let html = land_rights_col(&dest, Some(&rights));
+    assert!(html.contains("Parcels you may publish to"), "{html}");
+    assert!(
+        html.contains("5,-3 \u{b7} 6,-3 \u{b7} 100,7"),
+        "owned, in order: {html}"
+    );
+    assert!(
+        html.contains("and 8 more"),
+        "past the cap the rest is a count: {html}"
+    );
+    assert!(html.contains("Operated") && html.contains("9,9"), "{html}");
+    assert!(
+        html.contains("parcel rights read from peer.decentraland.org"),
+        "the rows say whose answer they are: {html}"
+    );
+
+    let none = Rights {
+        holdings: Some(Holdings {
+            parcels: 0,
+            estates: 0,
+            operated: 0,
+            coords: Vec::new(),
+            owned: Vec::new(),
+            operated_coords: Vec::new(),
+        }),
+        parcels_note: None,
+        ..rights
+    };
+    let html = land_rights_col(&dest, Some(&none));
+    assert!(
+        !html.contains("Parcels you may publish to"),
+        "no rights, no list: {html}"
+    );
+    assert!(!html.contains("parcel rights read from"), "{html}");
 }

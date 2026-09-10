@@ -118,6 +118,9 @@ jobs:
     runs-on: ubuntu-22.04
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      # The release notes name the embedded abgen release; abgen-release.lock
+      # is the only place that version lives, so the tree is needed here too.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
@@ -133,8 +136,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ABGEN_TAG="$(sed -n 's/^version *= *\(v[0-9][0-9.]*\).*/\1/p' crates/dcl-one-sdk/abgen-release.lock)"
+          test -n "$ABGEN_TAG"
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "dcl-one-sdk $GITHUB_REF_NAME" \
-            --notes "Self-contained npm-free toolchain binaries. Each binary embeds the abgen asset-bundle server ($ABGEN_TAG from https://github.com/eordano/abgen/releases): \`start\` extracts it on first use and serves optimized preview asset bundles with zero extra installs. Sidecar resolution order: \`ABGEN_BIN\` env, the embedded copy, the scene's \`@dcl/abgen\` npm package, then PATH. Toolchain: rust 1.97.0 (pinned), \`--locked\` against the committed Cargo.lock." \
+            --notes "Self-contained npm-free toolchain binaries. Each binary embeds the abgen asset-bundle server ($ABGEN_TAG from https://github.com/decentraland/abgen/releases): \`start\` extracts it on first use and serves optimized preview asset bundles with zero extra installs. Sidecar resolution order: \`ABGEN_BIN\` env, the embedded copy, the scene's \`@dcl/abgen\` npm package, then PATH. Toolchain: rust 1.97.0 (pinned), \`--locked\` against the committed Cargo.lock." \
             dist/*.tar.gz dist/SHA256SUMS.txt

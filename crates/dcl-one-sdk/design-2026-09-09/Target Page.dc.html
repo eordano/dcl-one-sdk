@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face { font-family: "Inter UI"; src: url("fonts/Inter-UI-Regular.otf") format("opentype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Inter UI"; src: url("fonts/Inter-UI-SemiBold.otf") format("opentype"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Inter UI"; src: url("fonts/Inter-UI-Bold.otf") format("opentype"); font-weight: 700; font-display: swap; }
+html, body { margin: 0; padding: 0; background: #161518; }
+a { color: #FF859C; text-decoration: none; }
+a:hover { color: #FF2D55; }
+</style>
+</helmet>
+<div style="min-height:100vh;background:#161518;font-family:'Inter UI',Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;color:#FCFCFC;-webkit-font-smoothing:antialiased">
+  <div data-screen-label="Top nav" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:12px 24px;border-bottom:1px solid rgba(255,255,255,0.10);background:rgba(22,21,24,0.85)">
+    <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="width:8px;height:8px;border-radius:9999px;background:#30CD00;box-shadow:0 0 8px rgba(48,205,0,0.6)"></span>
+        <span style="font-weight:700;font-size:16px;color:#FCFCFC">DCL One SDK</span>
+      </div>
+      <nav style="display:flex;align-items:center;gap:20px">
+        <a href="#" style="font-weight:600;font-size:14px;color:#A09BA8" style-hover="color:#FCFCFC">Preview</a>
+        <a href="#" style="font-weight:600;font-size:14px;color:#A09BA8" style-hover="color:#FCFCFC">Scene</a>
+        <span style="font-weight:600;font-size:14px;color:#FCFCFC;padding-bottom:4px;border-bottom:2px solid #FF2D55">Target</span>
+        <span style="display:inline-flex;align-items:center;gap:6px">
+          <a href="#" style="font-weight:600;font-size:14px;color:#A09BA8" style-hover="color:#FCFCFC">Deploy</a>
+          <span style="font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#30CD00;background:rgba(48,205,0,0.12);border:1px solid rgba(48,205,0,0.35);border-radius:9999px;padding:2px 8px">live</span>
+        </span>
+      </nav>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.08);border-radius:9999px;padding:8px 8px 8px 16px">
+        <span style="font-weight:600;font-size:13px;color:#CFCDD4">0xe7f7…01e1</span>
+        <button style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:9999px;background:rgba(255,255,255,0.10);border:none;color:#A09BA8;font-size:12px;cursor:pointer;font-family:inherit" style-hover="background:rgba(255,255,255,0.18);color:#FCFCFC">✕</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.08);border-radius:9999px;padding:8px 16px">
+        <span style="width:8px;height:8px;border-radius:9999px;background:#30CD00"></span>
+        <span style="font-weight:600;font-size:13px;color:#CFCDD4">127.0.0.1:8001</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width:1240px;margin:0 auto;padding:24px 24px 64px;display:flex;flex-direction:column;gap:20px">
+    <div data-screen-label="Target tabs" style="display:flex;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:6px;flex-wrap:wrap">
+      <div onClick="{{ goWorld }}" style="flex:1 1 120px;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:{{ tabWorld.weight }};font-size:14px;color:{{ tabWorld.color }};background:{{ tabWorld.bg }};box-shadow:{{ tabWorld.shadow }};padding:10px 16px;border-radius:8px;cursor:pointer" style-hover="filter:brightness(1.3)"><span style="width:6px;height:6px;border-radius:9999px;background:{{ tabWorld.dot }}"></span><span>World</span></div>
+      <div onClick="{{ goLand }}" style="flex:1 1 120px;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:{{ tabLand.weight }};font-size:14px;color:{{ tabLand.color }};background:{{ tabLand.bg }};box-shadow:{{ tabLand.shadow }};padding:10px 16px;border-radius:8px;cursor:pointer" style-hover="filter:brightness(1.3)"><span style="width:6px;height:6px;border-radius:9999px;background:{{ tabLand.dot }}"></span><span>Land</span></div>
+      <div onClick="{{ goMulti }}" style="flex:1 1 120px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:{{ tabMulti.weight }};font-size:14px;color:{{ tabMulti.color }};background:{{ tabMulti.bg }};box-shadow:{{ tabMulti.shadow }};padding:10px 16px;border-radius:8px;cursor:pointer" style-hover="filter:brightness(1.3)"><span>Multiscene world</span></div>
+      <div onClick="{{ goHistory }}" style="flex:1 1 120px;text-align:center;font-weight:{{ tabHistory.weight }};font-size:14px;color:{{ tabHistory.color }};background:{{ tabHistory.bg }};box-shadow:{{ tabHistory.shadow }};padding:10px 16px;border-radius:8px;cursor:pointer" style-hover="filter:brightness(1.3)">History</div>
+    </div>
+
+    <div data-screen-label="Header" style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-top:8px">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <span style="font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#A09BA8">{{ overline }}</span>
+        <h1 style="margin:0;font-weight:600;font-size:30px;line-height:1;letter-spacing:-0.01em;color:#FCFCFC">Hexabricks</h1>
+        
+        <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
+          <span style="width:8px;height:8px;border-radius:9999px;background:#FF2D55;box-shadow:0 0 8px rgba(255,45,85,0.6);flex:none"></span>
+          <span style="font-weight:600;font-size:13px;color:#CFCDD4">{{ currentTarget }}</span>
+        </div>
+      </div>
+      <sc-if value="{{ ctaOk }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+          <button onClick="{{ ctaAction }}" style="display:inline-flex;align-items:center;gap:8px;background:{{ ctaBg }};color:#FFFFFF;border:{{ ctaBorderCss }};border-radius:12px;padding:9px 16px;font-family:inherit;font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap;flex:none;transition:box-shadow 150ms ease-out,background 150ms ease-out" style-hover="filter:brightness(1.15)" style-active="transform:scale(0.98)">{{ ctaLabel }}<span style="font-size:12px">→</span></button>
+          
+        </div>
+      </sc-if>
+      <sc-if value="{{ ctaBlocked }}" hint-placeholder-val="{{ false }}">
+        <span style="font-weight:600;font-size:13px;color:#716B7C;white-space:nowrap">Deploy blocked — resolve rights below</span>
+      </sc-if>
+    </div>
+
+    <sc-if value="{{ showLandInactive }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:#A09BA8;font-size:13px;font-weight:700">·</span>
+        <span style="font-weight:400;font-size:13px;color:#A09BA8">The deploy target is {{ targetWorldName }}. Set the target to Land to deploy to Genesis City.</span>
+      </div>
+    </sc-if>
+    <sc-if value="{{ showLand }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="Land tab" style="display:flex;flex-direction:column;gap:20px">
+        <sc-if value="{{ rightsOk }}" hint-placeholder-val="{{ true }}">
+          
+        </sc-if>
+        <sc-if value="{{ rightsBlocked }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="Rights failure" style="background:rgba(255,188,91,0.06);border:1px solid rgba(255,188,91,0.40);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:9999px;background:rgba(255,188,91,0.18);color:#FFBC5B;font-weight:700;font-size:13px;flex:none">!</span>
+              <span style="font-weight:600;font-size:16px;color:#FCFCFC">You can't publish to {{ missingCount }} of the 24 parcels</span>
+            </div>
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ missing }}" as="m" hint-placeholder-count="3">
+                <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.08)">
+                  <span style="font-weight:700;font-size:13px;color:#FFBC5B;background:rgba(255,188,91,0.10);border:1px solid rgba(255,188,91,0.45);border-radius:8px;padding:5px 11px;flex:none">{{ m.coord }}</span>
+                  <span style="font-weight:400;font-size:14px;color:#CFCDD4;flex:1 1 240px;min-width:0">{{ m.reason }}</span>
+                  <a href="#" style="font-weight:600;font-size:13px;flex:none">Request rights</a>
+                </div>
+              </sc-for>
+            </div>
+            <span style="font-weight:400;font-size:13px;color:#A09BA8;text-wrap:pretty">Ask each owner for update-operator rights, or move the footprint off these parcels — deploy is blocked until then.</span>
+          </div>
+        </sc-if>
+
+        <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:stretch">
+          <div style="flex:1 1 320px;min-width:0;display:flex;flex-direction:column;gap:16px">
+            <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:14px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)">
+              <span style="font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#A09BA8">UPLOAD</span>
+              <div style="display:flex;align-items:baseline;gap:20px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:baseline;gap:6px"><span style="font-weight:700;font-size:30px;color:#FCFCFC">108</span><span style="font-weight:600;font-size:13px;color:#A09BA8">files</span></span>
+                <span style="display:inline-flex;align-items:baseline;gap:6px"><span style="font-weight:700;font-size:30px;color:#FCFCFC">1.1</span><span style="font-weight:600;font-size:13px;color:#A09BA8">MB</span></span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <div style="height:6px;border-radius:9999px;background:rgba(255,255,255,0.08);overflow:hidden">
+                  <div style="width:99%;height:100%;border-radius:9999px;background:linear-gradient(90deg,#FF2D55 0%,#FFBC5B 100%)"></div>
+                </div>
+                <span style="font-weight:400;font-size:13px;color:#A09BA8">107 of 108 files already on the server<br><span style="font-weight: 600; color: rgb(207, 205, 212);">1 to upload (317.8 KB)</span></span>
+              </div>
+            </div>
+
+            <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:2px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)">
+              <span style="font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#A09BA8;margin-bottom:12px">On the server now</span>
+              <div style="display:flex;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.10)"><span style="font-weight:600;font-size:14px;color:#A09BA8">Scene</span><span style="font-weight:600;font-size:14px;color:#FCFCFC">Hexabricks</span></div>
+              <div style="display:flex;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.10)"><span style="font-weight:600;font-size:14px;color:#A09BA8">Deployed</span><span style="font-weight:600;font-size:14px;color:#FCFCFC">5 hours ago</span></div>
+              <div style="display:flex;justify-content:space-between;gap:16px;padding:10px 0"><span style="font-weight:600;font-size:14px;color:#A09BA8">Parcels</span><span style="font-weight:600;font-size:14px;color:#FCFCFC">24</span></div>
+            </div>
+
+            
+          </div>
+
+          <div data-screen-label="Parcel map" style="flex:1.5 1 380px;min-width:0;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:16px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+              <span style="font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#A09BA8">MAP</span>
+              <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#FF2D55"></span><span style="font-weight:600;font-size:12px;color:#CFCDD4">Base</span></span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:rgba(255,45,85,0.32);border:1px solid rgba(255,45,85,0.7)"></span><span style="font-weight:600;font-size:12px;color:#CFCDD4">This scene</span></span>
+                <sc-if value="{{ rightsBlocked }}" hint-placeholder-val="{{ false }}">
+                  <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:rgba(255,188,91,0.28);border:1px solid #FFBC5B"></span><span style="font-weight:600;font-size:12px;color:#CFCDD4">No rights</span></span>
+                </sc-if>
+              </div>
+            </div>
+            <div style="display:flex;justify-content:center;padding:8px 0">
+              <div style="display:grid;grid-template-columns:repeat(10, {{ cellPx }});gap:4px" onMouseLeave="{{ onLeaveMap }}">
+                <sc-for list="{{ cells }}" as="cell" hint-placeholder-count="80">
+                  <div onMouseEnter="{{ cell.onEnter }}" style="height:{{ cellPx }};border-radius:6px;background:{{ cell.bg }};border:{{ cell.border }};box-shadow:{{ cell.shadow }};display:flex;align-items:center;justify-content:center;transition:filter 150ms ease-out" style-hover="filter:brightness(1.5)"><span style="font-size:9px;font-weight:600;color:{{ cell.coordColor }};pointer-events:none">{{ cell.coord }}</span></div>
+                </sc-for>
+              </div>
+            </div><div style="box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; justify-content: normal; align-items: normal"><span style="font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#A09BA8">Base parcel</span><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <span style="font-weight:700;font-size:16px;color:#FCFCFC;background:rgba(255,45,85,0.14);border:1px solid rgba(255,45,85,0.55);border-radius:8px;padding:8px 16px">{{ baseLabel }}</span>
+                <button style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:12px;padding:9px 18px;font-family:inherit;font-weight:600;font-size:14px;color:#FCFCFC;cursor:pointer;white-space:nowrap;flex:none;transition:background 150ms ease-out" style-hover="background:rgba(255,255,255,0.14)" style-active="transform:scale(0.98)">Move scene</button>
+              </div></div>
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ holdings }}" as="hd" hint-placeholder-count="4">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.08)">
+                  <span style="font-weight:700;font-size:13px;color:{{ hd.chipColor }};background:{{ hd.chipBg }};border:1px solid {{ hd.chipBorder }};border-radius:8px;padding:5px 11px;flex:none">{{ hd.coord }}</span>
+                  <div style="display:flex;flex-direction:column;gap:2px;flex:1 1 160px;min-width:0">
+                    <span style="font-weight:600;font-size:14px;color:#FCFCFC">{{ hd.title }}</span>
+                    <span style="font-weight:400;font-size:12px;color:#A09BA8">{{ hd.meta }}</span>
+                  </div>
+                  <span style="display:{{ hd.badgeDisplay }};font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#FF2D55;background:rgba(255,45,85,0.12);border:1px solid rgba(255,45,85,0.40);border-radius:9999px;padding:3px 10px;flex:none">Current base</span>
+                  <button onClick="{{ hd.onSet }}" style="display:{{ hd.btnDisplay }};background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:9999px;padding:6px 14px;font-family:inherit;font-weight:600;font-size:12px;color:#FCFCFC;cursor:pointer;white-space:nowrap;flex:none;transition:background 150ms ease-out" style-hover="background:rgba(255,255,255,0.14)" style-active="transform:scale(0.98)">Set base here</button>
+                </div>
+              </sc-for>
+            </div>
+            
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showWorld }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="World tab" style="display:flex;flex-direction:column;gap:16px">
+        <sc-if value="{{ noWorldTarget }}" hint-placeholder-val="{{ true }}">
+          
+        </sc-if>
+        <sc-if value="{{ hasWorldTarget }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:rgba(255,45,85,0.06);border:1px solid rgba(255,45,85,0.40);border-radius:16px;padding:16px 20px">
+            <span style="width:8px;height:8px;border-radius:9999px;background:#FF2D55;box-shadow:0 0 8px rgba(255,45,85,0.6);flex:none"></span>
+            <span style="font-weight:700;font-size:16px;color:#FCFCFC;flex:1 1 200px;min-width:0">{{ targetWorldName }}</span>
+            <span style="font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#FF2D55;background:rgba(255,45,85,0.12);border:1px solid rgba(255,45,85,0.40);border-radius:9999px;padding:3px 10px;flex:none">Current target</span>
+            
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ showWorldLists }}" hint-placeholder-val="{{ true }}">
+        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:4px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)">
+          <span style="font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#A09BA8;margin-bottom:8px">Your worlds</span>
+          <sc-for list="{{ worldRows }}" as="w" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.08)">
+              <span style="font-weight:700;font-size:14px;color:#FCFCFC;flex:0 1 200px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ w.name }}</span>
+              <span style="font-weight:400;font-size:13px;color:#A09BA8;flex:1 1 240px;min-width:0">{{ w.meta }}</span>
+              <span style="display:{{ w.badgeDisplay }};font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#FF2D55;background:rgba(255,45,85,0.12);border:1px solid rgba(255,45,85,0.40);border-radius:9999px;padding:3px 10px;flex:none">Current target</span>
+              <button onClick="{{ w.onPoint }}" style="display:{{ w.btnDisplay }};background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:9999px;padding:6px 14px;font-family:inherit;font-weight:600;font-size:12px;color:#FCFCFC;cursor:pointer;white-space:nowrap;flex:none;transition:background 150ms ease-out" style-hover="background:rgba(255,255,255,0.14)" style-active="transform:scale(0.98)">Set target here</button>
+            </div>
+          </sc-for>
+          <div onClick="{{ toggleEmptyWorlds }}" style="display:flex;align-items:center;gap:8px;padding:12px 0 4px;cursor:pointer">
+            <span style="font-weight:600;font-size:13px;color:#A09BA8" style-hover="color:#FCFCFC">{{ emptyWorldsLabel }}</span>
+          </div>
+          <sc-if value="{{ showEmptyWorlds }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ emptyWorldRows }}" as="w" hint-placeholder-count="9">
+                <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
+                  <span style="font-weight:600;font-size:14px;color:#CFCDD4;flex:0 1 200px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ w.name }}</span>
+                  <span style="font-weight:400;font-size:13px;color:#716B7C;flex:1 1 160px">no scenes yet</span>
+                  <span style="display:{{ w.badgeDisplay }};font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#FF2D55;background:rgba(255,45,85,0.12);border:1px solid rgba(255,45,85,0.40);border-radius:9999px;padding:3px 10px;flex:none">Current target</span>
+                  <button onClick="{{ w.onPoint }}" style="display:{{ w.btnDisplay }};background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:9999px;padding:6px 14px;font-family:inherit;font-weight:600;font-size:12px;color:#FCFCFC;cursor:pointer;white-space:nowrap;flex:none;transition:background 150ms ease-out" style-hover="background:rgba(255,255,255,0.14)" style-active="transform:scale(0.98)">Set target here</button>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:4px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)">
+          <span style="font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#A09BA8;margin-bottom:8px">Shared with you</span>
+          <sc-for list="{{ sharedRows }}" as="w" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.08)">
+              <span style="font-weight:700;font-size:14px;color:#FCFCFC;flex:0 1 200px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ w.name }}</span>
+              <span style="font-weight:400;font-size:13px;color:#A09BA8;flex:1 1 240px;min-width:0">{{ w.meta }}</span>
+              <span style="display:{{ w.badgeDisplay }};font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#FF2D55;background:rgba(255,45,85,0.12);border:1px solid rgba(255,45,85,0.40);border-radius:9999px;padding:3px 10px;flex:none">Current target</span>
+              <button onClick="{{ w.onPoint }}" style="display:{{ w.btnDisplay }};background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:9999px;padding:6px 14px;font-family:inherit;font-weight:600;font-size:12px;color:#FCFCFC;cursor:pointer;white-space:nowrap;flex:none;transition:background 150ms ease-out" style-hover="background:rgba(255,255,255,0.14)" style-active="transform:scale(0.98)">Set target here</button>
+            </div>
+          </sc-for>
+          <span style="font-weight:400;font-size:13px;color:#A09BA8;padding-top:8px">Owners gave 0xe7f7…01e1 deploy access to these worlds via their ACL.</span>
+        </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showMultiInactive }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:#A09BA8;font-size:13px;font-weight:700">·</span>
+        <span style="font-weight:400;font-size:13px;color:#A09BA8">The deploy target is Genesis City LAND. Multiscene applies to worlds — set the target to a world first.</span>
+      </div>
+    </sc-if>
+    <sc-if value="{{ showMulti }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="Multiscene tab" style="display:flex;flex-direction:column;gap:12px">
+        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)">
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <span style="font-weight:600;font-size:16px;color:#FCFCFC">{{ multiWorldName }}</span>
+            <span style="font-weight:400;font-size:13px;color:#A09BA8">{{ multiWorldScenes }}</span>
+          </div>
+          <span style="font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#FF2D55;background:rgba(255,45,85,0.12);border:1px solid rgba(255,45,85,0.40);border-radius:9999px;padding:3px 10px">Current target</span>
+        </div>
+        <span style="font-weight:400;font-size:13px;color:#A09BA8">Scenes in a multiscene world share one world name and deploy independently.</span>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showHistory }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="History tab" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:4px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)">
+        
+        <sc-for list="{{ history }}" as="h" hint-placeholder-count="5">
+          <div style="display:flex;flex-direction:column;gap:10px;padding:16px 0;border-bottom:1px solid rgba(255,255,255,0.08)">
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+              <span style="font-weight:700;font-size:14px;color:#FCFCFC;flex:0 0 110px">{{ h.when }}</span>
+              <span style="font-weight:600;font-size:14px;color:#CFCDD4;flex:1 1 240px;min-width:0">{{ h.target }} — published by 0xe7f7…01e1</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:{{ h.statusColor }};background:{{ h.statusBg }};border:1px solid {{ h.statusBorder }};border-radius:9999px;padding:3px 10px;flex:none">{{ h.status }}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <span style="font-weight:400;font-size:12px;color:#A09BA8;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:5px 10px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ h.cid }}</span>
+              <span style="font-weight:400;font-size:13px;color:#A09BA8">to <span style="font-weight:600;color:#CFCDD4">{{ h.server }}</span></span>
+              <span style="font-weight:600;font-size:12px;color:#30CD00">HTTP 200</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;rightsState&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;verified&quot;, &quot;missing&quot;], &quot;default&quot;: &quot;verified&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Rights&quot;}, &quot;mapCoords&quot;: {&quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: false, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Map&quot;}, &quot;cellSize&quot;: {&quot;editor&quot;: &quot;range&quot;, &quot;default&quot;: 40, &quot;min&quot;: 28, &quot;max&quot;: 52, &quot;step&quot;: 2, &quot;unit&quot;: &quot;px&quot;, &quot;tsType&quot;: &quot;number&quot;, &quot;section&quot;: &quot;Map&quot;}}">
+class Component extends DCLogic {
+  state = { tab: 'land', hover: null, base: { x: 2, y: 12 }, targetWorld: null, showEmptyWorlds: false, worldChoosing: false };
+  renderVals() {
+    const { tab, base, targetWorld } = this.state;
+    const bx = base.x, by = base.y;
+    const showCoords = this.props.mapCoords ?? false;
+    const cellSize = this.props.cellSize ?? 40;
+    const blocked = (this.props.rightsState ?? 'verified') === 'missing';
+    const c = (x, y) => x + ',' + y;
+    const missingData = blocked ? [
+      { coord: c(bx + 3, by + 2), reason: 'Owned by 0x9a2f…44c — you\u2019re not an update operator on this parcel', owner: '0x9a2f…44c' },
+      { coord: c(bx + 4, by + 2), reason: 'Owned by 0x9a2f…44c — you\u2019re not an update operator on this parcel', owner: '0x9a2f…44c' },
+      { coord: c(bx + 4, by + 3), reason: 'Part of estate \u201CEast Blocks\u201D owned by 0x31bd…e07 — no operator rights', owner: '0x31bd…e07' }
+    ] : [];
+    const missingSet = new Set(missingData.map(m => m.coord));
+    const inScene = (x, y) => x >= bx && x <= bx + 5 && y >= by && y <= by + 3;
+    const cells = [];
+    for (let y = by + 4; y >= by - 3; y--) {
+      for (let x = bx - 3; x <= bx + 6; x++) {
+        const key = c(x, y);
+        const scene = inScene(x, y);
+        const isBase = x === bx && y === by;
+        const isMissing = missingSet.has(key);
+        let bg = 'rgba(255,255,255,0.03)', border = '1px solid rgba(255,255,255,0.05)', shadow = 'none', coordColor = 'rgba(255,255,255,0.25)';
+        if (isBase) { bg = '#FF2D55'; border = '1px solid #FF2D55'; shadow = '0 0 16px rgba(255,45,85,0.55)'; coordColor = 'rgba(255,255,255,0.9)'; }
+        else if (isMissing) { bg = 'rgba(255,188,91,0.28)'; border = '1px solid #FFBC5B'; coordColor = 'rgba(255,255,255,0.8)'; }
+        else if (scene) { bg = 'rgba(255,45,85,0.32)'; border = '1px solid rgba(255,45,85,0.7)'; coordColor = 'rgba(255,255,255,0.7)'; }
+        cells.push({ bg, border, shadow, coordColor, coord: showCoords && scene ? key : '', onEnter: () => this.setState({ hover: key }) });
+      }
+    }
+    const h = this.state.hover;
+    let hoverText = 'Hover a parcel for details';
+    if (h) {
+      const [hx, hy] = h.split(',').map(Number);
+      const m = missingData.find(d => d.coord === h);
+      if (hx === bx && hy === by) hoverText = h + ' — base parcel · update manager ✓';
+      else if (m) hoverText = h + ' — no update rights · owned by ' + m.owner;
+      else if (inScene(hx, hy)) hoverText = h + ' — update manager ✓';
+      else hoverText = h + ' — outside this scene';
+    }
+    const holdingsData = [
+      { x: 2, y: 12, title: 'Hexa Estate', meta: '24 parcels · update manager · Hexabricks live, 5 hours ago' },
+      { x: 20, y: -4, title: 'Central Court estate', meta: '24 parcels · owned · Sunset Stage · deployed 3 weeks ago' },
+      { x: 75, y: -144, title: 'Owned parcel', meta: 'empty — nothing deployed' },
+      { x: 126, y: -119, title: 'Owned parcel', meta: 'Sunset Plaza · deployed 2 months ago' }
+    ];
+    const holdings = holdingsData.map(hd => {
+      const cur = hd.x === bx && hd.y === by;
+      return {
+        coord: c(hd.x, hd.y), title: hd.title, meta: hd.meta,
+        chipColor: cur ? '#FF2D55' : '#CFCDD4',
+        chipBg: cur ? 'rgba(255,45,85,0.12)' : 'rgba(255,255,255,0.05)',
+        chipBorder: cur ? 'rgba(255,45,85,0.45)' : 'rgba(255,255,255,0.14)',
+        badgeDisplay: cur ? 'inline-flex' : 'none',
+        btnDisplay: cur ? 'none' : 'inline-flex',
+        onSet: () => this.setState({ base: { x: hd.x, y: hd.y }, hover: null })
+      };
+    });
+    const mkWorld = (w) => {
+      const cur = targetWorld === w.name;
+      return {
+        name: w.name, meta: w.meta,
+        badgeDisplay: cur ? 'inline-flex' : 'none',
+        btnDisplay: cur ? 'none' : 'inline-flex',
+        onPoint: () => this.setState({ targetWorld: w.name })
+      };
+    };
+    const worldRows = [
+      { name: 'eordano.dcl.eth', meta: 'My World · multiscene · 2 scenes · updated 37 hours ago' },
+      { name: 'daosquad.dcl.eth', meta: 'Hexabricks · 1 scene · updated 6 days ago' },
+      { name: 'gather.dcl.eth', meta: 'Gathering Stage · 1 scene · updated 11 days ago' }
+    ].map(mkWorld);
+    const emptyWorldRows = ['facilitator.dcl.eth', 'facilitators.dcl.eth', 'grantsquad.dcl.eth', 'partnersquad.dcl.eth', 'partnerssquad.dcl.eth', 'protocolsquad.dcl.eth', 'social.dcl.eth', 'voxcraft.dcl.eth', 'minigames.dcl.eth'].map(n => mkWorld({ name: n, meta: '' }));
+    const sharedRows = [
+      { name: 'dclbrand.dcl.eth', meta: 'Brand Hub · deploy access via ACL · updated 2 days ago' },
+      { name: 'musicweek.dcl.eth', meta: 'Main Stage · deploy access via ACL · updated 3 weeks ago' }
+    ].map(mkWorld);
+    const tabStyle = (t, dotOn) => ({
+      weight: tab === t ? 700 : 600,
+      color: tab === t ? '#FCFCFC' : '#A09BA8',
+      bg: tab === t ? 'rgba(255,45,85,0.14)' : 'transparent',
+      shadow: tab === t ? 'inset 0 -2px 0 #FF2D55' : 'none',
+      dot: dotOn ? '#FF2D55' : 'transparent'
+    });
+    const footprint = c(bx, by) + ' – ' + c(bx + 5, by + 3);
+    const meta = {
+      land: { overline: 'Deploy target · Genesis City', subtitle: 'Parcels ' + footprint + ' on a public Genesis City catalyst' },
+      world: { overline: 'Deploy target · Worlds', subtitle: targetWorld ? targetWorld + ' on the Worlds content server' : 'The target is Genesis City LAND — pick a world to publish there instead' },
+      multi: { overline: 'Deploy target · Multiscene world', subtitle: targetWorld ? 'Scenes sharing ' + targetWorld + ' deploy independently' : 'Multiscene groups several scenes under one world name' },
+      history: { overline: 'Deployment History', subtitle: 'Every deploy of this scene from this project' }
+    }[tab];
+    const landBlocked = blocked && !targetWorld;
+    const worldScenes = { 'eordano.dcl.eth': '2 existing scenes', 'gather.dcl.eth': 'Gathering Stage' };
+    const primary = { bg: '#FF2D55', border: 'none' };
+    const secondary = { bg: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.18)' };
+    let cta;
+    if (tab === 'multi') {
+      if (!targetWorld) cta = { label: 'Set Target to a World', note: 'Multiscene applies to worlds — pick one first', ...secondary, action: () => this.setState({ tab: 'world', worldChoosing: true }) };
+      else if (worldScenes[targetWorld]) cta = { label: 'Deploy to Multiscene World', note: 'Hexabricks joins ' + worldScenes[targetWorld] + ' in ' + targetWorld, ...primary };
+      else cta = { label: 'Set World to Multiscene', note: targetWorld + ' holds one scene — this groups future scenes under it', ...secondary };
+    }
+    else if (tab === 'world') {
+      if (!targetWorld && !this.state.worldChoosing) cta = { label: 'Set Target to a World', note: 'Pick one of your worlds below', ...secondary, action: () => this.setState({ worldChoosing: true }) };
+      else if (!targetWorld) cta = { label: 'Choose a world below', note: '\u201CSet target here\u201D on any world makes it the deploy target', bg: 'transparent', border: '1px dashed rgba(255,255,255,0.25)' };
+      else if (worldScenes[targetWorld]) cta = { label: 'Convert to Multiscene World', note: 'Hexabricks joins ' + worldScenes[targetWorld] + ' in ' + targetWorld, ...primary };
+      else cta = { label: 'Deploy to ' + targetWorld, note: '1 change (317.8 KB) · Worlds server', ...primary };
+    }
+    else if (tab === 'land') {
+      if (targetWorld) cta = { label: 'Set Target to Land', note: 'Currently deploying to ' + targetWorld, ...secondary, action: () => this.setState({ targetWorld: null, worldChoosing: false }) };
+      else cta = { label: 'Deploy 1 change', note: '317.8 KB changed since last deploy', ...primary };
+    }
+    else cta = { label: 'Deploy 1 change', note: '317.8 KB changed since last deploy', ...primary };
+    return {
+      cells, hoverText,
+      cellPx: cellSize + 'px',
+      missing: missingData, missingCount: missingData.length,
+      rightsOk: !blocked, rightsBlocked: blocked,
+      ctaOk: tab !== 'history' && !(landBlocked && tab === 'land'), ctaBlocked: landBlocked && tab === 'land',
+      ctaLabel: cta.label, ctaNote: cta.note, ctaBg: cta.bg, ctaBorderCss: cta.border, ctaAction: cta.action,
+      showLandInactive: tab === 'land' && !!targetWorld,
+      showWorldLists: !!targetWorld || this.state.worldChoosing,
+      overline: meta.overline, subtitle: meta.subtitle,
+      currentTarget: targetWorld
+        ? (worldScenes[targetWorld] ? 'Current target: ' + targetWorld + ' ' + c(bx, by) + ' · Multiscene World' : 'Current target: ' + targetWorld + ' · World')
+        : 'Current target: ' + c(bx, by) + ' · Genesis City',
+      baseLabel: c(bx, by),
+      holdings, worldRows, emptyWorldRows, sharedRows,
+      noWorldTarget: !targetWorld, hasWorldTarget: !!targetWorld,
+      targetWorldName: targetWorld || '',
+      showEmptyWorlds: this.state.showEmptyWorlds,
+      emptyWorldsLabel: this.state.showEmptyWorlds ? 'Hide 9 worlds with no scenes yet ▴' : 'Show 9 more worlds with no scenes yet ▾',
+      toggleEmptyWorlds: () => this.setState(s => ({ showEmptyWorlds: !s.showEmptyWorlds })),
+      onBackToLand: () => this.setState({ targetWorld: null }),
+      showLand: tab === 'land' && !targetWorld, showWorld: tab === 'world', showMulti: tab === 'multi' && !!targetWorld, showMultiInactive: tab === 'multi' && !targetWorld, showHistory: tab === 'history',
+      multiWorldName: targetWorld || '',
+      multiWorldScenes: targetWorld && worldScenes[targetWorld] ? worldScenes[targetWorld] + ' · Hexabricks joins on next deploy' : 'Hexabricks is the only scene',
+      tabWorld: tabStyle('world', !!targetWorld), tabLand: tabStyle('land', !targetWorld), tabMulti: tabStyle('multi', false), tabHistory: tabStyle('history', false),
+      goWorld: () => this.setState({ tab: 'world' }),
+      goLand: () => this.setState({ tab: 'land' }),
+      goMulti: () => this.setState({ tab: 'multi' }),
+      goHistory: () => this.setState({ tab: 'history' }),
+      onLeaveMap: () => this.setState({ hover: null }),
+      history: [
+        { when: '5 hours ago', target: 'Parcels 2,12 – 7,15', cid: 'bafkreiab4ibp5xeyj7agkgu2zctencz4b7xcdalx3hc3f3ve3kupjm5dje', server: 'peer-eu1.decentraland.org', status: 'Live', statusColor: '#30CD00', statusBg: 'rgba(48,205,0,0.12)', statusBorder: 'rgba(48,205,0,0.35)' },
+        { when: '25 hours ago', target: 'Parcels 2,12 – 7,15', cid: 'bafkreidzagdcx6otv4synqpfr2mr2tthjanun7n2qgrijw5ds55aubokcm', server: 'peer-eu1.decentraland.org', status: 'Replaced', statusColor: '#A09BA8', statusBg: 'rgba(255,255,255,0.06)', statusBorder: 'rgba(255,255,255,0.14)' },
+        { when: '3 days ago', target: 'World daosquad.dcl.eth', cid: 'bafkreifq3wm2ntyr4zsqxkhcz7ykm55v6vw3d2i7hqxwzvp4a5r2xkdnua', server: 'worlds-content-server.decentraland.org', status: 'Live', statusColor: '#30CD00', statusBg: 'rgba(48,205,0,0.12)', statusBorder: 'rgba(48,205,0,0.35)' },
+        { when: '6 days ago', target: 'World daosquad.dcl.eth', cid: 'bafkreihg6d4x2mvbxqz3lk7ycwnp5s2ae4uj6tqvrhy3fmznw7kddci4be', server: 'worlds-content-server.decentraland.org', status: 'Replaced', statusColor: '#A09BA8', statusBg: 'rgba(255,255,255,0.06)', statusBorder: 'rgba(255,255,255,0.14)' },
+        { when: '6 days ago', target: 'Parcels 2,12 – 7,15', cid: 'bafkreig2xw4vplqxkz3mhy6cwnp5s2ae4uj6tqvrhy3fmznw7kddci4be', server: 'peer-eu1.decentraland.org', status: 'Replaced', statusColor: '#A09BA8', statusBg: 'rgba(255,255,255,0.06)', statusBorder: 'rgba(255,255,255,0.14)' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

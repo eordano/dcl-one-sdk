@@ -31,9 +31,16 @@
 // `templates/data-layer-host.mjs` resolves the scene's node_modules first and
 // only falls back to this package.
 //
+// Ported as DATA rather than code: `@dcl/asset-packs`' `initComponents`,
+// which upstream's `composite-provider.ts` runs after every load to put
+// `asset-packs::ActionTypes` and `asset-packs::Counter` on entity 0. The 7.43
+// editor reads them unconditionally and unmounts on their absence. See
+// `seedRootComponents` and `root-components.json`.
+//
 // Deliberately NOT ported:
 //   * undo/redo — a 978-line state machine with 100 ms transaction batching.
-//   * the 8 load-time migrations in `composite-provider.ts::runMigrations`. We
+//   * the load-time migrations in `composite-provider.ts::runMigrations`
+//     (`migrateAll` of both packages and the fix-up passes around them). We
 //     pass a composite through verbatim: a scene carrying
 //     `inspector::SceneMetadata-v4` stays v4 here and is migrated when Creator
 //     Hub next opens it. That is the safe direction — we never rewrite.
@@ -49,6 +56,8 @@ const {
 const { dumpEngineToComposite } = require('./engine-to-composite')
 
 const { AsyncQueue } = require('@dcl/rpc/dist/push-channel')
+
+const ROOT_COMPONENTS = require('./root-components.json')
 
 /**
  * The subset of upstream's `FileSystemInterface` this host calls. Supplied by
@@ -183,6 +192,43 @@ async function createFsCompositeProvider(fs) {
   }
 }
 
+// A port of `@dcl/asset-packs`' `initComponents(engine)`, which upstream's
+// `composite-provider.ts` runs after every `Composite.instance`. The values are
+// the `root-components.json` snapshot (see `scripts/dump-inspector-tables.cjs`)
+// rather than asset-packs itself, which the blob does not carry.
+//
+// `asset-packs::ActionTypes` follows `addActionType` exactly: each snapshot
+// entry replaces the same `type` in the existing list and is appended, so a
+// scene saved by an older editor keeps action types we do not know and picks
+// up the ones it lacks. Everything else is `getOrCreateMutable` — created when
+// absent, left alone when present, so a `Counter` keeps its value.
+//
+// Not ported from the same function: `initVideoPlayerComponents`, an engine
+// system that rewrites a `core::Material` whose video texture points at the
+// root entity — a load-time migration by another name (see the header).
+//
+// Runs before the boot tick and before `booted`, so it never triggers an
+// autosave by itself; like upstream, the seeded values reach the composite on
+// the first save.
+/** @param {import('@dcl/ecs/dist-cjs').IEngine} engine */
+function seedRootComponents(engine) {
+  const root = engine.RootEntity
+  const snapshot = /** @type {Record<string, any>} */ (ROOT_COMPONENTS.components)
+  for (const [name, value] of Object.entries(snapshot)) {
+    const component = /** @type {any} */ (engine.getComponent(name))
+    if (name === 'asset-packs::ActionTypes') {
+      const current = component.getOrNull(root)
+      let list = current ? current.value : []
+      for (const entry of value.value) {
+        list = [...list.filter(($) => $.type !== entry.type), entry]
+      }
+      component.getOrCreateMutable(root).value = list
+    } else if (!component.has(root)) {
+      component.create(root, value)
+    }
+  }
+}
+
 // A port of `host/stream.ts` + `logic/consume-stream.ts`.
 //
 // The ORDER here is the contract: the engine's whole state is enqueued BEFORE
@@ -268,6 +314,7 @@ async function createDataLayerHost(fs) {
       getCompositeEntity: (entity) => /** @type {import('@dcl/ecs/dist-cjs').Entity} */ (entity)
     }
   })
+  seedRootComponents(engine)
 
   // One tick after the load, and it is NOT cosmetic. `Composite.instance` only
   // marks components dirty; a component's crdt timestamp map — the thing

@@ -29,6 +29,7 @@ use catalyrst_hashing::hash_bytes_v1;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
 pub struct DeployOptions {
@@ -123,7 +124,12 @@ pub fn catalyst_rotation() -> Vec<String> {
     })
 }
 
-const DEFAULT_DCL_IGNORE: [&str; 27] = [
+/// Built-in ignore rules over developer files: source, build configuration
+/// and output, docs, scripts, source maps, tool state. Scene code can name
+/// one of these — a bundler's module-path comment, a `require('../package.json')`
+/// — without the explorer ever fetching it, so such a mention is not a lost
+/// asset.
+const DEVELOPER_DCL_IGNORE: [&str; 22] = [
     ".*",
     "package.json",
     "package-lock.json",
@@ -138,7 +144,6 @@ const DEFAULT_DCL_IGNORE: [&str; 27] = [
     "**/*.ts",
     "**/*.tsx",
     "Dockerfile",
-    "thumbnails",
     "dist",
     "README.md",
     // Non-asset developer files. `*.html` earns its place twice: a DCL scene
@@ -151,11 +156,21 @@ const DEFAULT_DCL_IGNORE: [&str; 27] = [
     "*.cjs",
     "*.md",
     "*.mdc",
+    "*.map",
+];
+
+/// Built-in ignore rules over files scene code could otherwise name as
+/// content: source art, archives, and the project's own Creator Hub asset
+/// previews. A bundle naming one of these has lost an asset, and preview and
+/// deploy warn about it.
+const SOURCE_ASSET_DCL_IGNORE: [&str; 5] = [
+    // Root-anchored: the project's own thumbnails/ holds Creator Hub asset
+    // previews; a thumbnails/ nested anywhere else is scene content.
+    "/thumbnails",
     "*.blend",
     "*.fbx",
     "*.zip",
     "*.rar",
-    "*.map",
 ];
 
 const EXTRA_DCL_IGNORE: [&str; 6] = [
@@ -167,15 +182,29 @@ const EXTRA_DCL_IGNORE: [&str; 6] = [
     "*.md",
 ];
 
-pub fn dcl_ignore_patterns(root: &Path) -> Vec<String> {
-    let user = std::fs::read_to_string(root.join(".dclignore")).unwrap_or_default();
+/// Every effective ignore line in matching order, with where it came from:
+/// the project's `.dclignore` for its own lines, `None` for the built-in
+/// defaults. A line the project repeats counts as the project's.
+fn dcl_ignore_lines(root: &Path) -> Vec<(Option<PathBuf>, String)> {
+    let dclignore = root.join(".dclignore");
+    let user = std::fs::read_to_string(&dclignore).unwrap_or_default();
     let mut seen = HashSet::new();
     user.split('\n')
-        .chain(DEFAULT_DCL_IGNORE)
-        .chain(EXTRA_DCL_IGNORE)
-        .filter(|p| !p.is_empty() && seen.insert(p.to_string()))
-        .map(str::to_string)
+        .map(|p| (Some(dclignore.clone()), p))
+        .chain(
+            DEVELOPER_DCL_IGNORE
+                .into_iter()
+                .chain(SOURCE_ASSET_DCL_IGNORE)
+                .chain(EXTRA_DCL_IGNORE)
+                .map(|p| (None, p)),
+        )
+        .filter(|(_, p)| !p.is_empty() && seen.insert(p.to_string()))
+        .map(|(from, p)| (from, p.to_string()))
         .collect()
+}
+
+pub fn dcl_ignore_patterns(root: &Path) -> Vec<String> {
+    dcl_ignore_lines(root).into_iter().map(|(_, p)| p).collect()
 }
 
 /// A `map_err` closure: the user-facing error wrapping the underlying cause.
@@ -189,8 +218,8 @@ where
 fn build_matcher(root: &Path) -> Result<Gitignore> {
     let mut b = GitignoreBuilder::new(root);
     b.case_insensitive(true).context("matcher options")?;
-    for p in dcl_ignore_patterns(root) {
-        b.add_line(None, &p).map_err(caused(
+    for (from, p) in dcl_ignore_lines(root) {
+        b.add_line(from, &p).map_err(caused(
             format!(".dclignore line {p:?} is not a valid pattern"),
             TrySteps::one("fix or delete that line (gitignore syntax)"),
         ))?;
@@ -255,7 +284,213 @@ fn collect_files(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let gi = build_matcher(root)?;
     let (mut out, mut ignored) = (Vec::new(), Vec::new());
     walk(root, root, &gi, &mut out, &mut ignored);
+    warn_default_ignored_named_by_bundle(root, &gi, &ignored);
     Ok((out, ignored))
+}
+
+/// The chunk files a dcl-one-sdk loader stub evaluates: every
+/// `var __dclOne…ChunkPath = '<rel>'` declaration with a non-empty path
+/// (see `split::loader_stub`). Any other entry point declares none.
+fn stub_chunk_paths(entry: &str) -> Vec<String> {
+    entry
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix("var __dclOne")?;
+            let (_, rest) = rest.split_once("ChunkPath = '")?;
+            let (rel, _) = rest.split_once('\'')?;
+            (!rel.is_empty()).then(|| rel.to_string())
+        })
+        .collect()
+}
+
+/// A bundle file as last seen on disk; a moved stamp means re-reading it.
+#[derive(Clone, Debug, PartialEq)]
+struct Stamp {
+    rel: String,
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    fn of(root: &Path, rel: &str) -> Self {
+        let meta = std::fs::metadata(root.join(rel)).ok();
+        Stamp {
+            rel: rel.to_string(),
+            modified: meta.as_ref().and_then(|m| m.modified().ok()),
+            len: meta.map_or(0, |m| m.len()),
+        }
+    }
+}
+
+struct Bundle {
+    stamp: Stamp,
+    text: String,
+}
+
+/// Stamped before it is read, so a rewrite racing the read moves the stamp
+/// and the next scan reads again. Bytes, so a non-UTF-8 stretch does not
+/// read as a missing file.
+fn read_bundle(root: &Path, rel: &str) -> Option<Bundle> {
+    let stamp = Stamp::of(root, rel);
+    let bytes = std::fs::read(root.join(rel)).ok()?;
+    Some(Bundle {
+        stamp,
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+    })
+}
+
+/// The JS the explorer evaluates, plus the stamp of every file it may live
+/// in: the entry point — scene.json's `main`, else the SDK7 then the SDK6
+/// default name — and, when that entry is a loader stub, each chunk it
+/// declares (stamped even while absent, so its arrival is noticed). Both
+/// empty until an entry point is built.
+fn built_bundles(root: &Path) -> (Vec<Stamp>, Vec<Bundle>) {
+    let main = std::fs::read(root.join("scene.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("main")?.as_str().map(str::to_string));
+    let Some(entry) = main
+        .as_deref()
+        .into_iter()
+        .chain(["bin/index.js", "bin/game.js"])
+        .find_map(|rel| read_bundle(root, rel))
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let chunks = stub_chunk_paths(&entry.text);
+    let mut stamps = vec![entry.stamp.clone()];
+    let mut bundles = vec![entry];
+    for rel in &chunks {
+        match read_bundle(root, rel) {
+            Some(chunk) => {
+                stamps.push(chunk.stamp.clone());
+                bundles.push(chunk);
+            }
+            None => stamps.push(Stamp::of(root, rel)),
+        }
+    }
+    (stamps, bundles)
+}
+
+/// Whether `text` names `rel` the way scene code names an asset: quoted,
+/// with at most a `./` or `/` prefix, and closed by the quote (also when
+/// escaped inside an embedding string) or by a `?`/`#` suffix. A path inside
+/// a URL, a bundler's module-path comment or a `require('../x')` is not
+/// that. Both sides come lowercased.
+fn names_path(text: &str, rel: &str) -> bool {
+    text.match_indices(rel).any(|(i, _)| {
+        let before = &text[..i];
+        let before = before
+            .strip_suffix("./")
+            .or_else(|| before.strip_suffix('/'))
+            .unwrap_or(before);
+        let after = &text[i + rel.len()..];
+        before.ends_with(['"', '\'', '`'])
+            && (after.starts_with(['"', '\'', '`', '?', '#'])
+                || after.starts_with("\\\"")
+                || after.starts_with("\\'"))
+    })
+}
+
+/// Whether a built-in source-asset rule — not the project's `.dclignore`,
+/// not a developer-file rule — is what keeps `rel` out of the upload.
+fn kept_out_by_source_asset_default(gi: &Gitignore, rel: &str) -> bool {
+    gi.matched(rel, false)
+        .inner()
+        .is_some_and(|g| g.from().is_none() && SOURCE_ASSET_DCL_IGNORE.contains(&g.original()))
+}
+
+/// `(file, bundle)` for each candidate some bundle names: the explorer will
+/// ask the content server for a file it never received. Case-insensitive on
+/// both sides, like the matcher and the content servers.
+fn named_by_bundles(candidates: &[String], bundles: &[Bundle]) -> Vec<(String, String)> {
+    let texts: Vec<(&str, String)> = bundles
+        .iter()
+        .map(|b| (b.stamp.rel.as_str(), b.text.to_lowercase()))
+        .collect();
+    candidates
+        .iter()
+        .filter_map(|rel| {
+            let lower = rel.to_lowercase();
+            let (bundle, _) = texts.iter().find(|(_, text)| names_path(text, &lower))?;
+            Some((rel.clone(), bundle.to_string()))
+        })
+        .collect()
+}
+
+/// One project's last scan: the bundle files it read (by stamp), the
+/// candidates it checked, and what it found.
+struct BundleScan {
+    stamps: Vec<Stamp>,
+    candidates: Vec<String>,
+    named: Vec<(String, String)>,
+}
+
+/// The `(file, bundle)` pairs to warn about now, or `None`. The content map
+/// is rebuilt on every stale entity request, so a project is rescanned only
+/// when its candidate list or a bundle file's stamp moved, and the result is
+/// returned only when it is non-empty and differs from the last one: one
+/// WARN per change, not one per poll.
+fn changed_named_by_bundles(
+    root: &Path,
+    gi: &Gitignore,
+    ignored: &[String],
+) -> Option<Vec<(String, String)>> {
+    static SCANS: OnceLock<Mutex<HashMap<PathBuf, BundleScan>>> = OnceLock::new();
+    let candidates: Vec<String> = ignored
+        .iter()
+        .filter(|rel| kept_out_by_source_asset_default(gi, rel))
+        .cloned()
+        .collect();
+    let mut scans = SCANS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if candidates.is_empty() {
+        scans.remove(root);
+        return None;
+    }
+    if scans.get(root).is_some_and(|last| {
+        last.candidates == candidates
+            && last
+                .stamps
+                .iter()
+                .all(|stamp| Stamp::of(root, &stamp.rel) == *stamp)
+    }) {
+        return None;
+    }
+    let previous = scans.remove(root);
+    let (stamps, bundles) = built_bundles(root);
+    if bundles.is_empty() {
+        return None;
+    }
+    let named = named_by_bundles(&candidates, &bundles);
+    let changed = !named.is_empty() && previous.is_none_or(|last| last.named != named);
+    scans.insert(
+        root.to_path_buf(),
+        BundleScan {
+            stamps,
+            candidates,
+            named: named.clone(),
+        },
+    );
+    changed.then_some(named)
+}
+
+fn warn_default_ignored_named_by_bundle(root: &Path, gi: &Gitignore, ignored: &[String]) {
+    let Some(named) = changed_named_by_bundles(root, gi, ignored) else {
+        return;
+    };
+    let mut bundles: Vec<&str> = named.iter().map(|(_, bundle)| bundle.as_str()).collect();
+    bundles.sort_unstable();
+    bundles.dedup();
+    let files: Vec<&str> = named.iter().map(|(file, _)| file.as_str()).collect();
+    tracing::warn!(
+        "the default ignore rules keep {} file(s) that {} names out of the upload; the explorer will not find them: {}",
+        named.len(),
+        bundles.join(", "),
+        files.join(", ")
+    );
 }
 
 /// What a deploy would upload, without reading a byte: the same walk and
@@ -798,6 +1033,219 @@ mod tests {
                 "assets/model.glb"
             ]
         );
+    }
+
+    /// `thumbnails` is root-anchored: the project's own thumbnails/ stays
+    /// home, a thumbnails/ under any other directory is scene content.
+    #[test]
+    fn only_the_root_thumbnails_directory_is_ignored() {
+        let t = TempTree::new("thumbs");
+        t.write("scene.json", "{}");
+        t.write_all(&[
+            "thumbnails/asset.png",
+            "images/thumbnails/casino.png",
+            "models/Thumbnails/deep/x.png",
+        ]);
+        let got = collect_publishable_files(&t.0).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "scene.json",
+                "models/Thumbnails/deep/x.png",
+                "images/thumbnails/casino.png"
+            ]
+        );
+        let gi = build_matcher(&t.0).unwrap();
+        assert!(gi.matched("thumbnails", true).is_ignore());
+        assert!(
+            gi.matched("THUMBNAILS", true).is_ignore(),
+            "case-insensitive"
+        );
+        assert!(!gi.matched("images/thumbnails", true).is_ignore());
+        assert!(!gi
+            .matched("images/thumbnails/casino.png", false)
+            .is_ignore());
+    }
+
+    /// The entry point is scene.json's `main`, else the SDK7 then the SDK6
+    /// default name; a loader stub adds the chunks it declares, stamped even
+    /// while a chunk is still missing.
+    #[test]
+    fn the_bundles_are_the_entry_point_and_the_chunks_a_stub_declares() {
+        let t = TempTree::new("bundle");
+        assert!(built_bundles(&t.0).1.is_empty());
+        t.write("bin/game.js", "six");
+        let (_, bundles) = built_bundles(&t.0);
+        assert_eq!(bundles[0].stamp.rel, "bin/game.js");
+        assert_eq!(bundles[0].text, "six");
+        t.write("bin/index.js", "seven");
+        assert_eq!(built_bundles(&t.0).1[0].stamp.rel, "bin/index.js");
+        t.write("scene.json", "{\"main\":\"out/main.js\"}");
+        t.write("out/main.js", "custom");
+        let (stamps, bundles) = built_bundles(&t.0);
+        assert_eq!(bundles[0].stamp.rel, "out/main.js");
+        assert_eq!(stamps.len(), 1, "an esbuild bundle declares no chunks");
+
+        t.write(
+            "out/main.js",
+            &crate::split::loader_stub("out/sdk-runtime.js", None, "out/scene.js", 0, false),
+        );
+        t.write("out/scene.js", "scene");
+        let (stamps, bundles) = built_bundles(&t.0);
+        let read: Vec<&str> = bundles.iter().map(|b| b.stamp.rel.as_str()).collect();
+        assert_eq!(read, vec!["out/main.js", "out/scene.js"]);
+        let stamped: Vec<&str> = stamps.iter().map(|s| s.rel.as_str()).collect();
+        assert_eq!(
+            stamped,
+            vec!["out/main.js", "out/sdk-runtime.js", "out/scene.js"]
+        );
+        assert_eq!(stamps[1].modified, None, "the sdk chunk is not on disk yet");
+        assert_eq!(
+            stub_chunk_paths(&crate::split::loader_stub(
+                "bin/sdk-runtime.js",
+                Some("bin/sdk-smart-items.js"),
+                "bin/scene.js",
+                0,
+                false
+            )),
+            vec![
+                "bin/sdk-runtime.js",
+                "bin/sdk-smart-items.js",
+                "bin/scene.js"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_is_named_only_as_a_quoted_asset_path() {
+        let rel = "models/rig.fbx";
+        for yes in [
+            "\"models/rig.fbx\"",
+            "'./models/rig.fbx'",
+            "`/models/rig.fbx?v=2`",
+            "x(\\\"models/rig.fbx\\\")",
+            "\"models/rig.fbx#a\"",
+        ] {
+            assert!(names_path(yes, rel), "{yes}");
+        }
+        for no in [
+            "// models/rig.fbx",
+            "//#region models/rig.fbx",
+            "\"https://cdn/models/rig.fbx\"",
+            "\"models/rig.fbx.bak\"",
+            "\"xmodels/rig.fbx\"",
+            "\"../models/rig.fbx\"",
+            "models/rig.fbx",
+        ] {
+            assert!(!names_path(no, rel), "{no}");
+        }
+    }
+
+    /// The WARN's input: a file a built-in source-asset rule keeps out while
+    /// a bundle names it as an asset path. Lines from the project's own
+    /// `.dclignore` are its choice; developer files a bundle names — a
+    /// bundler's module-path comment, a `require('../package.json')`, even a
+    /// quoted README — are never fetched by the explorer.
+    #[test]
+    fn source_assets_a_bundle_names_are_listed_developer_files_never() {
+        let t = TempTree::new("named");
+        t.write("scene.json", "{\"main\":\"bin/game.js\"}");
+        t.write(".dclignore", "*.zip\n");
+        t.write(
+            "bin/game.js",
+            concat!(
+                "// src/index.ts\n",
+                "//#region src/loop.ts\n",
+                "eval(\"f.exports={version:e(\\\"../package.json\\\").version}\");\n",
+                "load('README.md');load('images/Help.MD');\n",
+                "load('assets/Model.FBX');load('packs/level.zip');\n",
+                "load('https://cdn/art/logo.blend');\n",
+            ),
+        );
+        t.write_all(&[
+            "src/index.ts",
+            "src/loop.ts",
+            "package.json",
+            "README.md",
+            "images/help.md",
+            "assets/model.fbx",
+            "assets/other.fbx",
+            "packs/level.zip",
+            "art/logo.blend",
+        ]);
+        let gi = build_matcher(&t.0).unwrap();
+        let (_, ignored) = collect_files(&t.0).unwrap();
+        for dev in [
+            "src/index.ts",
+            "package.json",
+            "README.md",
+            "images/help.md",
+        ] {
+            assert!(ignored.contains(&dev.to_string()), "{dev}");
+            assert!(!kept_out_by_source_asset_default(&gi, dev), "{dev}");
+        }
+        assert!(kept_out_by_source_asset_default(&gi, "assets/model.fbx"));
+        assert!(kept_out_by_source_asset_default(&gi, "art/logo.blend"));
+        assert!(
+            !kept_out_by_source_asset_default(&gi, "packs/level.zip"),
+            "the project's own rule"
+        );
+        let candidates: Vec<String> = ignored
+            .iter()
+            .filter(|rel| kept_out_by_source_asset_default(&gi, rel))
+            .cloned()
+            .collect();
+        let (_, bundles) = built_bundles(&t.0);
+        assert_eq!(
+            named_by_bundles(&candidates, &bundles),
+            vec![("assets/model.fbx".to_string(), "bin/game.js".to_string())]
+        );
+    }
+
+    /// One WARN per change: the same tree and bundles never re-warn, a
+    /// rebuilt chunk naming the same files does not either, and a chunk that
+    /// stops naming them then names them again does. The scene code lives
+    /// in the chunk the stub declares, not in the entry point.
+    #[test]
+    fn the_warn_fires_once_per_change() {
+        let t = TempTree::new("rescan");
+        t.write("scene.json", "{\"main\":\"bin/index.js\"}");
+        t.write(
+            "bin/index.js",
+            &crate::split::loader_stub("bin/sdk-runtime.js", None, "bin/scene.js", 0, false),
+        );
+        t.write("bin/scene.js", "load('models/rig.fbx')");
+        t.write_all(&["models/rig.fbx", "models/rig.glb"]);
+        let gi = build_matcher(&t.0).unwrap();
+        let (mut out, mut ignored) = (Vec::new(), Vec::new());
+        walk(&t.0, &t.0, &gi, &mut out, &mut ignored);
+        let named = vec![("models/rig.fbx".to_string(), "bin/scene.js".to_string())];
+        assert_eq!(
+            changed_named_by_bundles(&t.0, &gi, &ignored),
+            Some(named.clone())
+        );
+        assert_eq!(
+            changed_named_by_bundles(&t.0, &gi, &ignored),
+            None,
+            "nothing moved"
+        );
+        t.write("bin/scene.js", "load('models/rig.fbx');/* rebuilt */");
+        assert_eq!(
+            changed_named_by_bundles(&t.0, &gi, &ignored),
+            None,
+            "rebuilt, same list"
+        );
+        t.write("bin/scene.js", "load('models/rig.glb');");
+        assert_eq!(
+            changed_named_by_bundles(&t.0, &gi, &ignored),
+            None,
+            "nothing named"
+        );
+        t.write(
+            "bin/scene.js",
+            "load('models/rig.fbx');load('models/rig.glb');",
+        );
+        assert_eq!(changed_named_by_bundles(&t.0, &gi, &ignored), Some(named));
     }
 
     #[test]

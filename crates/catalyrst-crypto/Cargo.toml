@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-crypto"
-version = "0.22.2"
+version = "0.23.0"
 edition = "2021"
 description = "Rust port of the Decentraland @dcl/crypto auth chain verification"
 

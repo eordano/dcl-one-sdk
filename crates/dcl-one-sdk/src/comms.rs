@@ -41,11 +41,24 @@ impl CommsState {
     }
 }
 
+/// A session is identified by (room, address): one wallet may sit in the realm
+/// room and in any number of scene rooms at once, and only a second session in
+/// the SAME room displaces the first.
 #[derive(Default)]
 struct Registry {
     counter: u32,
     rooms: HashMap<String, Room>,
-    addresses: HashMap<String, (String, u32)>,
+}
+
+impl Registry {
+    /// The alias `address` currently holds in `room_id`, if any.
+    fn session_in(&self, room_id: &str, address: &str) -> Option<u32> {
+        self.rooms
+            .get(room_id)?
+            .iter()
+            .find(|(_, peer)| peer.address == address)
+            .map(|(alias, _)| *alias)
+    }
 }
 
 type Room = HashMap<u32, Peer>;
@@ -112,7 +125,7 @@ async fn recv_packet(socket: &mut WebSocket, timeout_error: &str) -> Result<WsPa
     }
 }
 
-async fn handshake(socket: &mut WebSocket, st: &CommsState) -> Result<String> {
+async fn handshake(socket: &mut WebSocket, st: &CommsState, room_id: &str) -> Result<String> {
     let packet = recv_packet(socket, "Timed out waiting for peer identification").await?;
     let Some(ws_packet::Message::PeerIdentification(ident)) = packet.message else {
         bail!("Invalid protocol. peerIdentification packet missed");
@@ -122,8 +135,9 @@ async fn handshake(socket: &mut WebSocket, st: &CommsState) -> Result<String> {
     }
     let address = ident.address.to_lowercase();
     let challenge_to_sign = format!("dcl-{:x}", rand::rng().random::<u128>());
-    let already_connected = st.reg().addresses.contains_key(&address);
+    let already_connected = st.reg().session_in(room_id, &address).is_some();
     tracing::debug!(
+        room = %room_id,
         challenge_to_sign,
         address,
         already_connected,
@@ -173,9 +187,9 @@ fn join_room(
     let mut reg = st.reg();
     reg.counter += 1;
     let alias = reg.counter;
-    if let Some((old_room, old_alias)) = reg.addresses.remove(address) {
-        if let Some(old_peer) = drop_peer(&mut reg, &old_room, old_alias) {
-            tracing::info!(room = %old_room, address, alias = old_alias, "mini-comms kicking previous session");
+    if let Some(old_alias) = reg.session_in(room_id, address) {
+        if let Some(old_peer) = drop_peer(&mut reg, room_id, old_alias) {
+            tracing::info!(room = %room_id, address, alias = old_alias, "mini-comms kicking previous session");
             let _ = old_peer
                 .tx
                 .send(PeerFrame::Kick(craft(ws_packet::Message::PeerKicked(
@@ -203,8 +217,6 @@ fn join_room(
             tx,
         },
     );
-    reg.addresses
-        .insert(address.to_string(), (room_id.to_string(), alias));
     let welcome = craft(ws_packet::Message::WelcomeMessage(WsWelcome {
         alias,
         peer_identities,
@@ -225,18 +237,8 @@ fn broadcast_update(st: &CommsState, room_id: &str, from_alias: u32, update: WsP
     send_all(room, Some(from_alias), &bytes);
 }
 
-fn leave_room(st: &CommsState, room_id: &str, alias: u32, address: &str) {
-    let mut reg = st.reg();
-    if drop_peer(&mut reg, room_id, alias).is_none() {
-        return;
-    }
-    if reg
-        .addresses
-        .get(address)
-        .is_some_and(|(r, a)| r == room_id && *a == alias)
-    {
-        reg.addresses.remove(address);
-    }
+fn leave_room(st: &CommsState, room_id: &str, alias: u32) {
+    drop_peer(&mut st.reg(), room_id, alias);
 }
 
 async fn deliver(sink: &mut SplitSink<WebSocket, Message>, frame: Option<PeerFrame>) -> Result<()> {
@@ -348,7 +350,7 @@ async fn handle_host_socket(socket: WebSocket, st: Arc<CommsState>, room_id: Str
     let (mut sink, mut stream) = socket.split();
     if let Some(json) = host_json(&st, &room_id, &welcome) {
         if sink.send(Message::Text(json.into())).await.is_err() {
-            leave_room(&st, &room_id, alias, HOST_ADDRESS);
+            leave_room(&st, &room_id, alias);
             return;
         }
     }
@@ -395,12 +397,12 @@ async fn handle_host_socket(socket: WebSocket, st: Arc<CommsState>, room_id: Str
             }
         }
     }
-    leave_room(&st, &room_id, alias, HOST_ADDRESS);
+    leave_room(&st, &room_id, alias);
     tracing::info!(room = %room_id, alias, "mini-comms host disconnected");
 }
 
 async fn handle_socket(mut socket: WebSocket, st: Arc<CommsState>, room_id: String) {
-    let address = match handshake(&mut socket, &st).await {
+    let address = match handshake(&mut socket, &st, &room_id).await {
         Ok(address) => address,
         Err(e) => {
             tracing::warn!(room = %room_id, "mini-comms handshake failed: {e:#}");
@@ -413,7 +415,7 @@ async fn handle_socket(mut socket: WebSocket, st: Arc<CommsState>, room_id: Stri
     tracing::info!(room = %room_id, address, alias, "mini-comms peer welcomed");
     let (mut sink, mut stream) = socket.split();
     if sink.send(Message::Binary(welcome.into())).await.is_err() {
-        leave_room(&st, &room_id, alias, &address);
+        leave_room(&st, &room_id, alias);
         return;
     }
     loop {
@@ -440,6 +442,95 @@ async fn handle_socket(mut socket: WebSocket, st: Arc<CommsState>, room_id: Stri
             }
         }
     }
-    leave_room(&st, &room_id, alias, &address);
+    leave_room(&st, &room_id, alias);
     tracing::info!(room = %room_id, address, alias, "mini-comms peer disconnected");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    const ALICE: &str = "0x00000000000000000000000000000000000000a1";
+    const BOB: &str = "0x00000000000000000000000000000000000000b2";
+
+    fn join(st: &CommsState, room: &str, address: &str) -> (u32, UnboundedReceiver<PeerFrame>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (alias, _welcome) = join_room(st, room, address, tx);
+        (alias, rx)
+    }
+
+    fn was_kicked(rx: &mut UnboundedReceiver<PeerFrame>) -> bool {
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|f| matches!(f, PeerFrame::Kick(_)))
+    }
+
+    fn aliases(st: &CommsState, room: &str) -> Vec<u32> {
+        let reg = st.reg();
+        let mut out: Vec<u32> = reg
+            .rooms
+            .get(room)
+            .map(|r| r.keys().copied().collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn the_same_address_holds_a_session_in_every_room_it_joins() {
+        let st = CommsState::default();
+        let (realm, mut realm_rx) = join(&st, "room-1", ALICE);
+        let (scene, mut scene_rx) = join(&st, "scene-bafy1", ALICE);
+        assert_eq!(aliases(&st, "room-1"), vec![realm]);
+        assert_eq!(aliases(&st, "scene-bafy1"), vec![scene]);
+        assert!(
+            !was_kicked(&mut realm_rx),
+            "joining a scene room must not kick the realm session"
+        );
+        assert!(!was_kicked(&mut scene_rx));
+    }
+
+    #[test]
+    fn a_second_session_in_the_same_room_kicks_the_first() {
+        let st = CommsState::default();
+        let (first, mut first_rx) = join(&st, "room-1", ALICE);
+        let (other, mut other_rx) = join(&st, "scene-bafy1", ALICE);
+        let (second, mut second_rx) = join(&st, "room-1", ALICE);
+        assert_ne!(first, second);
+        assert!(was_kicked(&mut first_rx));
+        assert!(!was_kicked(&mut second_rx));
+        assert_eq!(aliases(&st, "room-1"), vec![second]);
+        assert!(
+            !was_kicked(&mut other_rx),
+            "the kick is scoped to the room being joined"
+        );
+        assert_eq!(aliases(&st, "scene-bafy1"), vec![other]);
+    }
+
+    #[test]
+    fn already_connected_is_answered_per_room() {
+        let st = CommsState::default();
+        let (alias, _rx) = join(&st, "room-1", ALICE);
+        let (_bob, _bob_rx) = join(&st, "room-1", BOB);
+        assert_eq!(st.reg().session_in("room-1", ALICE), Some(alias));
+        assert_eq!(st.reg().session_in("scene-bafy1", ALICE), None);
+        assert_eq!(
+            st.reg()
+                .session_in("room-1", "0x00000000000000000000000000000000000000c3"),
+            None
+        );
+    }
+
+    #[test]
+    fn leaving_one_room_keeps_the_sessions_in_the_others() {
+        let st = CommsState::default();
+        let (realm, _realm_rx) = join(&st, "room-1", ALICE);
+        let (scene, _scene_rx) = join(&st, "scene-bafy1", ALICE);
+        leave_room(&st, "scene-bafy1", scene);
+        assert_eq!(st.reg().session_in("scene-bafy1", ALICE), None);
+        assert!(
+            !st.reg().rooms.contains_key("scene-bafy1"),
+            "an emptied room is dropped"
+        );
+        assert_eq!(st.reg().session_in("room-1", ALICE), Some(realm));
+    }
 }

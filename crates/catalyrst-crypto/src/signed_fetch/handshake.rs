@@ -3,8 +3,8 @@ use thiserror::Error;
 
 use super::{
     build_legacy_payload, build_payload_v6, default_eip1654_validator, parse_metadata,
-    signed_fetch_path, AuthChain, AuthLink, AUTH_CHAIN_HEADER_PREFIX, AUTH_METADATA_HEADER,
-    AUTH_TIMESTAMP_HEADER, MAX_AUTH_CHAIN_LINKS,
+    signed_fetch_path, AuthChain, AuthLink, PayloadOverPaths, SignedFetchPath,
+    AUTH_CHAIN_HEADER_PREFIX, AUTH_METADATA_HEADER, AUTH_TIMESTAMP_HEADER, MAX_AUTH_CHAIN_LINKS,
 };
 use crate::eip1654::Eip1654Validator;
 use crate::metadata_gate::{
@@ -216,22 +216,40 @@ fn map_auth_error(err: AuthError) -> AuthChainError {
 /// failure is deterministic in the payload shape, so it settles on the first
 /// attempt; a request that fails both answers with the legacy attempt's
 /// verdict, which is what the legacy-only check answered.
-pub async fn validate_signature_either_payload(
+pub async fn validate_signature_either_payload<'a>(
     chain: &AuthChain,
     method: &str,
-    path: &str,
+    path: impl Into<SignedFetchPath<'a>>,
     timestamp: &str,
     metadata: &str,
     expiration_secs: i64,
     now: i64,
 ) -> Result<Signer, AuthChainError> {
-    let v6 = build_payload_v6(method, path, timestamp, metadata);
-    let legacy = build_legacy_payload(method, path, timestamp, metadata);
-    match validate_signature(chain, &v6, timestamp, expiration_secs, now).await {
+    let path = path.into();
+    let v6 = PayloadOverPaths::new(&path, |path| {
+        build_payload_v6(method, path, timestamp, metadata)
+    });
+    let legacy = PayloadOverPaths::new(&path, |path| {
+        build_legacy_payload(method, path, timestamp, metadata)
+    });
+    match v6
+        .validate(|payload| validate_signature(chain, payload, timestamp, expiration_secs, now))
+        .await
+    {
         Err(AuthChainError::InvalidSignature(_)) if legacy != v6 => {
-            validate_signature(chain, &legacy, timestamp, expiration_secs, now).await
+            legacy
+                .validate(|payload| {
+                    validate_signature(chain, payload, timestamp, expiration_secs, now)
+                })
+                .await
         }
         settled => settled,
+    }
+}
+
+impl super::SignatureComparison for AuthChainError {
+    fn invalid_signature(&self) -> bool {
+        matches!(self, Self::InvalidSignature(_))
     }
 }
 
@@ -276,7 +294,6 @@ pub async fn require_signer(
     tolerance_secs: i64,
 ) -> Result<Signer, AuthChainError> {
     let path = signed_fetch_path(headers, path);
-    let path = path.as_ref();
     let value = header_object(headers);
     let chain = extract_from_object(&value)?;
     let timestamp = obj_str(&value, AUTH_TIMESTAMP_HEADER)
@@ -328,7 +345,7 @@ pub async fn optional_signer(
 async fn verify_object_v6(
     obj: &serde_json::Map<String, Value>,
     method: &str,
-    path: &str,
+    path: &SignedFetchPath<'_>,
     expiration_secs: i64,
     now_secs: i64,
     canonical_metadata_keys: &[&str],
@@ -355,18 +372,30 @@ async fn verify_object_v6(
         }
     }
 
-    let payload = build_payload_v6(method, path, timestamp, metadata_raw);
-    let signer =
-        match validate_signature(&chain, &payload, timestamp, expiration_secs, now_secs).await {
-            Ok(signer) => signer,
-            Err(AuthChainError::InvalidSignature(_)) if !canonical_metadata_keys.is_empty() => {
-                assert_legacy_metadata_keys(&metadata, canonical_metadata_keys)
-                    .map_err(map_metadata_error)?;
-                let legacy = build_legacy_payload(method, path, timestamp, metadata_raw);
-                validate_signature(&chain, &legacy, timestamp, expiration_secs, now_secs).await?
-            }
-            Err(err) => return Err(err),
-        };
+    let v6 = PayloadOverPaths::new(path, |path| {
+        build_payload_v6(method, path, timestamp, metadata_raw)
+    });
+    let signer = match v6
+        .validate(|payload| {
+            validate_signature(&chain, payload, timestamp, expiration_secs, now_secs)
+        })
+        .await
+    {
+        Ok(signer) => signer,
+        Err(AuthChainError::InvalidSignature(_)) if !canonical_metadata_keys.is_empty() => {
+            assert_legacy_metadata_keys(&metadata, canonical_metadata_keys)
+                .map_err(map_metadata_error)?;
+            let legacy = PayloadOverPaths::new(path, |path| {
+                build_legacy_payload(method, path, timestamp, metadata_raw)
+            });
+            legacy
+                .validate(|payload| {
+                    validate_signature(&chain, payload, timestamp, expiration_secs, now_secs)
+                })
+                .await?
+        }
+        Err(err) => return Err(err),
+    };
 
     Ok((signer, metadata))
 }
@@ -396,7 +425,7 @@ pub async fn verify_handshake_meta_v6(
     verify_object_v6(
         &obj,
         method,
-        path,
+        &SignedFetchPath::route_only(path),
         expiration_secs,
         now_secs,
         canonical_metadata_keys,
@@ -436,11 +465,10 @@ pub async fn require_signer_meta_v6(
     metadata_gate: Option<&SignerGate>,
 ) -> Result<(Signer, Value), AuthChainError> {
     let path = signed_fetch_path(headers, path);
-    let path = path.as_ref();
     verify_object_v6(
         &header_object(headers),
         method,
-        path,
+        &path,
         tolerance_secs,
         chrono::Utc::now().timestamp(),
         canonical_metadata_keys,

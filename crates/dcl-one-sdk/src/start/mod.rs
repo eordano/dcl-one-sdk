@@ -30,8 +30,8 @@ use axum::{
 };
 use editor::{data_layer_ws, inspector_asset, inspector_index, inspector_redirect, mobile_preview};
 use http::{
-    about, contents, entities_active, entities_scene, feature_flags, preview_wearables, root,
-    scene_id_for, scene_json, scenes,
+    about, contents, entities_active, entities_scene, feature_flags, get_scene_adapter,
+    preview_wearables, root, scene_id_for, scene_json, scenes,
 };
 use proxy::{
     catalyst_proxy, lambdas_contracts_servers, lambdas_explore_realms, world_about, world_content,
@@ -544,6 +544,7 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
     Router::new()
         .route("/", get(root))
         .route("/about", get(about))
+        .route("/get-scene-adapter", post(get_scene_adapter))
         .route("/scenes", get(scenes))
         .route("/scene.json", get(scene_json))
         .route("/preview-wearables", get(preview_wearables))

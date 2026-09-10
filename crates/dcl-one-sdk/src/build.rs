@@ -497,6 +497,9 @@ pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<Checked
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+        // TypeScript uses inverse video for source gutters, which produces bright
+        // background blocks on dark terminals. Keep the gutter foreground-only.
+        let body = body.replace("\x1b[7m", "\x1b[90m");
         let body = body.trim();
         let count = body.matches("error TS").count();
         let what = match count {

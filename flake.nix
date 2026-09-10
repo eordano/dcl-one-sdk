@@ -72,7 +72,7 @@
           # manifest (no [package]), so crane cannot derive them from it.
           sdkCraneArgs = {
             pname = "dcl-one-sdk";
-            version = "0.22.2";
+            version = "0.23.0";
             src = ./.;
             strictDeps = true;
             cargoExtraArgs = "--locked -p dcl-one-sdk --bin dcl-one-sdk";

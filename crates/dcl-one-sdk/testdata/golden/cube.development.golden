@@ -1,5 +1,5 @@
 (dcl-one-sdk golden v1 cube development)
-TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:46b04264e3081841
+TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:f8187c13bd82fe96
 SCENE_COMPILED_JS_SIZE_DEV=485.6k bytes
 THE BUNDLE HAS SOURCEMAPS
   SOURCE: ../.dcl-one/sdk-boot.js
@@ -8,7 +8,7 @@ THE BUNDLE HAS SOURCEMAPS
   SOURCE: ../.dcl-one/entrypoint.ts
   ARTIFACT bin/index.js               8412 sha256=b840f24417b922a6
   ARTIFACT bin/scene.js               2094 sha256=e3b517c79500bf22
-  ARTIFACT bin/sdk-runtime.js       475139 sha256=a24a18dc0fb8472f
+  ARTIFACT bin/sdk-runtime.js       475121 sha256=fcbc5df482e2280a
 LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=0
 ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"

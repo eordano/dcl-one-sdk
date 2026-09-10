@@ -555,7 +555,10 @@ pub(super) async fn start(
 /// inner JoinHandle is awaited so a deploy panic still reaches a terminal
 /// state.
 fn launch(st: Arc<AppState>, root: PathBuf, id: u64) {
-    let identity = live_identity(&st);
+    // An automatic run may prepare an interactive wallet request, but may
+    // never consume a delegated key if a sign-in completes during the GET.
+    let automatic = runs(&st).as_ref().is_some_and(|r| r.id == id && r.auto);
+    let identity = if automatic { None } else { live_identity(&st) };
     let host_signer = match identity.is_some() {
         true => None,
         false => {
@@ -1443,7 +1446,11 @@ fn deploy_document(st: &AppState, title: &str, prefix: &str, active: &str, body:
     super::chrome::html(document(
         title,
         prefix,
-        PAGE_CSS,
+        if active == "target" {
+            target_css()
+        } else {
+            PAGE_CSS
+        },
         &format!("#{active}"),
         "Skip to the section",
         Some(&super::chrome::Nav {
@@ -1455,6 +1462,25 @@ fn deploy_document(st: &AppState, title: &str, prefix: &str, active: &str, body:
         }),
         body,
     ))
+}
+
+/// Keep the design fonts self-contained, including behind a preview tunnel.
+fn target_css() -> &'static str {
+    static CSS: OnceLock<String> = OnceLock::new();
+    CSS.get_or_init(|| {
+        use base64::Engine;
+        let mut css = PAGE_CSS.to_string();
+        for (weight, bytes) in [
+            (400, include_bytes!("fonts/Inter-UI-Regular.otf").as_slice()),
+            (600, include_bytes!("fonts/Inter-UI-SemiBold.otf").as_slice()),
+            (700, include_bytes!("fonts/Inter-UI-Bold.otf").as_slice()),
+        ] {
+            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+            css.push_str(&format!("@font-face{{font-family:'Inter UI';src:url(data:font/otf;base64,{data}) format('opentype');font-weight:{weight};font-display:swap;}}"));
+        }
+        css.push_str(include_str!("target.css"));
+        css
+    })
 }
 
 /// The error branch both pages share, held to the same rule as the rest:
@@ -1509,6 +1535,7 @@ async fn page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response 
                 && may_publish
                 && !st.deploy_dry_run
                 && std::env::var_os("DCL_PRIVATE_KEY").is_none()
+                && live_identity(st).is_none()
             {
                 // An empty slot claims afresh; a pending run whose payload
                 // moved re-mints, so the wallet only ever signs the tree as
@@ -1683,7 +1710,7 @@ fn alarms(p: &deploy::DeployPreview) -> String {
     out
 }
 
-fn named_scenes(scenes: &[RemoteScene]) -> String {
+fn named_scenes(scenes: &[&RemoteScene]) -> String {
     let named: Vec<String> = scenes.iter().take(3).map(|s| s.title.clone()).collect();
     let tail = match scenes.len() > named.len() {
         true => format!(" and {} more", scenes.len() - named.len()),
@@ -1694,21 +1721,28 @@ fn named_scenes(scenes: &[RemoteScene]) -> String {
 
 /// The left column: what is on the target right now.
 fn server_panel(dest: &Dest, status: &LiveStatus) -> String {
-    let others_row = |others: &[RemoteScene]| match others.is_empty() {
-        true => String::new(),
-        false => {
-            let fate = match dest.world.is_some() {
-                true => "kept in place by this publish",
-                false => "replaced by this publish",
-            };
+    let (ours, _) = footprint(dest);
+    let others_row = |others: &[RemoteScene]| {
+        let (replaced, kept): (Vec<_>, Vec<_>) = others
+            .iter()
+            .partition(|scene| dest.world.is_none() || scene_overlaps(&scene.coords, &ours));
+        let row = |label: &str, scenes: &[&RemoteScene], fate: &str| {
+            if scenes.is_empty() {
+                return String::new();
+            }
             kv(
-                "Also here",
+                label,
                 format!(
-                    "<span class=\"note\">{} \u{2014} {fate}</span>",
-                    named_scenes(others)
+                    r#"<span class="note">{} — {fate}</span>"#,
+                    named_scenes(scenes)
                 ),
             )
-        }
+        };
+        format!(
+            "{}{}",
+            row("Also replaced", &replaced, "replaced by this publish"),
+            row("Other scenes", &kept, "kept in place by this publish")
+        )
     };
     match &status.remote {
         Remote::Known(state) => {
@@ -1770,7 +1804,12 @@ fn upload_panel(p: &deploy::DeployPreview, status: &LiveStatus) -> String {
         ),
         None => String::new(),
     };
-    format!("{datum}{reuse_line}")
+    let meter = status.reuse.as_ref().map(|r| {
+        let total = r.reused_files + r.upload_files;
+        let percent = (r.reused_files * 100).checked_div(total).unwrap_or(0);
+        format!(r#"<div class="tgt__reuse" role="meter" aria-label="Files already on the server" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{percent}"><span style="width:{percent}%"></span></div>"#)
+    }).unwrap_or_default();
+    format!("{datum}{meter}{reuse_line}")
 }
 
 /// The card's footer: the primary button and the terminal line — or, for a
@@ -1788,13 +1827,12 @@ fn foot(prefix: &str, tok: &str, print: &str, blocked: Option<&str>) -> String {
           <input type="hidden" name="token" value="{tok}">
           <input type="hidden" name="fingerprint" value="{print_esc}">
           <button class="jn__cta" type="submit">Publish</button>
-          <span class="note">Signing happens in your wallet {mdash} nothing uploads until it
-            answers. Or run <code>dcl-one-sdk deploy</code> in the scene folder.</span>
+          <span class="note">Publish signs with your connected session, or asks your wallet for a signature.
+            You can also run <code>dcl-one-sdk deploy</code> in the scene folder.</span>
         </form>"#,
         prefix_esc = esc(prefix),
         tok = esc(tok),
         print_esc = esc(print),
-        mdash = "\u{2014}",
     )
 }
 
@@ -1955,11 +1993,10 @@ fn point_form(prefix: &str, tok: &str, world: &str, label: &str) -> String {
 /// positions its scenes internally.
 fn base_form(prefix: &str, tok: &str, dest: &Dest) -> String {
     format!(
-        r#"<div class="jn2__noterow"><form class="tgt__base" method="post" action="{prefix_esc}/target/base"><input type="hidden" name="token" value="{tok_esc}"><span class="jn__hint">Base parcel</span><input name="base" value="{base_esc}" aria-label="base parcel x,y" spellcheck="false" autocomplete="off"><button class="deep__copy" type="submit">Move scene</button><span class="jn__hint">anywhere on the Genesis map {mdash} the whole footprint moves with it</span></form></div>"#,
+        r#"<div class="jn2__noterow"><form class="tgt__base" method="post" action="{prefix_esc}/target/base"><input type="hidden" name="token" value="{tok_esc}"><span class="jn__hint">Base parcel</span><input name="base" value="{base_esc}" aria-label="base parcel x,y" spellcheck="false" autocomplete="off"><button class="deep__copy" type="submit">Set base parcel</button><span class="jn__hint">Shifts this project's entire footprint. Publish to apply the new location.</span></form></div>"#,
         prefix_esc = esc(prefix),
         tok_esc = esc(tok),
         base_esc = esc(&dest.base_pointer),
-        mdash = '\u{2014}',
     )
 }
 
@@ -1971,7 +2008,7 @@ fn your_worlds(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>) ->
     let Some(r) = rights else {
         return empty_col(
             "Your worlds",
-            "Connect an account above to list the worlds it owns or holds a deploy grant on.",
+            "Connect an account above to list its Decentraland NAMEs, ENS domains, and Worlds where it has deployment permission.",
         );
     };
     if let Verdict::Unchecked(why) = &r.verdict {
@@ -1986,66 +2023,77 @@ fn your_worlds(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>) ->
             empty_col(
                 "Your worlds",
                 &format!(
-                    "{} owns no name and holds no deploy grant \u{2014} claim a NAME to get a world.",
+                    "No Worlds found for {}. Use an account that owns a Decentraland NAME or ENS domain, or has been granted deployment permission.",
                     esc(&short_addr(&r.address))
                 ),
             )
         );
     }
-    const WORLDS_LISTED: usize = 10;
     let mut listed: Vec<_> = r.worlds.iter().collect();
     listed.sort_by_key(|w| dest.world.as_deref() != Some(w.name.as_str()));
-    let rows: String = listed
-        .iter()
-        .take(WORLDS_LISTED)
-        .map(|w| {
-            let target = dest.world.as_deref() == Some(w.name.as_str());
-            let mut bits: Vec<String> = Vec::new();
-            if let Some(t) = &w.title {
-                bits.push(esc(t));
+    let render_row = |w: &&deploy_rights::WorldRow| {
+        let target = dest.world.as_deref() == Some(w.name.as_str());
+        let mut bits = Vec::new();
+        if let Some(t) = &w.title {
+            bits.push(esc(t));
+        }
+        match w.scenes {
+            Some(n) if n > 1 => bits.push(format!("{n} scenes")),
+            Some(1) => bits.push("1 scene".into()),
+            Some(0) => bits.push("no scenes yet".into()),
+            _ => bits.push("scene count unavailable".into()),
+        }
+        if w.scenes.unwrap_or(0) > 0 {
+            if let Some(ts) = w.last_deployed {
+                bits.push(format!("updated {}", ago(ts, deploy::now_ms())));
             }
-            match w.scenes {
-                Some(n) if n > 1 => {
-                    bits.push("multiscene".to_string());
-                    bits.push(format!("{n} scenes"));
-                }
-                Some(1) => bits.push("1 scene".to_string()),
-                _ => bits.push("no scenes yet".to_string()),
-            }
-            if w.scenes.unwrap_or(0) > 0 {
-                if let Some(ts) = w.last_deployed {
-                    bits.push(format!("updated {}", ago(ts, deploy::now_ms())));
-                }
-            }
-            if !w.owned {
-                bits.push("granted".to_string());
-            }
-            let action = match target {
-                true => r#"<span class="note">current target</span>"#.to_string(),
-                false => point_form(prefix, tok, &w.name, "Point scene here"),
-            };
-            format!(
-                r#"<div class="wl__r"><span class="wl__n">{dot}{name}</span><span class="wl__d">{data}</span>{action}</div>"#,
-                dot = match target {
-                    true => r#"<i class="lay__swatch lay__swatch--base"></i>"#,
-                    false => "",
-                },
-                name = esc(&w.name),
-                data = bits.join(" \u{b7} "),
-            )
-        })
-        .collect();
-    let tail = match r.worlds.len() > WORLDS_LISTED {
-        true => format!(
-            r#"<span class="note">and {} more</span>"#,
-            r.worlds.len() - WORLDS_LISTED
-        ),
-        false => String::new(),
+        }
+        if !w.owned {
+            bits.push("Collaborator · deployment permission".into());
+        }
+        let action = if target {
+            r#"<span class="tgt__badge">Current target</span>"#.to_string()
+        } else {
+            point_form(prefix, tok, &w.name, "Select World")
+        };
+        format!(
+            r#"<div class="wl__r"><span class="wl__n">{}</span><span class="wl__d">{}</span>{action}</div>"#,
+            esc(&w.name),
+            bits.join(" · ")
+        )
     };
-    col(
-        "Your worlds",
-        &format!(r#"<div class="wl">{rows}</div>{tail}{note}"#),
-    )
+    let group = |owned: bool| {
+        let (empty, populated): (Vec<_>, Vec<_>) = listed
+            .iter()
+            .copied()
+            .filter(|w| w.owned == owned)
+            .partition(|w| w.scenes == Some(0) && dest.world.as_deref() != Some(w.name.as_str()));
+        let rows: String = populated.iter().map(&render_row).collect();
+        let folded = if empty.is_empty() {
+            String::new()
+        } else {
+            let rows: String = empty.iter().map(&render_row).collect();
+            format!(
+                r#"<details class="tgt__empty"><summary>Show {} world{} with no scenes yet</summary><div class="wl">{rows}</div></details>"#,
+                empty.len(),
+                plural(empty.len())
+            )
+        };
+        let nothing = if populated.is_empty() && empty.is_empty() {
+            r#"<span class="note">No worlds to show.</span>"#
+        } else {
+            ""
+        };
+        col(
+            if owned {
+                "Your worlds"
+            } else {
+                "Worlds you collaborate on"
+            },
+            &format!(r#"<div class="wl">{rows}</div>{folded}{nothing}"#),
+        )
+    };
+    format!("{}{}{}{note}", group(true), group(false), note_span("A collaborator may publish to all parcels or only assigned coordinates. Permission to visit a World does not grant permission to publish."))
 }
 
 fn span(vs: impl Iterator<Item = i64>) -> (i64, i64) {
@@ -2086,14 +2134,24 @@ fn parcel_grid(
 /// The declared footprint in the accent, every parcel the wallet owns or
 /// operates lit up around it. The window centres on the footprint; holdings
 /// beyond it are a count, never silently gone.
-fn land_map(declared: &[(i64, i64)], base: (i64, i64), owned: &[(i64, i64)]) -> String {
+fn land_map(
+    declared: &[(i64, i64)],
+    base: (i64, i64),
+    owned: &[(i64, i64)],
+    missing: &HashSet<(i64, i64)>,
+) -> String {
     if declared.is_empty() {
         return String::new();
     }
     let (dx0, dx1) = span(declared.iter().map(|p| p.0));
     let (dy0, dy1) = span(declared.iter().map(|p| p.1));
-    let pad_x = (AFTER_MAP_SPAN - (dx1 - dx0 + 1)).max(0) / 2;
-    let pad_y = (AFTER_MAP_SPAN - (dy1 - dy0 + 1)).max(0) / 2;
+    if dx1 - dx0 > 63 || dy1 - dy0 > 63 {
+        return note_span(
+            "This footprint is too spread out for the map. Review the parcel list below.",
+        );
+    }
+    let pad_x = (10 - (dx1 - dx0 + 1)).max(2) / 2;
+    let pad_y = (8 - (dy1 - dy0 + 1)).max(2) / 2;
     let (x0, x1) = (dx0 - pad_x, dx1 + pad_x);
     let (y0, y1) = (dy0 - pad_y, dy1 + pad_y);
     let mine: HashSet<(i64, i64)> = declared.iter().copied().collect();
@@ -2102,18 +2160,26 @@ fn land_map(declared: &[(i64, i64)], base: (i64, i64), owned: &[(i64, i64)]) -> 
         .iter()
         .filter(|(x, y)| *x < x0 || *x > x1 || *y < y0 || *y > y1)
         .count();
+    let mut keys = vec![
+        ("lay__swatch--base", "Base"),
+        ("lay__swatch--in", "This scene"),
+    ];
+    if !owned.is_empty() {
+        keys.push(("dep__cell--own", "Yours"));
+    }
+    if !missing.is_empty() {
+        keys.push(("tgt__cell--missing", "No rights"));
+    }
     let grid = parcel_grid(
-        &[
-            ("lay__swatch--base", "Base"),
-            ("lay__swatch--in", "This scene"),
-            ("dep__cell--own", "Yours"),
-        ],
+        &keys,
         "your land around this scene",
         (x0, x1),
         (y0, y1),
         |p| {
             let (x, y) = p;
-            if p == base {
+            if missing.contains(&p) {
+                (" tgt__cell--missing", format!("{x},{y} — no update rights"))
+            } else if p == base {
                 (" lay__cell--base", format!("Base parcel {x},{y}"))
             } else if mine.contains(&p) {
                 (" lay__cell--in", format!("This scene {x},{y}"))
@@ -2144,9 +2210,8 @@ fn footprint(dest: &Dest) -> (Vec<(i64, i64)>, (i64, i64)) {
 }
 
 /// One row per declared parcel with the strongest right the wallet holds on
-/// it, the map of the wallet's land around the footprint, and the holdings
-/// line under them.
-fn land_rights_col(dest: &Dest, rights: Option<&Rights>) -> String {
+/// it, and the holdings line under them.
+fn land_rights_col(rights: Option<&Rights>) -> String {
     let Some(r) = rights else {
         return empty_col(
             "Your rights here",
@@ -2176,26 +2241,20 @@ fn land_rights_col(dest: &Dest, rights: Option<&Rights>) -> String {
             format!(r#"<div class="kvs">{rows}</div>{unchecked}{note}"#)
         }
     };
-    let (map, holdings) = match r.holdings.as_ref() {
-        Some(h) => {
-            let (declared, base) = footprint(dest);
-            (
-                land_map(&declared, base, &h.coords),
-                format!(
-                    r#"<span class="note">{} holds {} parcel{}, {} estate{} and operates {} more.</span>{}"#,
-                    esc(&short_addr(&r.address)),
-                    h.parcels,
-                    plural(h.parcels as usize),
-                    h.estates,
-                    plural(h.estates as usize),
-                    h.operated,
-                    permitted_parcels(h),
-                ),
-            )
-        }
-        None => (String::new(), String::new()),
+    let holdings = match r.holdings.as_ref() {
+        Some(h) => format!(
+            r#"<span class="note">{} holds {} parcel{}, {} estate{} and operates {} more.</span>{}"#,
+            esc(&short_addr(&r.address)),
+            h.parcels,
+            plural(h.parcels as usize),
+            h.estates,
+            plural(h.estates as usize),
+            h.operated,
+            permitted_parcels(h)
+        ),
+        None => String::new(),
     };
-    col("Your rights here", &format!("{body}{map}{holdings}"))
+    col("Your rights here", &format!("{body}{holdings}"))
 }
 
 const PARCELS_LISTED: usize = 24;
@@ -2235,10 +2294,11 @@ fn permitted_parcels(h: &Holdings) -> String {
     )
 }
 
-/// The target card: one CSS-only radio sub-tab per shape the destination
-/// can take, so the page needs no script for them.
+/// Two destination views, matching the publishing docs. Multi-scene details
+/// belong to the selected World; history is independent of selection.
 #[allow(clippy::too_many_arguments)]
 fn target_card(
+    title: &str,
     prefix: &str,
     tok: &str,
     dest: &Dest,
@@ -2252,88 +2312,169 @@ fn target_card(
     let tab = |value: &str, label: &str, checked: bool| {
         super::chrome::radio_tab("tgt", value, label, checked)
     };
-    let verdict_row = match rights.map(|r| (&r.verdict, r.address.as_str())) {
-        Some((Verdict::May(reason), a)) => hint_row(&format!(
-            "Publishing as {} \u{2014} {}",
-            esc(&short_addr(a)),
-            esc(reason)
-        )),
-        Some((Verdict::MayNot { why, remedy }, a)) => hint_row(&format!(
-            "\u{2717} {}: {} \u{2014} {}",
-            esc(&short_addr(a)),
+    let blocked = matches!(rights.map(|r| &r.verdict), Some(Verdict::MayNot { .. }));
+    // Continue through the existing review/signing page; it owns the payload
+    // fingerprint, local-peer gate, and final publish approval.
+    let deploy_action = if blocked {
+        r#"<span class="tgt__blocked">Deploy blocked — resolve rights below</span>"#.to_string()
+    } else {
+        format!(
+            r#"<a class="jn__cta" href="{}/deploy">{} <span aria-hidden="true">→</span></a>"#,
+            esc(prefix),
+            "Review deployment"
+        )
+    };
+    let current = match world {
+        Some(w) => format!(
+            "Selected destination: World {w} · Base {}",
+            dest.base_pointer
+        ),
+        None => format!("Selected destination: LAND · Base {}", dest.base_pointer),
+    };
+    // The service is independent of the scene kind: a configured test or
+    // custom server must remain visible when switching between World and LAND.
+    let server = dest
+        .server_line
+        .split(" — ")
+        .next()
+        .unwrap_or(&dest.server_line);
+    let header = |overline: &str, action: &str| {
+        format!(
+            r#"<div class="tgt__head"><div class="tgt__title"><span class="knob__k">{}</span><h1>{}</h1><span class="tgt__current"><i></i>{}</span><span class="note">Publishing {}</span></div>{action}</div>"#,
+            esc(overline),
+            esc(title),
+            esc(&current),
+            esc(server)
+        )
+    };
+    let mut verdict = match rights.map(|r| &r.verdict) {
+        Some(Verdict::MayNot { why, remedy }) => format!(
+            r#"<div class="panel tgt__rights-failure"><h2>You can't publish here</h2><p>{}</p><p class="note">{}</p></div>"#,
             esc(why),
             esc(remedy)
-        )),
-        Some((Verdict::Unchecked(why), _)) => hint_row(&esc(why)),
-        None => String::new(),
+        ),
+        Some(Verdict::Unchecked(why)) => note_span(why),
+        _ => String::new(),
     };
-    let detail = format!(
-        "{line}{verdict_row}<div class=\"jn2__body\">\n      {server}\n      {upload}\n    </div>",
-        line = hint_row(&esc(&format!("{} {}", dest.headline, dest.server_line))),
-        server = col("On the server now", &server_panel(dest, status)),
-        upload = col("This upload", &upload_panel(p, status)),
+    if blocked && world.is_none() {
+        if let Some(r) = rights {
+            let missing: String = r.parcel_rights.iter().filter(|pr| pr.leg.is_none())
+                .map(|pr| format!(r#"<div class="tgt__missing-row"><span class="tgt__coord">{}</span><span>No update rights on this parcel</span></div>"#, esc(&pr.pointer))).collect();
+            if !missing.is_empty() {
+                verdict = verdict.replace("</div>", &format!("{missing}</div>"));
+            }
+        }
+    }
+    let summary = format!(
+        r#"<div class="tgt__summary">{}{}</div>"#,
+        col("Upload", &upload_panel(p, status)),
+        col("On the server now", &server_panel(dest, status))
     );
+    let land_action = if world.is_some() || p.nameless_world {
+        point_form(prefix, tok, "", "Select LAND")
+    } else {
+        deploy_action.clone()
+    };
+    let land_pane = if let Some(world) = world {
+        format!(
+            "{}{}",
+            header("Publish to LAND", &land_action),
+            note_span(&format!(
+                "This project currently targets World {}. Select LAND to use its Genesis City parcel coordinates instead. You need deployment permission on every parcel.",
+                world
+            ))
+        )
+    } else {
+        format!(
+            r#"{}{}<div class="tgt__land">{summary}<div class="tgt__map-panel">{}{}</div></div>"#,
+            header("Publish to LAND", &land_action),
+            verdict,
+            target_land_map(prefix, tok, dest, rights),
+            format_args!(
+                r#"<details class="tgt__rights-detail"><summary>Parcel rights and holdings</summary>{}</details>"#,
+                land_rights_col(rights)
+            )
+        )
+    };
+    let world_action = if world.is_some() {
+        deploy_action.clone()
+    } else {
+        note_span("Select a World below")
+    };
+    let world_details = if world.is_some() {
+        format!(
+            r#"<details class="tgt__advanced"><summary>Multi-Scene World (Advanced)</summary><div class="tgt__advanced-body"><p class="note">A World can contain multiple scenes. Publishing from this preview preserves scenes that do not overlap this project's parcels. World settings and collaborator permissions are managed by the World owner.</p><p class="note">These coordinates are inside the selected World; they are not Genesis City LAND. <a href="{}/scene">Edit this scene's parcel layout</a>.</p>{}<a href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#multi-scene-worlds">About Multi-Scene Worlds</a></div></details>"#,
+            esc(prefix),
+            multiscene_pane(dest, status)
+        )
+    } else {
+        String::new()
+    };
     let world_pane = format!(
-        "{}{}",
-        match world {
-            Some(_) => detail.clone(),
-            None => empty_col(
-                "No world target",
-                "This scene deploys to Genesis City LAND \u{2014} point it at one of your worlds below to publish there instead.",
-            ),
+        r#"{}{}{}<div id="target-worlds" class="tgt__worlds">{}</div>{world_details}"#,
+        header("Publish to a World", &world_action),
+        if world.is_some() {
+            verdict.as_str()
+        } else {
+            ""
+        },
+        if world.is_some() {
+            format!(r#"<div class="tgt__world-summary">{summary}</div>"#)
+        } else {
+            String::new()
         },
         your_worlds(prefix, tok, dest, rights)
     );
-    let land_pane = match world {
-        None => format!(
-            "{detail}{}{}{}",
-            base_form(prefix, tok, dest),
-            land_rights_col(dest, rights),
-            match p.nameless_world {
-                true => point_form(prefix, tok, "", "Point at Genesis City LAND"),
-                false => String::new(),
-            }
-        ),
-        Some(w) => col(
-            "No LAND target",
-            &format!(
-                r#"<span class="note">This scene targets the world <code>{}</code>; pointed back at its parcels, it deploys to Genesis City instead.</span>{}"#,
-                esc(w),
-                point_form(prefix, tok, "", "Point at Genesis City LAND"),
-            ),
-        ),
-    };
-    let in_world = match &status.remote {
-        Remote::Known(state) => state.others.len() + usize::from(state.current.is_some()),
-        _ => 0,
-    };
-    let multi_label = match in_world {
-        0 => "Multiscene world".to_string(),
-        n => format!(r#"Multiscene world <span class="jn2__tab-n">{n}</span>"#),
-    };
     let tabs = format!(
-        "{}{}{}{}",
+        "{}{}",
         tab("world", "World", world.is_some()),
-        tab("land", "Land", world.is_none()),
-        tab("multi", &multi_label, false),
-        tab("history", "History", false),
+        tab("land", "LAND (Genesis City)", world.is_none())
     );
     format!(
-        r#"<div class="jn tgt">
+        r#"<div class="jn tgt" data-target-kind="{target_kind}">
       {addr}
-      <fieldset class="knob knob--tabs"><legend class="knob__k u-sr-only">target type</legend><div class="jn2__tabs">{tabs}</div></fieldset>
+      <p class="note tgt__selection-note">Choose where to publish. Use Select World or Select LAND to update this project, then Review deployment to continue. <a href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene">Publishing guide</a></p>
+      <fieldset class="knob knob--tabs"><legend class="knob__k u-sr-only">Browse publishing destinations</legend><div class="jn2__tabs">{tabs}</div></fieldset>
       <div class="tgt__pane tgt__pane--world">{world_pane}</div>
       <div class="tgt__pane tgt__pane--land">{land_pane}</div>
-      <div class="tgt__pane tgt__pane--multi">{multi_pane}</div>
-      <div class="tgt__pane tgt__pane--history">{history_pane}</div>
+      <details class="tgt__history"><summary>Deployment history</summary>{history_pane}</details>
     </div>"#,
-        addr = account_row(rights, connect),
-        multi_pane = multiscene_pane(dest, status),
         history_pane = history_rows_pane(history),
+        addr = account_row(rights, connect),
+        target_kind = if world.is_some() { "world" } else { "land" },
     )
 }
 
-/// The History tab: what this preview (and, through the on-disk record,
+/// The map and move actions use real coordinates; mock estate titles and
+/// owner identities from the design must never stand in for chain data.
+fn target_land_map(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>) -> String {
+    let (declared, base) = footprint(dest);
+    let owned = rights
+        .and_then(|r| r.holdings.as_ref())
+        .map(|h| h.coords.as_slice())
+        .unwrap_or_default();
+    let missing: HashSet<_> = rights
+        .into_iter()
+        .flat_map(|r| &r.parcel_rights)
+        .filter(|pr| pr.leg.is_none())
+        .filter_map(|pr| catalyrst_auth_chain::pointer::parse_pointer(&pr.pointer))
+        .collect();
+    let map = land_map(&declared, base, owned, &missing);
+    let rows: String = owned.iter().take(PARCELS_LISTED).map(|&(x,y)| {
+        let current = (x,y) == base;
+        let action = if current { r#"<span class="tgt__badge">Current base</span>"#.to_string() } else {
+            format!(r#"<form method="post" action="{}/target/base"><input type="hidden" name="token" value="{}"><input type="hidden" name="base" value="{x},{y}"><button class="deep__copy" type="submit">Set base here</button></form>"#, esc(prefix), esc(tok))
+        };
+        let leg = if rights.and_then(|r| r.holdings.as_ref()).is_some_and(|h| h.owned.contains(&(x,y))) { "Owned parcel" } else { "Operated parcel" };
+        format!(r#"<div class="wl__r"><span class="tgt__coord">{x},{y}</span><span class="wl__d">{leg}</span>{action}</div>"#)
+    }).collect();
+    format!(
+        r#"<span class="knob__k">Map</span>{map}{}<div class="wl">{rows}</div>"#,
+        base_form(prefix, tok, dest)
+    )
+}
+
+/// Deployment history: what this preview (and, through the on-disk record,
 /// earlier previews of this scene) actually published.
 fn history_rows_pane(history: &[PastRun]) -> String {
     if history.is_empty() {
@@ -2357,15 +2498,14 @@ fn history_rows_pane(history: &[PastRun]) -> String {
                 Some(d) => note_span(d),
                 None => String::new(),
             };
-            kv(
-                &ago(h.at_ms, deploy::now_ms()),
-                format!(
-                    "<span>{} \u{2014} {}{}</span>{detail}",
-                    esc(&h.target),
-                    esc(&h.outcome),
-                    esc(&by)
-                ),
-            )
+            let tone = match h.outcome.as_str() {
+                "published" => "ok",
+                "failed" => "failed",
+                _ => "neutral",
+            };
+            format!(r#"<div class="tgt__history-row"><div class="tgt__history-head"><span class="tgt__history-age">{}</span><span class="tgt__history-target">{}{}</span><span class="tgt__history-status tgt__history-status--{tone}">{}</span></div>{detail}</div>"#,
+                esc(&ago(h.at_ms, deploy::now_ms())), esc(&h.target), esc(&by), esc(&h.outcome))
+
         })
         .collect();
     col(
@@ -2378,6 +2518,11 @@ fn history_rows_pane(history: &[PastRun]) -> String {
 /// tell the story and the grid would be a wall of unreadable pixels.
 const AFTER_MAP_SPAN: i64 = 24;
 
+/// A scene is indivisible: touching one parcel replaces the whole entity.
+fn scene_overlaps(scene: &[(i64, i64)], footprint: &[(i64, i64)]) -> bool {
+    scene.iter().any(|p| footprint.contains(p))
+}
+
 /// The world as this publish leaves it: the scenes that stay in the neutral
 /// swatch, the replaced scene's old footprint dashed, this scene's parcels
 /// in the accent.
@@ -2385,13 +2530,21 @@ fn after_map(remote: &RemoteState, ours: &[(i64, i64)], base: (i64, i64)) -> Str
     let kept: HashSet<(i64, i64)> = remote
         .others
         .iter()
+        .filter(|s| !scene_overlaps(&s.coords, ours))
         .flat_map(|s| s.coords.iter().copied())
         .collect();
     let was: HashSet<(i64, i64)> = remote
         .current
-        .as_ref()
-        .map(|c| c.coords.iter().copied().collect())
-        .unwrap_or_default();
+        .iter()
+        .flat_map(|c| c.coords.iter().copied())
+        .chain(
+            remote
+                .others
+                .iter()
+                .filter(|s| scene_overlaps(&s.coords, ours))
+                .flat_map(|s| s.coords.iter().copied()),
+        )
+        .collect();
     let mine: HashSet<(i64, i64)> = ours.iter().copied().collect();
     let all: Vec<(i64, i64)> = kept
         .iter()
@@ -2456,21 +2609,28 @@ fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
         );
     };
     let state = match &status.remote {
-        Remote::Known(state) if !state.others.is_empty() => state,
-        _ => {
-            return empty_col(
-                "Nothing else here",
-                &format!(
-                    "No other scenes are live in <code>{}</code> — a multi-scene publish would add this one beside them when there are.",
-                    esc(w)
-                ),
-            )
-        }
+        Remote::Known(state) => state,
+        Remote::Empty => return empty_col("No scenes published", "The selected World has no published scenes yet."),
+        Remote::Unknown(why) | Remote::Unreachable(why) => return empty_col(
+            "World layout unavailable", &format!("Could not check this World's published scenes: {}. Review the layout before publishing.", esc(why))),
     };
+    let (ours, base) = footprint(dest);
     let rows: String = state
         .others
         .iter()
-        .map(|s| scene_row("dep__cell--kept", &s.title, s.parcels, s.size, "kept"))
+        .map(|s| {
+            if scene_overlaps(&s.coords, &ours) {
+                scene_row(
+                    "dep__cell--was",
+                    &s.title,
+                    s.parcels,
+                    s.size,
+                    "replaced by this publish",
+                )
+            } else {
+                scene_row("dep__cell--kept", &s.title, s.parcels, s.size, "kept")
+            }
+        })
         .collect();
     let replaced_row = state
         .current
@@ -2510,11 +2670,10 @@ fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
             )
         }
     };
-    let (ours, base) = footprint(dest);
     format!(
         "{}\n        <div class=\"jn2__body\">{}\n        {}</div>",
         hint_row(&format!(
-            "A multi-scene publish adds this scene to {} — only overlapping parcels change hands, everything else stays live",
+            "Publishing to {} replaces every scene that overlaps this footprint, including its parcels outside the footprint. Non-overlapping scenes stay published.",
             esc(w)
         )),
         col("After this publish", &after_map(state, &ours, base)),
@@ -2553,6 +2712,7 @@ async fn target_page(st: &Arc<AppState>, headers: &HeaderMap) -> Response {
                 r#"<main class="dash"><section id="target" class="sec">{card}{warm}</section></main><script>{script}</script>"#,
                 warm = warming_marker(warming),
                 card = target_card(
+                    &scene_title,
                     &prefix,
                     token(st),
                     &dest,

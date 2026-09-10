@@ -17,8 +17,8 @@ at all; the pruning it does removes files and never edits one):
 | `patch_ecs_network_delete_length()` | the one overlay on upstream `@dcl/*` JS: `@dcl/ecs`'s `DeleteEntityNetwork.write` length fix, upstream #1595, unreleased - in the shipped `dist-cjs/serialization/crdt/network/deleteEntityNetwork.js` and, through the patched install tree, inside `prebuilt/core.js`; `check_chunk_netdelete()` fails the build unless the chunk carries it. Named under **7.27.0** below. |
 | `patch_ecs7_tsconfig()` | `@dcl/sdk/types/tsconfig.ecs7.json`: `downlevelIteration` and `suppressExcessPropertyErrors` removed, `moduleResolution` `node` -> `bundler`; every scene extends this file (`docs/ts7-migration.md`). Each edit must match exactly once: the build fails naming an edit upstream has already shipped (drop it from `ECS7_EDITS`), and with the instruction to delete the function once all three have. |
 | `add_pbmin()` | `node_modules/protobufjs` is not upstream's: 4 files from `experiments/protobufjs-minimal-replacement` (`package.json` at version `7.2.4-dcl-one-sdk-pbmin.1`, `LICENSE`, `index.js`, `minimal.js`); `swap_pbmin_into_tree()` points the install tree at the same code before the chunks are bundled, and `check_chunk_pbmin()` fails the build if `prebuilt/core.js` stops carrying it. |
-| `add_shim()` | `node_modules/@dcl/inspector` is hand-authored, not a registry package: 7 files copied verbatim from `src/vendor/inspector-shim` (`index.js`, `engine.js`, `engine-to-composite.js`, `host.js`, `component-schemas.json`, `minimal-composite.json`, `package.json`). |
-| `build_service_descriptor()` | the eighth file of that package, `data-layer.gen.js`, transpiled at build time from the checked-in `data-layer.gen.ts` with the vendored `typescript`. |
+| `add_shim()` | `node_modules/@dcl/inspector` is hand-authored, not a registry package: 8 files copied verbatim from `src/vendor/inspector-shim` (`index.js`, `engine.js`, `engine-to-composite.js`, `host.js`, `component-schemas.json`, `minimal-composite.json`, `root-components.json`, `package.json`). |
+| `build_service_descriptor()` | the ninth file of that package, `data-layer.gen.js`, transpiled at build time from the checked-in `data-layer.gen.ts` with the vendored `typescript`. |
 
 Two build steps in `build-base-blob.py` itself also leave the tree different
 from an install, without editing an upstream file: `build_chunks()` adds
@@ -233,8 +233,9 @@ class of phantom dependency cannot come back.
 | `engine.js` | upstream `host/utils/engine.ts` — an `@dcl/ecs` engine with the editor's whole component set defined on it |
 | `host.js` | the data-layer host: 4 of 22 rpc methods live, 18 inert stubs |
 | `data-layer.gen.js` | the service descriptor, transpiled from upstream's protoc output at blob-build time |
-| `component-schemas.json` | 57 component schemas, a pinned snapshot of a real `@dcl/inspector` |
+| `component-schemas.json` | 59 component schemas, a pinned snapshot of a real `@dcl/inspector` |
 | `minimal-composite.json` | the `assets/scene/main.composite` written at boot when a scene has none |
+| `root-components.json` | what `@dcl/asset-packs`' `initComponents` puts on entity 0 — 63 `asset-packs::ActionTypes` entries and an `asset-packs::Counter` — applied after every composite load, as upstream does |
 
 **The four live methods** are `crdtStream` (the engine ⟷ editor wire, both
 directions), `save`, `getInspectorPreferences` and `setInspectorPreferences`.
@@ -251,11 +252,19 @@ editor the stubs mean an empty asset panel, inert drag-and-drop import and dead
 undo/redo — reachable and empty, never throwing, and truthful about failing
 (`removeFiles` reports every path in `failed` rather than claiming success).
 Deliberately not ported: undo/redo (a 978-line state machine with 100 ms
-transaction batching), the 8 load-time migrations in `composite-provider.ts`
+transaction batching), the load-time migrations in `composite-provider.ts`
 (we pass composites through verbatim — a `SceneMetadata-v4` stays v4 and
 Creator Hub migrates it when it next opens the scene, which is the safe
 direction), and `SceneProvider`, so **scene-metadata edits made against this
-host do not reach `scene.json`**.
+host do not reach `scene.json`**. One piece of upstream's load path IS ported,
+as data: `composite-provider.ts` runs `@dcl/asset-packs`' `initComponents`
+after every load, and the 7.43 editor reads what it seeds on entity 0
+unconditionally — without it, adding the first entity throws `[getFrom]
+Component asset-packs::ActionTypes for entity #0 not found` and React unmounts
+the page. `seedRootComponents` in `host.js` applies `root-components.json`
+with `addActionType`'s merge rule (replace same `type`, append the rest), so a
+composite saved by another editor keeps the action types it has and gains the
+ones it lacks.
 
 **What does not ship: the editor UI.** `inspector.zip` (7.36 MB zipped /
 10.4 MB unpacked), `init --inspector`, `install_vendored_inspector()` and
@@ -272,14 +281,20 @@ A real `@dcl/inspector` in the scene is still preferred for everything:
 `req()` in the template resolves against the scene first. This is a fallback,
 not a takeover.
 
-### The two pinned snapshots, and how they go stale
+### The three pinned snapshots, and how they go stale
 
-`component-schemas.json` and `minimal-composite.json` are generated by
-`scripts/dump-inspector-tables.cjs` from an installed `@dcl/inspector`
-(currently **7.36.3**) — they cannot be derived from the blob, because the
-`inspector::*` schemas live in creator-hub's own source and the
-`asset-packs::*` ones come from `@dcl/asset-packs`, which the blob installs and
-then drops. **Re-run that script on every inspector bump.**
+`component-schemas.json`, `minimal-composite.json` and `root-components.json`
+are generated by `scripts/dump-inspector-tables.cjs` from an installed
+`@dcl/inspector` (currently **7.43.2**, with `@dcl/asset-packs` 2.20.0) — they
+cannot be derived from the blob, because the `inspector::*` schemas live in
+creator-hub's own source and the `asset-packs::*` ones, and the root-entity
+values `initComponents` seeds, come from `@dcl/asset-packs`, which the blob
+installs and then drops. **Re-run that script on every inspector bump.** The
+install it reads comes from `scripts/install-inspector-host.sh`: since 7.37.0 a
+bare `npm install @dcl/inspector` does not `require()` (undeclared
+dependencies whose dist is extensionless ESM — `docs/upstream/inspector-packaging.md`),
+so the helper installs those and esbuild-bundles the two entrypoints the script
+loads.
 
 Why a table at all: `@dcl/ecs`'s CRDT receive loop
 (`dist-cjs/systems/crdt/index.js`) looks up `getComponentOrNull(componentId)`
@@ -291,7 +306,7 @@ gap.
 
 Two details in the table are load-bearing:
 
-* **`defineFrom`.** 26 components come from `@dcl/ecs`'s own factories and 31
+* **`defineFrom`.** 28 components come from `@dcl/ecs`'s own factories and 31
   from `Schemas.fromJson(jsonSchema)`. It is not a name-prefix rule: the
   generator probes each factory and compares `jsonSchema`. `core::Material`'s
   schema is `{serializationType: 'protocol-buffer'}` — not rebuildable from

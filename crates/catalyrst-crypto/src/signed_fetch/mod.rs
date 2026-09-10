@@ -240,20 +240,130 @@ pub fn build_payload(method: &str, path: &str, timestamp: &str, metadata: &str) 
     build_legacy_payload(method, path, timestamp, metadata)
 }
 
-pub fn signed_fetch_path<'a>(headers: &HeaderMap, fallback: &'a str) -> std::borrow::Cow<'a, str> {
-    match headers.get("x-original-path").and_then(|v| v.to_str().ok()) {
-        Some(raw) => {
-            let stripped = raw.split('?').next().unwrap_or(raw);
-            // x-original-path is only trustworthy as the route path behind a
-            // proxy prefix; a value that is not a suffix of the actual route is
-            // a forged client header and must not rebind the signature.
-            if stripped.ends_with(fallback) {
-                std::borrow::Cow::Owned(stripped.to_string())
-            } else {
-                std::borrow::Cow::Borrowed(fallback)
-            }
+/// The paths a request's signature may be over. A proxy that strips a route
+/// prefix forwards the public path it matched as `x-original-path`; a client
+/// that signs the URL it requests signed that public path, while one that
+/// signs the service-relative URL (unity-explorer behind its gateway origin)
+/// signed the route path. Both name the same resource behind the same proxy,
+/// so a verifier accepts a signature over either - public path first, which
+/// settles the common case on one attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedFetchPath<'a> {
+    route: &'a str,
+    original: Option<String>,
+}
+
+impl<'a> SignedFetchPath<'a> {
+    /// A request no proxy forwarded a public path for: the route path alone.
+    pub fn route_only(route: &'a str) -> Self {
+        Self {
+            route,
+            original: None,
         }
-        None => std::borrow::Cow::Borrowed(fallback),
+    }
+
+    /// The route path the service matched.
+    pub fn route(&self) -> &str {
+        self.route
+    }
+
+    /// The public path when the proxy forwarded one, else the route path: what
+    /// a verifier that builds a single payload uses.
+    pub fn primary(&self) -> &str {
+        self.original.as_deref().unwrap_or(self.route)
+    }
+
+    /// The route path when it differs from the public one - the second payload
+    /// to try after the public path's signature comparison fails.
+    pub fn fallback(&self) -> Option<&str> {
+        self.original
+            .as_deref()
+            .filter(|original| *original != self.route)
+            .map(|_| self.route)
+    }
+}
+
+impl<'a> From<&'a str> for SignedFetchPath<'a> {
+    fn from(route: &'a str) -> Self {
+        Self::route_only(route)
+    }
+}
+
+impl<'a> From<&SignedFetchPath<'a>> for SignedFetchPath<'a> {
+    fn from(path: &SignedFetchPath<'a>) -> Self {
+        path.clone()
+    }
+}
+
+impl std::fmt::Display for SignedFetchPath<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.primary())
+    }
+}
+
+pub fn signed_fetch_path<'a>(headers: &HeaderMap, fallback: &'a str) -> SignedFetchPath<'a> {
+    let original = headers
+        .get("x-original-path")
+        .and_then(|v| v.to_str().ok())
+        .map(|raw| raw.split('?').next().unwrap_or(raw))
+        // x-original-path is only trustworthy as the route path behind a
+        // proxy prefix; a value that is not a suffix of the actual route is
+        // a forged client header and must not rebind the signature.
+        .filter(|stripped| stripped.ends_with(fallback))
+        .map(str::to_string);
+    SignedFetchPath {
+        route: fallback,
+        original,
+    }
+}
+
+/// The one verdict a path attempt may move past: a signature comparison
+/// failure. Every other failure is deterministic in the path, so retrying it
+/// over another path would change nothing.
+pub trait SignatureComparison {
+    fn invalid_signature(&self) -> bool;
+}
+
+impl SignatureComparison for AuthChainError {
+    fn invalid_signature(&self) -> bool {
+        matches!(self, Self::InvalidSignature(_))
+    }
+}
+
+/// One payload shape built over each path of a [`SignedFetchPath`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadOverPaths {
+    primary: String,
+    fallback: Option<String>,
+}
+
+impl PayloadOverPaths {
+    pub fn new(path: &SignedFetchPath<'_>, build: impl Fn(&str) -> String) -> Self {
+        Self {
+            primary: build(path.primary()),
+            fallback: path.fallback().map(build),
+        }
+    }
+
+    /// `validate` over the public path's payload and, only when that signature
+    /// comparison fails, over the route path's. A request that fails both
+    /// answers with the public path's verdict - the path it carried.
+    pub async fn validate<'p, T, E, F, Fut>(&'p self, mut validate: F) -> Result<T, E>
+    where
+        E: SignatureComparison,
+        F: FnMut(&'p str) -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        match validate(self.primary.as_str()).await {
+            Err(verdict) if verdict.invalid_signature() => match &self.fallback {
+                Some(fallback) => match validate(fallback.as_str()).await {
+                    Err(again) if again.invalid_signature() => Err(verdict),
+                    settled => settled,
+                },
+                None => Err(verdict),
+            },
+            settled => settled,
+        }
     }
 }
 
@@ -438,7 +548,6 @@ pub async fn try_extract_signer(
     tolerance_secs: i64,
 ) -> Option<Signer> {
     let path = signed_fetch_path(headers, path);
-    let path = path.as_ref();
     let chain = try_extract(headers)?;
     let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)?.to_string();
     let metadata = header_str(headers, AUTH_METADATA_HEADER)
@@ -457,7 +566,6 @@ pub async fn verify_signed_fetch(
     tolerance_secs: i64,
 ) -> Result<Signer, AuthChainError> {
     let path = signed_fetch_path(headers, path);
-    let path = path.as_ref();
     let chain = extract_auth_chain(headers)?;
     let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)
         .ok_or(AuthChainError::MissingTimestamp)?
@@ -477,7 +585,6 @@ pub async fn verify_signed_fetch_meta(
     tolerance_secs: i64,
 ) -> Result<(Signer, serde_json::Value), AuthChainError> {
     let path = signed_fetch_path(headers, path);
-    let path = path.as_ref();
     let chain = extract_auth_chain(headers)?;
     let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)
         .ok_or(AuthChainError::MissingTimestamp)?
@@ -580,8 +687,8 @@ impl<'a> SignedFetchPolicy<'a> {
 
 struct PayloadAttempts<'a> {
     chain: &'a AuthChain,
-    legacy: String,
-    v6: String,
+    legacy: PayloadOverPaths,
+    v6: PayloadOverPaths,
     timestamp: &'a str,
     tolerance_secs: i64,
     now: i64,
@@ -589,16 +696,19 @@ struct PayloadAttempts<'a> {
 }
 
 impl PayloadAttempts<'_> {
-    async fn validate(&self, payload: &str) -> Result<Signer, AuthChainError> {
-        validate_signature_with(
-            self.chain,
-            payload,
-            self.timestamp,
-            self.tolerance_secs,
-            self.now,
-            self.validator,
-        )
-        .await
+    async fn validate(&self, payload: &PayloadOverPaths) -> Result<Signer, AuthChainError> {
+        payload
+            .validate(|payload| {
+                validate_signature_with(
+                    self.chain,
+                    payload,
+                    self.timestamp,
+                    self.tolerance_secs,
+                    self.now,
+                    self.validator,
+                )
+            })
+            .await
     }
 
     /// Only `InvalidSignature` crosses from one attempt to the other: every
@@ -671,20 +781,26 @@ impl PayloadAttempts<'_> {
 /// legacy-only check accepted, plus every 6.x-signed one, and refuses the rest
 /// with the same error class as before. A surface that reads metadata keys to
 /// authorize should move to `verify_signed_fetch_meta_with_policy`, which puts
-/// the key guard in front of the legacy attempt.
-pub async fn validate_signature_either_payload(
+/// the key guard in front of the legacy attempt. Each shape is built over
+/// every path of the [`SignedFetchPath`].
+pub async fn validate_signature_either_payload<'a>(
     chain: &AuthChain,
     method: &str,
-    path: &str,
+    path: impl Into<SignedFetchPath<'a>>,
     timestamp: &str,
     metadata: &str,
     expiration_secs: i64,
     now: i64,
 ) -> Result<Signer, AuthChainError> {
+    let path = path.into();
     let attempts = PayloadAttempts {
         chain,
-        legacy: build_legacy_payload(method, path, timestamp, metadata),
-        v6: build_payload_v6(method, path, timestamp, metadata),
+        legacy: PayloadOverPaths::new(&path, |path| {
+            build_legacy_payload(method, path, timestamp, metadata)
+        }),
+        v6: PayloadOverPaths::new(&path, |path| {
+            build_payload_v6(method, path, timestamp, metadata)
+        }),
         timestamp,
         tolerance_secs: expiration_secs,
         now,
@@ -709,7 +825,6 @@ pub async fn verify_signed_fetch_meta_with_policy(
 ) -> Result<(Signer, serde_json::Value), AuthChainError> {
     assert_canonical_metadata_keys(policy.canonical_metadata_keys)?;
     let path = signed_fetch_path(headers, path);
-    let path = path.as_ref();
     let chain = extract_auth_chain(headers)?;
     let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)
         .ok_or(AuthChainError::MissingTimestamp)?
@@ -735,8 +850,12 @@ pub async fn verify_signed_fetch_meta_with_policy(
 
     let attempts = PayloadAttempts {
         chain: &chain,
-        legacy: build_legacy_payload(method, path, &ts, &metadata_raw),
-        v6: build_payload_v6(method, path, &ts, &metadata_raw),
+        legacy: PayloadOverPaths::new(&path, |path| {
+            build_legacy_payload(method, path, &ts, &metadata_raw)
+        }),
+        v6: PayloadOverPaths::new(&path, |path| {
+            build_payload_v6(method, path, &ts, &metadata_raw)
+        }),
         timestamp: &ts,
         tolerance_secs,
         now,
@@ -958,7 +1077,10 @@ mod tests {
             "x-original-path",
             HeaderValue::from_static("/market/v1/lists?query=1"),
         );
-        assert_eq!(signed_fetch_path(&headers, "/v1/lists"), "/market/v1/lists");
+        assert_eq!(
+            signed_fetch_path(&headers, "/v1/lists").primary(),
+            "/market/v1/lists"
+        );
     }
 
     #[test]
@@ -966,11 +1088,11 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-original-path", HeaderValue::from_static("/v1/friends"));
         assert_eq!(
-            signed_fetch_path(&headers, "/v1/communities/abc/bans"),
+            signed_fetch_path(&headers, "/v1/communities/abc/bans").primary(),
             "/v1/communities/abc/bans"
         );
         assert_eq!(
-            signed_fetch_path(&HeaderMap::new(), "/fallback"),
+            signed_fetch_path(&HeaderMap::new(), "/fallback").primary(),
             "/fallback"
         );
     }
@@ -1000,5 +1122,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(signer, wallet.address().to_lowercase());
+    }
+
+    #[test]
+    fn signed_fetch_path_offers_the_route_path_behind_a_proxy_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-original-path",
+            HeaderValue::from_static("/market/v1/lists"),
+        );
+        let path = signed_fetch_path(&headers, "/v1/lists");
+        assert_eq!(path.primary(), "/market/v1/lists");
+        assert_eq!(path.route(), "/v1/lists");
+        assert_eq!(path.fallback(), Some("/v1/lists"));
+
+        headers.insert("x-original-path", HeaderValue::from_static("/v1/lists"));
+        assert_eq!(signed_fetch_path(&headers, "/v1/lists").fallback(), None);
+        assert_eq!(
+            signed_fetch_path(&HeaderMap::new(), "/v1/lists").fallback(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_signed_fetch_accepts_route_path_behind_proxy_prefix() {
+        let wallet = Wallet::from_hex(TEST_KEY).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut headers = signed_headers(&wallet, "get", "/v1/lists", now_ms);
+        headers.insert(
+            "x-original-path",
+            HeaderValue::from_static("/market/v1/lists"),
+        );
+        let signer = verify_signed_fetch(&headers, "get", "/v1/lists", FIVE_MINUTES)
+            .await
+            .unwrap();
+        assert_eq!(signer, wallet.address().to_lowercase());
+    }
+
+    #[tokio::test]
+    async fn verify_signed_fetch_answers_with_the_public_path_when_both_fail() {
+        let wallet = Wallet::from_hex(TEST_KEY).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut headers = signed_headers(&wallet, "get", "/v1/other", now_ms);
+        headers.insert(
+            "x-original-path",
+            HeaderValue::from_static("/market/v1/lists"),
+        );
+        let err = verify_signed_fetch(&headers, "get", "/v1/lists", FIVE_MINUTES)
+            .await
+            .unwrap_err();
+        match err {
+            AuthChainError::InvalidSignature(detail) => {
+                assert!(detail.contains("/market/v1/lists"), "{detail}")
+            }
+            other => panic!("expected InvalidSignature, got {other:?}"),
+        }
     }
 }

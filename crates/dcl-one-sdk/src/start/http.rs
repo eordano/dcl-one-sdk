@@ -7,11 +7,14 @@ use crate::scene::{
     b64_content_hash_in_root, b64_hash_in_root, b64_unhash, hash_path_part, root_tag, Project,
 };
 use axum::{
+    body::Bytes,
     extract::{ws::Message, Path as AxPath, RawQuery, Request, State, WebSocketUpgrade},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Redirect, Response},
     Json,
 };
+use catalyrst_crypto::signed_fetch::{AUTH_CHAIN_HEADER_PREFIX, AUTH_METADATA_HEADER};
+use catalyrst_crypto::{AuthLink, AuthLinkType};
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -146,7 +149,8 @@ pub(super) async fn about(State(st): State<Arc<AppState>>, req: Request) -> Json
         "comms": {
             "healthy": true,
             "protocol": "v3",
-            "fixedAdapter": fixed_adapter
+            "fixedAdapter": fixed_adapter,
+            "gatekeeperUrl": format!("{origin}/get-scene-adapter")
         },
         "configurations": {
             "networkId": 0,
@@ -163,6 +167,65 @@ pub(super) async fn about(State(st): State<Arc<AppState>>, req: Request) -> Json
 
 pub(super) async fn scenes() -> Json<Value> {
     Json(json!({ "scenes": [], "total": 0 }))
+}
+
+/// The scene-room gatekeeper of this preview: the `POST /get-scene-adapter`
+/// an explorer signs when it loads a scene. A scene room is an ordinary
+/// mini-comms room named `scene-<sceneId>` on the origin `/about` advertises,
+/// so the same wallet holds its realm-room and scene-room sessions side by
+/// side. The preview trusts whoever can reach it: the signature is not
+/// verified, only the signer is logged, and a request naming no scene is 400.
+pub(super) async fn get_scene_adapter(headers: HeaderMap, body: Bytes) -> Response {
+    let metadata = header_json(&headers, AUTH_METADATA_HEADER);
+    let body: Option<Value> = serde_json::from_slice(&body).ok();
+    let Some(scene_id) = scene_id_from(metadata.as_ref(), body.as_ref()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "no sceneId in x-identity-metadata or the request body\n",
+        )
+            .into_response();
+    };
+    let adapter = format!(
+        "ws-room:{}/mini-comms/scene-{scene_id}",
+        preview_ws_origin(&headers)
+    );
+    let signer = signed_fetch_signer(&headers);
+    tracing::info!(
+        scene_id,
+        signer = signer.as_deref().unwrap_or("unsigned"),
+        adapter,
+        "mini-comms scene adapter minted"
+    );
+    Json(json!({ "adapter": adapter })).into_response()
+}
+
+fn header_json(headers: &HeaderMap, name: &str) -> Option<Value> {
+    serde_json::from_str(headers.get(name)?.to_str().ok()?).ok()
+}
+
+/// The scene a gatekeeper request is for. The signed metadata is what the
+/// client committed to, so it wins over the body; the first non-empty
+/// `sceneId` is taken. It becomes one segment of a `/mini-comms/{room}` path,
+/// so anything that could not be a single path segment is rejected.
+fn scene_id_from(metadata: Option<&Value>, body: Option<&Value>) -> Option<String> {
+    let id = metadata
+        .into_iter()
+        .chain(body)
+        .find_map(|v| v.get("sceneId")?.as_str().filter(|s| !s.is_empty()))?;
+    is_room_segment(id).then(|| id.to_string())
+}
+
+fn is_room_segment(id: &str) -> bool {
+    id.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The wallet a signed fetch claims, read off the chain's SIGNER link without
+/// verifying it; the preview only logs it.
+fn signed_fetch_signer(headers: &HeaderMap) -> Option<String> {
+    let name = format!("{AUTH_CHAIN_HEADER_PREFIX}0");
+    let link: AuthLink = serde_json::from_str(headers.get(name.as_str())?.to_str().ok()?).ok()?;
+    (link.link_type == AuthLinkType::SIGNER).then(|| link.payload.to_lowercase())
 }
 
 /// The first project's scene.json, as upstream serves it off disk; the
@@ -615,6 +678,7 @@ mod tests {
     /// so they also pin that both doors produce the same hash.
     use crate::scene::b64_content_hash;
     use crate::start::testkit::{self, body_text, Tmp};
+    use axum::http::HeaderValue;
 
     fn project_at(root: PathBuf) -> Project {
         Project {
@@ -824,6 +888,146 @@ mod tests {
             StatusCode::OK,
             "membership was answered from a set the cached entity did not come from"
         );
+    }
+
+    fn signed_fetch_headers(metadata: Option<&str>, signer: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8000"));
+        if let Some(m) = metadata {
+            h.insert(AUTH_METADATA_HEADER, HeaderValue::from_str(m).unwrap());
+        }
+        if let Some(s) = signer {
+            h.insert(
+                "x-identity-auth-chain-0",
+                HeaderValue::from_str(&format!(r#"{{"type":"SIGNER","payload":"{s}"}}"#)).unwrap(),
+            );
+        }
+        h
+    }
+
+    const EXPLORER_META: &str = r#"{"intent":"dcl:explorer:comms-handshake","signer":"dcl:explorer","isGuest":true,"realm":{"serverName":"LocalPreview"},"realmName":"LocalPreview","sceneId":"bafkreimeta"}"#;
+
+    async fn adapter_of(resp: Response) -> String {
+        let v: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        v["adapter"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn scene_id_comes_from_the_signed_metadata_before_the_body() {
+        let meta: Value = serde_json::from_str(EXPLORER_META).unwrap();
+        let body = json!({ "sceneId": "bafkreibody", "realmName": "LocalPreview" });
+        assert_eq!(
+            scene_id_from(Some(&meta), Some(&body)).as_deref(),
+            Some("bafkreimeta")
+        );
+        assert_eq!(
+            scene_id_from(None, Some(&body)).as_deref(),
+            Some("bafkreibody")
+        );
+        assert_eq!(
+            scene_id_from(Some(&json!({ "realmName": "LocalPreview" })), Some(&body)).as_deref(),
+            Some("bafkreibody"),
+            "metadata without a sceneId defers to the body"
+        );
+        assert_eq!(
+            scene_id_from(Some(&json!({ "sceneId": "" })), Some(&body)).as_deref(),
+            Some("bafkreibody"),
+            "an empty sceneId counts as absent"
+        );
+        assert_eq!(scene_id_from(None, None), None);
+        assert_eq!(scene_id_from(Some(&json!({ "sceneId": 7 })), None), None);
+        assert_eq!(
+            scene_id_from(Some(&json!({ "sceneId": "b64-QUJD_-." })), None).as_deref(),
+            Some("b64-QUJD_-."),
+            "the preview's own b64- entity ids are single segments"
+        );
+        for bad in ["a/b", "a b", "a?b", "a#b", "\u{e9}"] {
+            assert_eq!(
+                scene_id_from(Some(&json!({ "sceneId": bad })), None),
+                None,
+                "{bad:?} is not one path segment"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn get_scene_adapter_mints_a_room_on_the_preview_ws_origin() {
+        let headers = signed_fetch_headers(Some(EXPLORER_META), Some("0xABCDEF"));
+        let resp = get_scene_adapter(headers, Bytes::new()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            adapter_of(resp).await,
+            "ws-room:ws://127.0.0.1:8000/mini-comms/scene-bafkreimeta"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_scene_adapter_follows_the_proxied_origin_like_about_does() {
+        let mut headers = signed_fetch_headers(Some(EXPLORER_META), None);
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("preview.example"),
+        );
+        headers.insert("x-forwarded-prefix", HeaderValue::from_static("/p/"));
+        assert_eq!(
+            adapter_of(get_scene_adapter(headers, Bytes::new()).await).await,
+            "ws-room:wss://preview.example/p/mini-comms/scene-bafkreimeta"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_scene_adapter_reads_the_body_when_the_metadata_names_no_scene() {
+        let headers = signed_fetch_headers(None, None);
+        let body = Bytes::from(r#"{"sceneId":"bafkreibody","realmName":"LocalPreview"}"#);
+        let resp = get_scene_adapter(headers, body).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            adapter_of(resp).await,
+            "ws-room:ws://127.0.0.1:8000/mini-comms/scene-bafkreibody"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_scene_adapter_without_a_scene_is_400_and_never_401() {
+        let resp = get_scene_adapter(signed_fetch_headers(None, None), Bytes::new()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let unsigned = signed_fetch_headers(Some(r#"{"sceneId":"bafkreix"}"#), None);
+        assert_eq!(
+            get_scene_adapter(unsigned, Bytes::new()).await.status(),
+            StatusCode::OK,
+            "the preview never demands a signature"
+        );
+    }
+
+    #[test]
+    fn the_signer_is_read_off_the_chain_without_verification() {
+        assert_eq!(
+            signed_fetch_signer(&signed_fetch_headers(None, Some("0xAbC"))).as_deref(),
+            Some("0xabc")
+        );
+        assert_eq!(signed_fetch_signer(&signed_fetch_headers(None, None)), None);
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-identity-auth-chain-0",
+            HeaderValue::from_static("not json"),
+        );
+        assert_eq!(signed_fetch_signer(&h), None);
+    }
+
+    #[tokio::test]
+    async fn about_advertises_the_gatekeeper_on_the_preview_origin() {
+        let st = Arc::new(testkit::state(vec![]));
+        let req = Request::builder()
+            .header(header::HOST, "preview.local:8000")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let Json(v) = about(State(st), req).await;
+        assert_eq!(
+            v["comms"]["gatekeeperUrl"],
+            "http://preview.local:8000/get-scene-adapter"
+        );
+        assert_eq!(v["comms"]["fixedAdapter"], "offline:offline");
     }
 
     #[test]

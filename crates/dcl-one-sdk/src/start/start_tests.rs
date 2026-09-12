@@ -146,7 +146,7 @@ async fn scene_body(st: &Arc<AppState>, headers: &[(&str, &str)]) -> String {
             v.parse().unwrap(),
         );
     }
-    let resp = super::landing::scene_page(st, &h);
+    let resp = super::landing::scene_page(st, &h, true);
     assert_eq!(resp.status(), StatusCode::OK);
     body_text(resp).await
 }

@@ -1,3 +1,4 @@
+pub(crate) mod ansi;
 pub(crate) mod chrome;
 mod content_cache;
 mod deploy_page;
@@ -6,6 +7,7 @@ mod deploy_status;
 mod edit;
 mod editor;
 mod http;
+mod land_picker;
 mod landing;
 pub(crate) mod proxy;
 pub(crate) mod scene_logs;
@@ -21,7 +23,7 @@ use crate::watch::{FsWatcher, WatchSession};
 use crate::workspace::Workspace;
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{header, HeaderMap},
     middleware::{self, Next},
     response::Response,
@@ -193,8 +195,12 @@ impl AppState {
     }
 }
 
-async fn scene_route(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    landing::scene_page(&st, &headers)
+async fn scene_route(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    landing::scene_page(&st, &headers, peer.ip().is_loopback())
 }
 
 /// Shared fixtures for every test under `start`.
@@ -582,6 +588,7 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
                 .route("/deploy/preflight", post(deploy_page::preflight))
                 .route("/scene", get(scene_route))
                 .route("/deploy/sign", post(deploy_page::sign_submit))
+                .route("/deploy/progress", get(deploy_page::sign_progress))
                 .route("/scene-json", post(edit::scene_json))
                 .route("/scene-thumbnail", post(edit::thumbnail))
                 .with_state(state.clone()),

@@ -1,13 +1,16 @@
 use super::{
-    catalyst_rotation, configured_catalyst_rotation, now_ms, DeployOptions, UPSTREAM_CATALYST_HOSTS,
+    catalyst_rotation, configured_catalyst_rotation, human_size, now_ms, DeployOptions,
+    UPSTREAM_CATALYST_HOSTS,
 };
 use crate::ux::{self, TrySteps, UserError};
 use anyhow::{bail, Context, Result};
 use catalyrst_crypto::Wallet;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// Where a world deploy goes when no flag or env default names a server.
@@ -76,6 +79,275 @@ fn stage_entity(dir: &Path, entity_id: &str, entity_bytes: &[u8]) -> std::io::Re
     std::fs::write(dir.join(entity_id), entity_bytes)
 }
 
+/// How far an upload has got, shared between the carrier sending it and
+/// whoever draws it: the signing page polls this while the wallet's
+/// signature travels, so a 20 MB scene is not a bare "Uploading…" for a
+/// minute. Cheap to clone; every clone reads the same state.
+#[derive(Clone, Default)]
+pub struct UploadProgress(Arc<Mutex<ProgressState>>);
+
+/// One snapshot of an upload. `total` and `sent` count body bytes on the
+/// wire (the multipart framing included, which is why `total` can exceed the
+/// payload size by a few KB); `files_sent` is how many payload files are
+/// fully sent and `current` the one in flight.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ProgressState {
+    /// idle · staging · uploading · validating · done · failed. `validating`
+    /// is the stretch after the last byte left and before the server
+    /// answered: the content server checking the deployment.
+    pub phase: &'static str,
+    /// node · curl · reqwest. curl carries no byte counts, and the page says
+    /// so instead of drawing a bar that never moves.
+    pub carrier: &'static str,
+    pub total: u64,
+    pub sent: u64,
+    pub files: usize,
+    pub files_sent: usize,
+    pub current: Option<String>,
+    pub started_ms: i64,
+    pub sent_ms: i64,
+    /// [`Reuse::sentence`] once something stayed home: why `files` can read
+    /// smaller than the payload row above the bar.
+    pub reuse: Option<String>,
+}
+
+impl Default for ProgressState {
+    fn default() -> Self {
+        ProgressState {
+            phase: "idle",
+            carrier: "",
+            total: 0,
+            sent: 0,
+            files: 0,
+            files_sent: 0,
+            current: None,
+            started_ms: 0,
+            sent_ms: 0,
+            reuse: None,
+        }
+    }
+}
+
+fn payload_len(entity_len: usize, files: &Files) -> u64 {
+    entity_len as u64 + files.iter().map(|(_, _, b)| b.len() as u64).sum::<u64>()
+}
+
+impl UploadProgress {
+    pub fn snapshot(&self) -> ProgressState {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn update(&self, f: impl FnOnce(&mut ProgressState)) {
+        f(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// The look at what the server holds, before anything travels: the
+    /// whole payload is the size on show until [`Self::begin`] narrows it.
+    fn checking(&self, entity_len: usize, files: &Files) {
+        self.update(|p| {
+            *p = ProgressState {
+                phase: "checking",
+                total: payload_len(entity_len, files),
+                files: files.len(),
+                started_ms: now_ms(),
+                ..ProgressState::default()
+            }
+        });
+    }
+
+    /// `files` is what travels; `reuse` says what stayed home.
+    fn begin(&self, entity_len: usize, files: &Files, reuse: Reuse) {
+        self.update(|p| {
+            *p = ProgressState {
+                phase: "staging",
+                total: payload_len(entity_len, files),
+                files: files.len(),
+                reuse: (reuse.reused_files > 0).then(|| reuse.sentence()),
+                started_ms: now_ms(),
+                ..ProgressState::default()
+            }
+        });
+    }
+
+    fn carrier(&self, name: &'static str) {
+        self.update(|p| {
+            p.carrier = name;
+            p.phase = "uploading";
+        });
+    }
+
+    /// A carrier's report: bytes on the wire so far, the wire total, and the
+    /// payload file in flight (`None` before the first file; past the end
+    /// once every file is out). The last byte leaving flips the phase to
+    /// `validating`, since from then on the wait is the server's.
+    fn note(&self, sent: u64, total: u64, file: Option<usize>, names: &[String]) {
+        self.update(|p| {
+            if total > 0 {
+                p.total = total;
+            }
+            p.sent = sent.min(p.total.max(sent));
+            match file {
+                Some(i) if i < names.len() => {
+                    p.files_sent = i;
+                    p.current = Some(names[i].clone());
+                }
+                Some(_) => {
+                    p.files_sent = names.len();
+                    p.current = None;
+                }
+                None => {
+                    p.files_sent = 0;
+                    p.current = None;
+                }
+            }
+            if p.total > 0 && p.sent >= p.total {
+                if p.phase != "validating" {
+                    p.sent_ms = now_ms();
+                }
+                p.phase = "validating";
+                p.files_sent = names.len();
+                p.current = None;
+            } else {
+                p.phase = "uploading";
+            }
+        });
+    }
+
+    fn finish(&self, ok: bool) {
+        self.update(|p| {
+            if ok {
+                p.sent = p.total;
+                p.files_sent = p.files;
+                p.current = None;
+            }
+            p.phase = if ok { "done" } else { "failed" };
+        });
+    }
+}
+
+/// The multipart body every carrier sends, part by part and in the order
+/// the server reads it: the text fields, the entity, then each payload file.
+/// Each part carries the index of the payload file it belongs to (`None`
+/// before the first file, `files.len()` for the closing boundary), which is
+/// what a counted send reports as "the file in flight".
+fn multipart_parts(
+    boundary: &str,
+    entity_id: &str,
+    entity_bytes: &[u8],
+    files: &Files,
+    auth_chain: &Value,
+) -> Vec<(Option<usize>, Vec<u8>)> {
+    fn text(parts: &mut Vec<(Option<usize>, Vec<u8>)>, boundary: &str, name: &str, value: &str) {
+        parts.push((
+            None,
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+                .into_bytes(),
+        ));
+    }
+    fn blob(
+        parts: &mut Vec<(Option<usize>, Vec<u8>)>,
+        boundary: &str,
+        file: Option<usize>,
+        name: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) {
+        parts.push((
+            file,
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
+            )
+            .into_bytes(),
+        ));
+        parts.push((file, bytes.to_vec()));
+        parts.push((file, b"\r\n".to_vec()));
+    }
+    let mut parts = Vec::new();
+    text(&mut parts, boundary, "entityId", entity_id);
+    text(
+        &mut parts,
+        boundary,
+        "authChain",
+        &serde_json::to_string(auth_chain).unwrap_or_default(),
+    );
+    for (i, k, v) in chain_fields(auth_chain) {
+        text(&mut parts, boundary, &format!("authChain[{i}][{k}]"), v);
+    }
+    blob(
+        &mut parts,
+        boundary,
+        None,
+        entity_id,
+        "application/json",
+        entity_bytes,
+    );
+    for (i, (_, hash, bytes)) in files.iter().enumerate() {
+        blob(
+            &mut parts,
+            boundary,
+            Some(i),
+            hash,
+            "application/octet-stream",
+            bytes,
+        );
+    }
+    parts.push((
+        Some(files.len()),
+        format!("--{boundary}--\r\n").into_bytes(),
+    ));
+    parts
+}
+
+/// The body as a stream of 64 KB chunks that reports each one to `progress`
+/// as the client pulls it — which it does as the socket drains, so the
+/// count tracks the wire within a buffer or two.
+fn counted_body(
+    parts: Vec<(Option<usize>, Vec<u8>)>,
+    progress: UploadProgress,
+    names: Arc<Vec<String>>,
+) -> reqwest::Body {
+    reqwest::Body::wrap_stream(counted_stream(parts, progress, names))
+}
+
+fn counted_stream(
+    parts: Vec<(Option<usize>, Vec<u8>)>,
+    progress: UploadProgress,
+    names: Arc<Vec<String>>,
+) -> impl futures::Stream<Item = Result<Vec<u8>, std::io::Error>> + Send + 'static {
+    const CHUNK: usize = 64 * 1024;
+    let total: u64 = parts.iter().map(|(_, b)| b.len() as u64).sum();
+    futures::stream::unfold(
+        (parts, 0usize, 0usize, 0u64),
+        move |(parts, pi, off, sent)| {
+            let progress = progress.clone();
+            let names = names.clone();
+            async move {
+                if pi >= parts.len() {
+                    return None;
+                }
+                let (file, bytes) = &parts[pi];
+                let end = (off + CHUNK).min(bytes.len());
+                let chunk = bytes[off..end].to_vec();
+                let sent = sent + (end - off) as u64;
+                progress.note(sent, total, *file, &names);
+                let (pi, off) = if end >= bytes.len() {
+                    (pi + 1, 0)
+                } else {
+                    (pi, end)
+                };
+                Some((Ok::<_, std::io::Error>(chunk), (parts, pi, off, sent)))
+            }
+        },
+    )
+}
+
+fn file_names(files: &Files) -> Arc<Vec<String>> {
+    Arc::new(files.iter().map(|(path, _, _)| path.clone()).collect())
+}
+
 /// The multipart `authChain[i][k]` fields, one per link and key.
 fn chain_fields(chain: &Value) -> Vec<(usize, &'static str, &str)> {
     let mut out = Vec::new();
@@ -97,6 +369,7 @@ async fn node_upload(
     entity_bytes: &[u8],
     files: &Files,
     auth_chain: &Value,
+    progress: &UploadProgress,
 ) -> Option<Result<(u16, String)>> {
     let node = crate::build::find_node()?;
     let dir = std::env::temp_dir().join(format!("dcl-one-sdk-nodeup-{entity_id}"));
@@ -119,11 +392,44 @@ async fn node_upload(
         let _ = std::fs::remove_dir_all(&dir);
         return Some(Err(anyhow::anyhow!("could not stage the upload")));
     }
-    let out = tokio::process::Command::new(&node)
+    let child = tokio::process::Command::new(&node)
         .arg(dir.join("up.mjs"))
         .arg(dir.join("cfg.json"))
-        .output()
-        .await;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Some(Err(anyhow::anyhow!("node could not run: {e}")));
+        }
+    };
+    progress.carrier("node");
+    // The script reports the send on stderr, one JSON line per chunk batch;
+    // anything else there is its failure message. stdout is the answer.
+    let reporter = {
+        let stderr = child.stderr.take();
+        let progress = progress.clone();
+        let names = file_names(files);
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let Some(stderr) = stderr else {
+                return;
+            };
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some((sent, total, file)) = parse_progress_line(&line) {
+                    progress.note(sent, total, file, &names);
+                } else if !line.trim().is_empty() {
+                    tracing::debug!("node upload: {line}");
+                }
+            }
+        })
+    };
+    let out = child.wait_with_output().await;
+    let _ = reporter.await;
     let _ = std::fs::remove_dir_all(&dir);
     let o = match out {
         Ok(o) => o,
@@ -151,26 +457,92 @@ async fn node_upload(
 const NODE_UPLOAD_MJS: &str = r#"import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 const cfg = JSON.parse(readFileSync(process.argv[2], 'utf8'));
-const blob = (name, type) => new Blob([readFileSync(join(cfg.dir, name))], type ? { type } : undefined);
-const fd = new FormData();
-fd.append('entityId', cfg.entityId);
-fd.append('authChain', JSON.stringify(cfg.authChain));
+const read = (name) => readFileSync(join(cfg.dir, name));
+const enc = new TextEncoder();
+const boundary = '----dclonesdk' + Math.random().toString(16).slice(2) + Date.now().toString(16);
+// The body, part by part, in the order the server reads it: the text fields,
+// the entity, then every payload file. `file` is the index into cfg.files a
+// part belongs to (null before the first file, cfg.files.length for the
+// closing boundary): what the progress lines name as the file in flight.
+const parts = [];
+const text = (name, value) =>
+  parts.push({ file: null, bytes: enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`) });
+const blob = (file, name, type) => {
+  parts.push({ file, bytes: enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${name}"\r\nContent-Type: ${type}\r\n\r\n`) });
+  parts.push({ file, bytes: read(name) });
+  parts.push({ file, bytes: enc.encode('\r\n') });
+};
+text('entityId', cfg.entityId);
+text('authChain', JSON.stringify(cfg.authChain));
 cfg.authChain.forEach((l, i) => {
-  fd.append(`authChain[${i}][type]`, l.type);
-  fd.append(`authChain[${i}][payload]`, l.payload);
-  fd.append(`authChain[${i}][signature]`, l.signature);
+  text(`authChain[${i}][type]`, l.type);
+  text(`authChain[${i}][payload]`, l.payload);
+  text(`authChain[${i}][signature]`, l.signature);
 });
-fd.append(cfg.entityId, blob(cfg.entityId, 'application/json'), cfg.entityId);
-for (const hash of cfg.files) fd.append(hash, blob(hash, 'application/octet-stream'), hash);
+blob(null, cfg.entityId, 'application/json');
+cfg.files.forEach((hash, i) => blob(i, hash, 'application/octet-stream'));
+parts.push({ file: cfg.files.length, bytes: enc.encode(`--${boundary}--\r\n`) });
+const total = parts.reduce((n, p) => n + p.bytes.length, 0);
+// Progress goes to stderr as JSON lines, at most every 150ms or 512KB, and
+// always for the last byte. fetch pulls a chunk as the socket drains, so the
+// count tracks the wire within a buffer or two.
+const CHUNK = 64 * 1024;
+let sent = 0, reportedAt = 0, reportedSent = 0;
+const report = (file, force) => {
+  const now = Date.now();
+  if (!force && now - reportedAt < 150 && sent - reportedSent < 512 * 1024) return;
+  reportedAt = now; reportedSent = sent;
+  process.stderr.write(JSON.stringify({ sent, total, file }) + '\n');
+};
+let pi = 0, off = 0;
+const body = new ReadableStream({
+  pull(controller) {
+    if (pi >= parts.length) { report(cfg.files.length, true); controller.close(); return; }
+    const p = parts[pi];
+    const end = Math.min(off + CHUNK, p.bytes.length);
+    controller.enqueue(p.bytes.subarray(off, end));
+    sent += end - off; off = end;
+    if (off >= p.bytes.length) { pi += 1; off = 0; }
+    report(p.file, false);
+  },
+});
+const send = async (body, extra) => {
+  const r = await fetch(cfg.url, {
+    method: 'POST',
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    body,
+    ...extra,
+  });
+  return { status: r.status, body: await r.text() };
+};
 try {
-  const r = await fetch(cfg.url, { method: 'POST', body: fd });
-  const body = await r.text();
-  process.stdout.write(JSON.stringify({ status: r.status, body }));
+  let out;
+  try {
+    out = await send(body, { duplex: 'half' });
+  } catch (e) {
+    // A Node without streaming request bodies refuses the stream before
+    // connecting: send the same bytes in one piece, without progress.
+    if (!/duplex/i.test(String(e && e.message))) throw e;
+    const whole = new Uint8Array(total);
+    let o = 0;
+    for (const p of parts) { whole.set(p.bytes, o); o += p.bytes.length; }
+    out = await send(whole, {});
+  }
+  process.stdout.write(JSON.stringify(out));
 } catch (e) {
   process.stderr.write(String(e && e.message ? e.message : e));
   process.exit(1);
 }
 "#;
+
+/// One of the node script's stderr lines, when it is a progress report.
+fn parse_progress_line(line: &str) -> Option<(u64, u64, Option<usize>)> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    let sent = v.get("sent")?.as_u64()?;
+    let total = v.get("total")?.as_u64()?;
+    let file = v.get("file").and_then(Value::as_u64).map(|f| f as usize);
+    Some((sent, total, file))
+}
 
 /// Upload with curl, the fallback when Node is absent: its multipart
 /// fingerprint passes edges that challenge reqwest's. `None` means curl is
@@ -181,6 +553,7 @@ async fn curl_upload(
     entity_bytes: &[u8],
     files: &Files,
     auth_chain: &Value,
+    progress: &UploadProgress,
 ) -> Option<Result<(u16, String)>> {
     let dir = std::env::temp_dir().join(format!("dcl-one-sdk-upload-{entity_id}"));
     if stage_entity(&dir, entity_id, entity_bytes).is_err() {
@@ -221,6 +594,9 @@ async fn curl_upload(
         cmd.arg("-F").arg(part(hash, "application/octet-stream"));
     }
     cmd.arg(url);
+    // curl's meter is not machine-readable; the page shows the payload size
+    // and the clock instead of a bar that never moves.
+    progress.carrier("curl");
     let out = cmd.output().await;
     let _ = std::fs::remove_dir_all(&dir);
     match out {
@@ -243,29 +619,23 @@ async fn reqwest_upload(
     entity_bytes: Vec<u8>,
     files: &Files,
     auth_chain: &Value,
+    progress: &UploadProgress,
 ) -> Result<(u16, String)> {
-    use reqwest::multipart::{Form, Part};
-    let mut form = Form::new()
-        .text("entityId", entity_id.to_string())
-        .text("authChain", serde_json::to_string(auth_chain)?);
-    for (i, k, v) in chain_fields(auth_chain) {
-        form = form.text(format!("authChain[{i}][{k}]"), v.to_string());
-    }
-    form = form.part(
-        entity_id.to_string(),
-        Part::bytes(entity_bytes)
-            .file_name(entity_id.to_string())
-            .mime_str("application/json")?,
-    );
-    for (_, hash, bytes) in files {
-        form = form.part(
-            hash.clone(),
-            Part::bytes(bytes.clone()).file_name(hash.clone()),
-        );
-    }
-    send_text(upload_client()?.post(url).multipart(form))
-        .await
-        .map_err(|e| unreachable_server(url, e))
+    let boundary = format!("----dclonesdk{:x}{:x}", rand::random::<u64>(), now_ms());
+    let parts = multipart_parts(&boundary, entity_id, &entity_bytes, files, auth_chain);
+    progress.carrier("reqwest");
+    let body = counted_body(parts, progress.clone(), file_names(files));
+    send_text(
+        upload_client()?
+            .post(url)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body),
+    )
+    .await
+    .map_err(|e| unreachable_server(url, e))
 }
 
 /// How far the caller has already consented to a target being chosen for it —
@@ -320,13 +690,17 @@ pub(super) async fn resolve_target_from(
             .into())
         }
         (None, Some(tc)) => tc.trim_end_matches('/').to_string(),
-        (Some(t), None) => target_content_url(t, "--target-server").await?,
+        (Some(t), None) => target_content_url(t, "--target-server", world.is_some()).await?,
         (None, None) => match (configured_target_server(), world) {
-            (Some(t), _) => target_content_url(&t, "DCL_ONE_SDK_TARGET_SERVER").await?,
+            (Some(t), _) => {
+                target_content_url(&t, "DCL_ONE_SDK_TARGET_SERVER", world.is_some()).await?
+            }
             (None, Some(w)) => {
-                ux::note(format!(
-                    "deploying the world \"{w}\" to the public worlds server {WORLDS_CONTENT_SERVER}"
-                ));
+                if !consent.quiet {
+                    ux::note(format!(
+                        "deploying the world \"{w}\" to the public worlds server {WORLDS_CONTENT_SERVER}"
+                    ));
+                }
                 DEFAULT_WORLDS_TARGET_SERVER.to_string()
             }
             (None, None) if headless => return Err(UserError::new(
@@ -486,14 +860,16 @@ async fn catalyst_content_url(t: &str) -> Result<String> {
 /// content server; a URL that already has a path is that content server,
 /// used verbatim. `https://peer.decentraland.org` still discovers, exactly
 /// as a plain `--target <domain>` always has; only a value that already
-/// spells out where the entities route lives skips the probe. The public
-/// worlds server is verbatim by name regardless of path — a /about probe
-/// against its Cloudflare edge gets the following upload challenged, and
-/// that probe was the reason two flags once existed.
-async fn target_content_url(t: &str, source: &str) -> Result<String> {
+/// spells out where the entities route lives skips the probe. A worlds
+/// server is verbatim regardless of path — the public one by name, and any
+/// host a world scene is sent to, since a worlds server answers /status,
+/// never a catalyst's /about, and a /about probe against a Cloudflare edge
+/// gets the following upload challenged (that probe was the reason two
+/// flags once existed).
+async fn target_content_url(t: &str, source: &str, world_scene: bool) -> Result<String> {
     let t = t.trim();
     let base = sanitize_catalyst_url(t);
-    let worlds = host_of(&base) == host_of(WORLDS_CONTENT_SERVER);
+    let worlds = world_scene || host_of(&base) == host_of(WORLDS_CONTENT_SERVER);
     let has_path = !url_path(&base).is_empty();
     if !worlds && !has_path {
         return catalyst_content_url(t).await;
@@ -1059,6 +1435,7 @@ pub async fn upload_entity(
         address,
         signature,
         UploadDestination::ContentServer,
+        &UploadProgress::default(),
     )
     .await
 }
@@ -1091,6 +1468,252 @@ impl UploadDestination<'_> {
     }
 }
 
+/// Cids per `available-content` question: eighty keep the URL under the
+/// shortest limit an edge enforces.
+const STORED_BATCH: usize = 80;
+
+/// The split every surface states — the /target forecast, the /deploy head,
+/// the terminal and the signing panel's progress: files the server already
+/// holds against the ones that travel, by count and bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reuse {
+    pub reused_files: usize,
+    pub reused_bytes: u64,
+    pub upload_files: usize,
+    pub upload_bytes: u64,
+}
+
+impl Reuse {
+    /// Tallies `(held by the server, size)` per file.
+    pub fn tally(files: impl IntoIterator<Item = (bool, u64)>) -> Reuse {
+        let mut r = Reuse::default();
+        for (held, bytes) in files {
+            let (count, sum) = match held {
+                true => (&mut r.reused_files, &mut r.reused_bytes),
+                false => (&mut r.upload_files, &mut r.upload_bytes),
+            };
+            *count += 1;
+            *sum += bytes;
+        }
+        r
+    }
+
+    /// The one sentence about the split, the same wherever it is said.
+    pub fn sentence(&self) -> String {
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        match (self.reused_files, self.upload_files) {
+            (0, up) => format!(
+                "All {up} file{} upload ({}) — the server has none of them yet",
+                s(up),
+                human_size(self.upload_bytes)
+            ),
+            (kept, 0) => format!(
+                "All {kept} file{} are already on the server ({}), republishing only updates the deployment timestamp",
+                s(kept),
+                human_size(self.reused_bytes)
+            ),
+            (kept, up) => format!(
+                "{kept} of {} files are already on the server — {up} to upload ({})",
+                kept + up,
+                human_size(self.upload_bytes)
+            ),
+        }
+    }
+}
+
+/// Which of `cids` the content server at `base` already stores, by
+/// `GET /available-content?cid=…`: the /target forecast's question and,
+/// before the upload, the reason stored files stay home. Every content
+/// server answers it and accepts an entity whose stored files are not in
+/// the request — the skip the upstream toolchain makes — so a republish
+/// after a one-texture edit sends the entity and that texture.
+///
+/// The question travels the way the upload does (node, then curl, then
+/// reqwest): a Cloudflare-fronted worlds server challenges the reqwest
+/// fingerprint and then the upload from the IP it just challenged, so the
+/// look-ahead has to be what the edge already lets through. Whatever goes
+/// unanswered counts as not held — a missed skip costs bandwidth, a wrong
+/// one the deploy. `DCL_ONE_SDK_UPLOAD_ALL=1` sends everything regardless.
+pub(crate) async fn stored_cids(base: &str, cids: &[&str]) -> HashSet<String> {
+    if upload_all_from(std::env::var_os("DCL_ONE_SDK_UPLOAD_ALL")) {
+        return HashSet::new();
+    }
+    let mut cids = cids.to_vec();
+    cids.sort_unstable();
+    cids.dedup();
+    if cids.is_empty() {
+        return HashSet::new();
+    }
+    let base = base.trim_end_matches('/');
+    let urls: Vec<String> = cids
+        .chunks(STORED_BATCH)
+        .map(|batch| {
+            let query: Vec<String> = batch.iter().map(|c| format!("cid={c}")).collect();
+            format!("{base}/available-content?{}", query.join("&"))
+        })
+        .collect();
+    let mut have = HashSet::new();
+    for body in fetch_all(&urls).await.iter().flatten() {
+        have.extend(parse_available(body));
+    }
+    have
+}
+
+fn upload_all_from(raw: Option<std::ffi::OsString>) -> bool {
+    raw.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// The cids an `available-content` answer marks available; a body that is
+/// not that answer names none.
+fn parse_available(body: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<Value>>(body)
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| e.get("available").and_then(Value::as_bool) == Some(true))
+        .filter_map(|e| e.get("cid").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// The files that travel, and the split: a file whose hash the server
+/// holds is left out of the request. Borrowed when nothing stays, so the
+/// common case copies no bytes.
+pub(crate) fn split_stored<'a>(
+    files: &'a Files,
+    have: &HashSet<String>,
+) -> (Cow<'a, Files>, Reuse) {
+    let reuse = Reuse::tally(
+        files
+            .iter()
+            .map(|(_, h, b)| (have.contains(h), b.len() as u64)),
+    );
+    if reuse.reused_files == 0 {
+        return (Cow::Borrowed(files), reuse);
+    }
+    let send: Vec<(String, String, Vec<u8>)> = files
+        .iter()
+        .filter(|(_, hash, _)| !have.contains(hash))
+        .cloned()
+        .collect();
+    (Cow::Owned(send), reuse)
+}
+
+/// One GET per url, all by one carrier — node, then curl, then reqwest, the
+/// upload's order — with `None` where a url went unanswered or answered
+/// outside 2xx. As with the upload, a carrier that is present is the one
+/// that answers: a node that fails does not hand the question to curl.
+async fn fetch_all(urls: &[String]) -> Vec<Option<String>> {
+    if let Some(v) = node_fetch_all(urls).await {
+        return v;
+    }
+    if let Some(v) = curl_fetch_all(urls).await {
+        return v;
+    }
+    reqwest_fetch_all(urls).await
+}
+
+fn body_when_ok(status: Option<u64>, body: Option<&str>) -> Option<String> {
+    match (status, body) {
+        (Some(s), Some(b)) if (200..300).contains(&s) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// The urls come as arguments; the answers leave as one JSON array on
+/// stdout, in order, status 0 for a url that never answered. Six in
+/// flight at once, so a payload of thousands of files does not open a
+/// connection per eighty of them all at the same moment.
+const NODE_FETCH_JS: &str = r#"const urls = process.argv.slice(1);
+const one = (u) => fetch(u, { signal: AbortSignal.timeout(10000) })
+  .then(async (r) => ({ status: r.status, body: await r.text() }))
+  .catch(() => ({ status: 0, body: '' }));
+const out = new Array(urls.length);
+let next = 0;
+const worker = async () => { while (next < urls.length) { const i = next++; out[i] = await one(urls[i]); } };
+Promise.all(Array.from({ length: Math.min(6, urls.length) }, worker))
+  .then(() => process.stdout.write(JSON.stringify(out)));"#;
+
+async fn node_fetch_all(urls: &[String]) -> Option<Vec<Option<String>>> {
+    let node = crate::build::find_node()?;
+    let unanswered = || Some(vec![None; urls.len()]);
+    let out = match tokio::process::Command::new(&node)
+        .arg("-e")
+        .arg(NODE_FETCH_JS)
+        .args(urls)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(_) => return unanswered(),
+    };
+    let Ok(answers) = serde_json::from_slice::<Vec<Value>>(&out.stdout) else {
+        return unanswered();
+    };
+    if answers.len() != urls.len() {
+        return unanswered();
+    }
+    Some(
+        answers
+            .iter()
+            .map(|a| {
+                body_when_ok(
+                    a.get("status").and_then(Value::as_u64),
+                    a.get("body").and_then(Value::as_str),
+                )
+            })
+            .collect(),
+    )
+}
+
+async fn curl_fetch_all(urls: &[String]) -> Option<Vec<Option<String>>> {
+    let mut out = Vec::with_capacity(urls.len());
+    for url in urls {
+        let run = tokio::process::Command::new("curl")
+            .args([
+                "-sS",
+                "-A",
+                USER_AGENT,
+                "--max-time",
+                "10",
+                "-w",
+                "\n%{http_code}",
+            ])
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await;
+        match run {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+                out.push(body_when_ok(code.trim().parse().ok(), Some(body)));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(_) => out.push(None),
+        }
+    }
+    Some(out)
+}
+
+async fn reqwest_fetch_all(urls: &[String]) -> Vec<Option<String>> {
+    let Ok(client) = probe_client() else {
+        return vec![None; urls.len()];
+    };
+    futures::future::join_all(urls.iter().map(|u| {
+        let client = client.clone();
+        async move {
+            match send_text(client.get(u)).await {
+                Ok((code, body)) => body_when_ok(Some(code as u64), Some(&body)),
+                Err(_) => None,
+            }
+        }
+    }))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_entity_to(
     target: &str,
     entity_id: &str,
@@ -1099,6 +1722,7 @@ pub(crate) async fn upload_entity_to(
     address: &str,
     signature: &str,
     destination: UploadDestination<'_>,
+    progress: &UploadProgress,
 ) -> Result<String> {
     let auth_chain = simple_auth_chain(address, entity_id, signature);
     upload_entity_with_chain_to(
@@ -1109,10 +1733,14 @@ pub(crate) async fn upload_entity_to(
         address,
         auth_chain,
         destination,
+        progress,
     )
     .await
 }
 
+/// `progress` is where the send reports itself; a caller with nothing to
+/// draw passes a fresh [`UploadProgress`] and never reads it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_entity_with_chain_to(
     target: &str,
     entity_id: &str,
@@ -1121,7 +1749,9 @@ pub(crate) async fn upload_entity_with_chain_to(
     address: &str,
     auth_chain: Value,
     destination: UploadDestination<'_>,
+    progress: &UploadProgress,
 ) -> Result<String> {
+    progress.checking(entity_bytes.len(), files);
     let url = format!("{}/entities", target.trim_end_matches('/'));
     tracing::info!("uploading to {url} as {address} (entity {entity_id})");
     // Keep a publish legible beside watch events: the action owns the clock,
@@ -1130,34 +1760,60 @@ pub(crate) async fn upload_entity_with_chain_to(
     ux::note_arrow(format!("url: {url}"));
     ux::note_arrow(format!("signer: {address}"));
 
+    // What the server already holds stays home; the entity always travels.
+    let cids: Vec<&str> = files.iter().map(|(_, h, _)| h.as_str()).collect();
+    let (send, reuse) = split_stored(files, &stored_cids(target, &cids).await);
+    let files: &Files = &send;
+    if reuse.reused_files > 0 {
+        ux::note_arrow(reuse.sentence());
+    }
+    progress.begin(entity_bytes.len(), files, reuse);
+
     // Node carries the upload, then curl, then reqwest. A Cloudflare-fronted
     // worlds server challenges reqwest and curl but not Node — the official
     // tooling is Node, so its fingerprint is the one the edge accepts. This
-    // is only reliable because the deploy makes no request to the content
-    // server before it: a reqwest pre-flight would flag the IP and the upload
+    // is only reliable because the one request the deploy makes to the
+    // content server before it, the look at what it holds, travels by the
+    // same carrier: a reqwest pre-flight would flag the IP and the upload
     // that follows would inherit the challenge.
-    let carried = match node_upload(&url, entity_id, &entity_bytes, files, &auth_chain).await {
+    let carried = match node_upload(&url, entity_id, &entity_bytes, files, &auth_chain, progress)
+        .await
+    {
         Some(r) => r,
-        None => match curl_upload(&url, entity_id, &entity_bytes, files, &auth_chain).await {
-            Some(r) => r,
-            None => reqwest_upload(&url, entity_id, entity_bytes, files, &auth_chain).await,
-        },
+        None => {
+            match curl_upload(&url, entity_id, &entity_bytes, files, &auth_chain, progress).await {
+                Some(r) => r,
+                None => {
+                    reqwest_upload(&url, entity_id, entity_bytes, files, &auth_chain, progress)
+                        .await
+                }
+            }
+        }
     };
-    let (status, body) = carried?;
+    let (status, body) = match carried {
+        Ok(x) => x,
+        Err(e) => {
+            progress.finish(false);
+            return Err(e);
+        }
+    };
 
     if status == 0 {
         // curl reached no server (connection refused, DNS failure, timeout):
         // no HTTP response, so `-w %{http_code}` prints 000. Same sentence
         // the reqwest transport error gives.
+        progress.finish(false);
         return Err(cannot_reach(format!("no response from {url}")).into());
     }
     if (200..300).contains(&status) {
         tracing::info!("deployed \u{2713} (HTTP {status}) — server: {body}");
+        progress.finish(true);
         Ok(format!(
             "Deployed {entity_id} to {} (HTTP {status})",
             host_of(&url).unwrap_or_default()
         ))
     } else {
+        progress.finish(false);
         Err(rejected(status, &body, &[]))
     }
 }
@@ -1380,10 +2036,7 @@ mod tests {
             e.contains("worlds server"),
             "the remedy points at the worlds server: {e}"
         );
-        assert!(
-            e.contains("Point at Genesis City LAND"),
-            "and the other way out: {e}"
-        );
+        assert!(e.contains("\"Select LAND\""), "and the other way out: {e}");
         assert!(
             !e.contains("ADR-173"),
             "the raw server sentence is not the headline: {e}"
@@ -1428,6 +2081,14 @@ mod tests {
             bare_worlds.unwrap(),
             WORLDS_CONTENT_SERVER,
             "known worlds host, no /about probe"
+        );
+        // A world sent to a self-hosted worlds server: verbatim too. Port 9
+        // answers nothing, so a /about probe would have failed this.
+        let own_worlds = resolved(Some("127.0.0.1:9"), Some("w.dcl.eth"), true).await;
+        assert_eq!(
+            own_worlds.unwrap(),
+            "https://127.0.0.1:9",
+            "a world scene's target is a worlds server, no /about probe"
         );
 
         let land_at_worlds = resolved(Some(WORLDS_CONTENT_SERVER), None, true).await;
@@ -1545,5 +2206,235 @@ mod tests {
         let out = resolved(None, None, true).await;
         let err = format!("{:#}", out.expect_err("land + key must still refuse"));
         assert!(err.contains("no deploy target given"), "{err}");
+    }
+
+    /// The body a counted send streams is the multipart every carrier
+    /// sends, and the count it reports walks the files in order and lands on
+    /// "validating" with the last byte.
+    #[tokio::test]
+    async fn a_counted_send_reports_the_file_in_flight_then_validating() {
+        use futures::StreamExt;
+        let files: Vec<(String, String, Vec<u8>)> = vec![
+            ("a.bin".into(), "bafya".into(), vec![1u8; 70_000]),
+            ("b.bin".into(), "bafyb".into(), vec![2u8; 10]),
+        ];
+        let chain = json!([{ "type": "SIGNER", "payload": "0xabc", "signature": "" }]);
+        let parts = multipart_parts("XYZ", "bafyentity", b"{}", &files, &chain);
+        let wire: Vec<u8> = parts.iter().flat_map(|(_, b)| b.clone()).collect();
+        let text = String::from_utf8_lossy(&wire);
+        assert!(text.starts_with(
+            "--XYZ\r\nContent-Disposition: form-data; name=\"entityId\"\r\n\r\nbafyentity\r\n"
+        ));
+        assert!(text.contains("name=\"authChain[0][type]\"\r\n\r\nSIGNER\r\n"));
+        assert!(text.contains("name=\"bafyentity\"; filename=\"bafyentity\"\r\nContent-Type: application/json\r\n\r\n{}\r\n"));
+        assert!(text.contains(
+            "name=\"bafya\"; filename=\"bafya\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        ));
+        assert!(text.ends_with("--XYZ--\r\n"));
+        let total = wire.len() as u64;
+
+        let progress = UploadProgress::default();
+        progress.begin(2, &files, Reuse::default());
+        assert_eq!(progress.snapshot().phase, "staging");
+        assert_eq!(progress.snapshot().total, 70_012);
+        assert_eq!(progress.snapshot().files, 2);
+        let names = file_names(&files);
+        let mut seen = Vec::new();
+        let mut body = Box::pin(counted_stream(parts, progress.clone(), names));
+        while let Some(chunk) = body.next().await {
+            let n = chunk.unwrap().len();
+            seen.push((n, progress.snapshot()));
+        }
+        let streamed: usize = seen.iter().map(|(n, _)| n).sum();
+        assert_eq!(streamed as u64, total, "every byte of the body is streamed");
+        let during: Vec<_> = seen
+            .iter()
+            .filter(|(_, p)| p.phase == "uploading")
+            .map(|(_, p)| (p.files_sent, p.current.clone()))
+            .collect();
+        assert!(
+            during.contains(&(0, Some("a.bin".into()))),
+            "the first file is named while it goes out: {during:?}"
+        );
+        assert!(during.contains(&(1, Some("b.bin".into()))), "{during:?}");
+        let last = &seen.last().unwrap().1;
+        assert_eq!(last.phase, "validating", "{last:?}");
+        assert_eq!(
+            (last.sent, last.total, last.files_sent, &last.current),
+            (total, total, 2, &None)
+        );
+        assert!(last.sent_ms >= last.started_ms);
+        progress.finish(false);
+        assert_eq!(progress.snapshot().phase, "failed");
+    }
+
+    /// What the node script writes on stderr: progress lines are consumed,
+    /// anything else is not mistaken for one.
+    #[test]
+    fn node_progress_lines_parse_and_prose_does_not() {
+        assert_eq!(
+            parse_progress_line(r#"{"sent":1024,"total":4096,"file":2}"#),
+            Some((1024, 4096, Some(2)))
+        );
+        assert_eq!(
+            parse_progress_line(r#"{"sent":10,"total":4096,"file":null}"#),
+            Some((10, 4096, None))
+        );
+        assert_eq!(parse_progress_line("fetch failed"), None);
+        assert_eq!(parse_progress_line(r#"{"status":200}"#), None);
+    }
+
+    async fn serve(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        base
+    }
+
+    /// The look-ahead: a hundred cids travel as two questions, the files
+    /// the server holds stay home, the entity and the rest go, the
+    /// multipart never names a file that stayed, and the progress carries
+    /// the sentence about it.
+    #[tokio::test]
+    async fn files_the_server_already_holds_stay_home() {
+        use axum::extract::Query;
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = Router::new().route(
+            "/available-content",
+            get(move |Query(q): Query<Vec<(String, String)>>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let answer: Vec<Value> = q
+                        .iter()
+                        .filter(|(k, _)| k == "cid")
+                        .map(|(_, c)| json!({ "cid": c, "available": c.ends_with('0') }))
+                        .collect();
+                    Json(answer)
+                }
+            }),
+        );
+        let base = serve(app).await;
+        let files: Vec<(String, String, Vec<u8>)> = (0..100u8)
+            .map(|i| {
+                (
+                    format!("f{i}.bin"),
+                    format!("bafy{i}"),
+                    vec![i; 10 + i as usize],
+                )
+            })
+            .collect();
+        let cids: Vec<&str> = files.iter().map(|(_, h, _)| h.as_str()).collect();
+        let have = stored_cids(&format!("{base}/"), &cids).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "two batches of eighty");
+        let (send, reuse) = split_stored(&files, &have);
+        assert_eq!(
+            (reuse.reused_files, reuse.upload_files),
+            (10, 90),
+            "{have:?}"
+        );
+        assert_eq!(
+            reuse.reused_bytes,
+            (0..100u64).step_by(10).map(|i| 10 + i).sum::<u64>()
+        );
+        assert_eq!(reuse.upload_bytes, payload_len(0, &send));
+        assert!(matches!(send, Cow::Owned(_)));
+        assert!(send.iter().all(|(_, h, _)| !h.ends_with('0')));
+        let chain = json!([{ "type": "SIGNER", "payload": "0xabc", "signature": "" }]);
+        let parts = multipart_parts("XYZ", "bafyentity", b"{}", &send, &chain);
+        let wire: Vec<u8> = parts.iter().flat_map(|(_, b)| b.clone()).collect();
+        let text = String::from_utf8_lossy(&wire);
+        assert!(
+            text.contains("name=\"bafyentity\"; filename=\"bafyentity\""),
+            "the entity always travels"
+        );
+        assert!(text.contains("name=\"bafy11\"; filename=\"bafy11\""));
+        assert!(
+            !text.contains("name=\"bafy10\""),
+            "a stored file never travels"
+        );
+        let progress = UploadProgress::default();
+        progress.checking(2, &files);
+        assert_eq!(
+            (progress.snapshot().phase, progress.snapshot().files),
+            ("checking", 100)
+        );
+        progress.begin(2, &send, reuse);
+        let p = progress.snapshot();
+        assert_eq!((p.phase, p.files), ("staging", 90));
+        assert_eq!(p.reuse.as_deref(), Some(reuse.sentence().as_str()));
+        assert_eq!(p.total, 2 + payload_len(0, &send));
+    }
+
+    /// A server that cannot answer, or answers outside 2xx, keeps nothing
+    /// home: everything travels, the common case copies no bytes, and the
+    /// progress has nothing to say about it.
+    #[tokio::test]
+    async fn an_unanswered_look_ahead_sends_everything() {
+        use axum::routing::get;
+        use axum::Router;
+        let app = Router::new().route(
+            "/available-content",
+            get(|| async { (axum::http::StatusCode::BAD_GATEWAY, "edge") }),
+        );
+        let base = serve(app).await;
+        assert!(stored_cids(&base, &["bafya"]).await.is_empty());
+        assert!(
+            stored_cids("http://127.0.0.1:9", &["bafya"])
+                .await
+                .is_empty(),
+            "a closed port"
+        );
+        let files: Vec<(String, String, Vec<u8>)> =
+            vec![("a.bin".into(), "bafya".into(), vec![1u8; 3])];
+        let (send, reuse) = split_stored(&files, &HashSet::new());
+        assert_eq!(
+            (reuse.reused_files, reuse.upload_files, reuse.upload_bytes),
+            (0, 1, 3)
+        );
+        assert!(matches!(send, Cow::Borrowed(_)));
+        let progress = UploadProgress::default();
+        progress.begin(2, &send, reuse);
+        assert_eq!(progress.snapshot().reuse, None, "nothing stayed home");
+    }
+
+    /// The one sentence every surface says, the answer parser, and the
+    /// switch that sends everything.
+    #[test]
+    fn the_split_sentence_the_answer_and_the_upload_all_switch() {
+        let tally = |held: &[bool]| Reuse::tally(held.iter().map(|h| (*h, 2_500_000)));
+        assert_eq!(
+            tally(&[true, true, true, true, false]).sentence(),
+            "4 of 5 files are already on the server — 1 to upload (2.5 MB)"
+        );
+        assert_eq!(
+            tally(&[true; 10]).sentence(),
+            "All 10 files are already on the server (25.0 MB), republishing only updates the deployment timestamp"
+        );
+        assert_eq!(
+            tally(&[false]).sentence(),
+            "All 1 file upload (2.5 MB) — the server has none of them yet"
+        );
+        assert_eq!(
+            parse_available(
+                r#"[{"cid":"a","available":true},{"cid":"b","available":false},{"cid":"c"}]"#
+            ),
+            vec!["a".to_string()]
+        );
+        assert!(parse_available("<html>challenge</html>").is_empty());
+        assert!(parse_available(r#"{"cid":"a","available":true}"#).is_empty());
+        assert!(!upload_all_from(None));
+        assert!(!upload_all_from(Some("".into())));
+        assert!(!upload_all_from(Some("0".into())));
+        assert!(upload_all_from(Some("1".into())));
+        assert_eq!(body_when_ok(Some(200), Some("x")).as_deref(), Some("x"));
+        assert_eq!(body_when_ok(Some(403), Some("x")), None);
+        assert_eq!(body_when_ok(None, Some("x")), None);
     }
 }

@@ -501,7 +501,7 @@ pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<Checked
         // background blocks on dark terminals. Keep the gutter foreground-only.
         let body = body.replace("\x1b[7m", "\x1b[90m");
         let body = body.trim();
-        let count = body.matches("error TS").count();
+        let count = ts_error_count(body);
         let what = match count {
             0 => "type check failed".to_string(),
             n => format!("type check failed \u{2014} {n} error{}", plural(n as u64)),
@@ -514,6 +514,13 @@ pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<Checked
     }
     crate::check_stamp::record(project, &tsc);
     Ok(Checked::Ran)
+}
+
+/// How many `error TSnnnn` diagnostics a tsc report carries. Pretty output
+/// colours "error" and " TS2339: " separately, so the count reads through the
+/// colour codes.
+fn ts_error_count(body: &str) -> usize {
+    crate::start::ansi::strip(body).matches("error TS").count()
 }
 
 pub fn find_node() -> Option<PathBuf> {
@@ -539,6 +546,15 @@ pub fn require_node(purpose: &str, without: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn the_error_count_reads_through_tsc_colour_codes() {
+        let plain = "src/a.ts(1,1): error TS2339: x\nsrc/a.ts(2,1): error TS2551: y\n";
+        assert_eq!(ts_error_count(plain), 2);
+        let pretty = "\x1b[96msrc/a.ts\x1b[0m:\x1b[93m9\x1b[0m - \x1b[91merror\x1b[0m\x1b[90m TS2339: \x1b[0mx\n";
+        assert_eq!(ts_error_count(pretty), 1);
+        assert_eq!(ts_error_count("Found 0 errors"), 0);
+    }
 
     #[test]
     fn a_recovered_check_says_so_and_a_quick_pass_stays_quiet() {

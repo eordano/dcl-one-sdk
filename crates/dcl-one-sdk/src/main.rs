@@ -259,7 +259,7 @@ enum Command {
             short = 't',
             long = "target-server",
             alias = "target",
-            help = "Server to publish to, for this run only: a catalyst domain (its /about names the content server) or a content-server URL with its scheme, used verbatim. Default, from the scene: a worldConfiguration.name goes to https://worlds-content-server.decentraland.org, parcels to a healthy catalyst of the public Genesis rotation. DCL_ONE_SDK_TARGET_SERVER is the same setting from the environment"
+            help = "Server to publish to, for this run only: a catalyst domain (its /about names the content server) or a content-server URL with its scheme, used verbatim; a scene that names a world sends it to a worlds server, used verbatim too (a worlds server answers /status, not /about). Default, from the scene: a worldConfiguration.name goes to https://worlds-content-server.decentraland.org, parcels to a healthy catalyst of the public Genesis rotation. DCL_ONE_SDK_TARGET_SERVER is the same setting from the environment"
         )]
         target: Option<String>,
         #[arg(

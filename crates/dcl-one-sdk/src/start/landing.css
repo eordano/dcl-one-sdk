@@ -175,7 +175,8 @@ a.bar__acct { border-radius: var(--r-pill); }
 .tgt:has(.jn2__tab-r[value="world"]:checked) .tgt__pane--world,
 .tgt:has(.jn2__tab-r[value="land"]:checked) .tgt__pane--land,
 .tgt:has(.jn2__tab-r[value="multi"]:checked) .tgt__pane--multi,
-.tgt:has(.jn2__tab-r[value="history"]:checked) .tgt__pane--history { display: flex; }
+.tgt:has(.jn2__tab-r[value="history"]:checked) .tgt__pane--history,
+.tgt:has(.jn2__tab-r[value="help"]:checked) .tgt__pane--help { display: flex; }
 .tgt__pane > .jn2__col { padding: var(--s-5) var(--s-6) var(--s-6); }
 .tgt__pane--multi .jn2__body { grid-template-columns: minmax(0,3fr) minmax(0,2fr); }
 .lay__swatch--ws { background: var(--fill-3); border: 1px solid var(--line-ctl); }
@@ -298,9 +299,7 @@ body.editing .scene__desc:empty::before { content: attr(data-hint); color: var(-
 .lay__left, .lay__rail { padding: var(--s-4) var(--s-6) var(--s-5); }
 .lay__rail { border-left: 1px solid var(--line); }
 .lay__swatch { width: 12px; height: 12px; border-radius: var(--s-1); }
-.lay__swatch--base { background: var(--brand); }
-.lay__swatch--in { background: var(--fill-3); border: 1px solid var(--line); }
-.lay__swatch--add { border: 1px dashed var(--line-ctl); }
+.lay__swatch--in { background: var(--brand); }
 .lay__swatch--area { border: 2px solid var(--brand-ink); }
 .lay__size { margin-left: auto; color: var(--ink-45); }
 .lay__map {
@@ -318,11 +317,10 @@ body.editing .scene__desc:empty::before { content: attr(data-hint); color: var(-
   grid-auto-rows: var(--lay-pitch);
 }
 .lay__cell { border-radius: var(--s-1); }
-.lay__cell--in { background: var(--fill-2); border: 1px solid var(--fill-3); }
-.lay__cell--base { background: var(--brand); box-shadow: 0 0 12px var(--brand-line); }
+.lay__cell--in, .lay__cell--base { background: var(--brand); }
 .lay__cell--add { border: 1px dashed var(--line); visibility: hidden; }
 body.editing .lay__cell--add { visibility: visible; }
-body.editing .lay--parcels .lay__cell--in:hover { background: var(--fill-4); }
+body.editing .lay--parcels .lay__cell--in:hover { background: var(--brand-cta-hover); }
 body.editing .lay--parcels .lay__cell--add:hover { border-color: var(--ink-45); background: var(--fill-1); }
 body.editing .lay--spawns .lay__grid { cursor: crosshair; }
 body.editing .lay--spawns .lay__cell--add { opacity: .5; }
@@ -405,6 +403,21 @@ body.editing .lay__hint { display: block; }
 .reqs .st { color: var(--ink-45); }
 #sign-panel .jn__cta { margin-top: var(--s-3); }
 .sign-status { white-space: pre-wrap; }
+.dep__cid { display: block; font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink-6); overflow-wrap: anywhere; margin-bottom: var(--s-3); }
+/* The upload, drawn large: the number is the thing being waited on. */
+.sign-progress { margin-top: var(--s-4); display: grid; gap: var(--s-2); max-width: var(--measure); }
+.sign-progress__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-3); }
+.sign-progress__big { font-size: var(--fs-24); font-weight: var(--fw-bold); line-height: var(--lh-tight); color: var(--text); font-variant-numeric: tabular-nums; text-wrap: balance; }
+.sign-progress__pct { font-size: var(--fs-15); color: var(--ink-45); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sign-progress__bar { height: 10px; border-radius: var(--r-pill); background: var(--fill-3); overflow: hidden; }
+.sign-progress__fill { height: 100%; width: 0; border-radius: inherit; background: var(--brand-cta); transition: width .25s var(--ease-out); }
+.sign-progress--validating .sign-progress__fill, .sign-progress--done .sign-progress__fill { background: var(--success); }
+.sign-progress--failed .sign-progress__fill { background: var(--error); }
+.sign-progress--validating .sign-progress__bar { background-image: linear-gradient(90deg, transparent 0 40%, rgba(255,255,255,.18) 50%, transparent 60% 100%); background-size: 200% 100%; animation: sign-progress-sweep 1.4s linear infinite; }
+@keyframes sign-progress-sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .sign-progress--validating .sign-progress__bar { animation: none; } .sign-progress__fill { transition: none; } }
+.sign-progress__meta { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3); color: var(--ink-6); font-size: var(--fs-14); line-height: var(--lh-ui); font-variant-numeric: tabular-nums; }
+.sign-progress__file { font-family: var(--font-mono); color: var(--ink-85); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 .cover-edit { display: block; }
 body.editing .cover-edit:hover .cover { border-color: var(--ink-45); }
@@ -506,3 +519,16 @@ body.editing .cover-edit:hover .cover { border-color: var(--ink-45); }
   .drawer[open] > summary { border-bottom: 1px solid var(--line); }
   .scene, .jn, .panel { break-inside: avoid; }
 }
+
+
+/* Colour a build's own output kept (tsc, esbuild): the failure panel's spans. */
+.ansi-b { font-weight: var(--fw-semibold); }
+.ansi-d { opacity: .72; }
+.ansi-30, .ansi-90 { color: var(--ink-6); }
+.ansi-31, .ansi-91 { color: #e5484d; }
+.ansi-32, .ansi-92 { color: #30a46c; }
+.ansi-33, .ansi-93 { color: #d4a72c; }
+.ansi-34, .ansi-94 { color: #3e86f0; }
+.ansi-35, .ansi-95 { color: #c65ad3; }
+.ansi-36, .ansi-96 { color: #1fa5b8; }
+.ansi-37, .ansi-97 { color: inherit; }

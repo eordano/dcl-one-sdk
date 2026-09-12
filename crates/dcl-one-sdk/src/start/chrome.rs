@@ -121,7 +121,7 @@ fn pgnav(prefix: &str, nav: &Nav) -> String {
         // inert without one) and the Decentraland sign-in, whose form POST
         // works with no script at all.
         None => out.push_str(&format!(
-            r#"<span class="bar__acct bar__acct--split"><button class="bar__cta" id="bar-wallet" type="button">Connect Wallet</button><form method="post" action="{action}"><input type="hidden" name="token" value="{tok}"><button class="bar__cta" type="submit">Connect with DCL</button></form></span>"#,
+            r#"<span class="bar__acct bar__acct--split"><button class="bar__cta" id="bar-wallet" type="button" data-wallet>Connect Wallet</button><form method="post" action="{action}"><input type="hidden" name="token" value="{tok}"><button class="bar__cta" type="submit">Connect with DCL</button></form></span>"#,
             action = esc(&format!("{prefix}/target/connect")),
             tok = esc(nav.token),
         )),

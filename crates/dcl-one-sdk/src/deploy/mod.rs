@@ -9,13 +9,14 @@ pub(crate) use net::ENV_LOCK;
 pub use net::{
     build_delete_payload, configured_target_server, encode_segment, forget_remembered_target,
     jump_in_url, non_upstream_note, play_url, sanitize_catalyst_url, scenes_on_other_parcels,
-    send_world_delete, simple_auth_chain, upload_entity, PermissionGate, WorldScene,
+    send_world_delete, simple_auth_chain, upload_entity, PermissionGate, Reuse, WorldScene,
     WORLDS_CONTENT_SERVER,
 };
 pub(crate) use net::{
     client, denied_parcels_in, deployment_permission_in_doc, entity_content_hashes, entity_title,
-    host_of, parse_world_scenes, read_server_message, refusal, send_text, unreachable_server,
-    upload_entity_to, with_headers, DocAnswer, UploadDestination, VERBOSE_HINT,
+    host_of, parse_world_scenes, read_server_message, refusal, send_text, stored_cids,
+    unreachable_server, upload_entity_to, with_headers, DocAnswer, ProgressState,
+    UploadDestination, UploadProgress, VERBOSE_HINT,
 };
 pub use run::{deploy, load_signer};
 pub use unpublish::{unpublish, UnpublishOptions};
@@ -543,6 +544,7 @@ fn case_collisions(rels: &[String]) -> Vec<(String, String)> {
 pub fn preview(project: &Project) -> Result<DeployPreview> {
     let root = &project.root;
     let (publishable, mut ignored) = collect_files(root)?;
+    let publishable = with_release_files(root, publishable);
     ignored.sort();
     let main = match project.main_output() {
         Err(e) => MainBundle::Unusable(format!("{e}")),
@@ -555,7 +557,9 @@ pub fn preview(project: &Project) -> Result<DeployPreview> {
     let mut files: Vec<(String, Option<u64>)> = publishable
         .iter()
         .map(|rel| {
-            let len = std::fs::metadata(root.join(rel)).ok().map(|m| m.len());
+            let len = std::fs::metadata(payload_path(root, rel))
+                .ok()
+                .map(|m| m.len());
             (rel.clone(), len)
         })
         .collect();
@@ -718,19 +722,35 @@ fn release_rel_files(release_root: &Path) -> Vec<String> {
     out
 }
 
-pub fn prepare(project: &Project) -> Result<Prepared> {
-    let mut rel_paths = collect_publishable_files(&project.root)?;
-    // rustc keeps debug and release artifacts apart, and so does this tree:
-    // the watcher owns the in-place dev bundle, a deploy's production build
-    // lands under RELEASE_OUT, and the payload prefers the release copy of
-    // any path that has one. The two builds stop clobbering one file — and a
-    // publish stops rewriting the very tree the page just fingerprinted.
-    let release_root = project.root.join(crate::build::RELEASE_OUT);
-    for rel in release_rel_files(&release_root) {
-        if !rel_paths.contains(&rel) {
-            rel_paths.push(rel);
+/// The payload's paths: the tree's publishable files plus any the release
+/// build alone emits (a chunk only the production build splits out).
+fn with_release_files(root: &Path, mut rels: Vec<String>) -> Vec<String> {
+    for rel in release_rel_files(&root.join(crate::build::RELEASE_OUT)) {
+        if !rels.contains(&rel) {
+            rels.push(rel);
         }
     }
+    rels
+}
+
+/// Where a payload path is read from. rustc keeps debug and release
+/// artifacts apart, and so does this tree: the watcher owns the in-place dev
+/// bundle, a deploy's production build lands under RELEASE_OUT, and the
+/// payload prefers the release copy of any path that has one. The two
+/// builds stop clobbering one file — and a publish stops rewriting the very
+/// tree the page just fingerprinted. Every look at the payload — the sizes
+/// the preview states, the hashes the forecast asks about, the bytes the
+/// deploy signs — goes through here, so they describe the same file.
+pub fn payload_path(root: &Path, rel: &str) -> PathBuf {
+    let release = root.join(crate::build::RELEASE_OUT).join(rel);
+    match release.is_file() {
+        true => release,
+        false => root.join(rel),
+    }
+}
+
+pub fn prepare(project: &Project) -> Result<Prepared> {
+    let rel_paths = with_release_files(&project.root, collect_publishable_files(&project.root)?);
     let main = project.main_output()?;
     if !rel_paths.iter().any(|r| r == &main) {
         return Err(UserError::new(
@@ -750,11 +770,7 @@ pub fn prepare(project: &Project) -> Result<Prepared> {
         .into());
     }
     let hashed = crate::scene::parallel_map(&rel_paths, |rel| -> Result<_> {
-        let release = release_root.join(rel);
-        let p = match release.is_file() {
-            true => release,
-            false => project.root.join(rel),
-        };
+        let p = payload_path(&project.root, rel);
         let bytes =
             std::fs::read(&p).with_context(|| format!("reading content file {}", p.display()))?;
         if bytes.len() > MAX_FILE_SIZE_BYTES {
@@ -1523,5 +1539,25 @@ mod tests {
                 .any(|(r, _, _)| r.contains(".dcl-one")),
             "artifact paths never leak into the payload listing"
         );
+        // The preview sizes the same files the deploy signs: the release
+        // copy's bytes, and the release-only chunk in the list.
+        let preview = preview(&project).unwrap();
+        let len = |rel: &str| {
+            preview
+                .files
+                .iter()
+                .find(|(r, _)| r == rel)
+                .map(|(_, l)| *l)
+                .unwrap_or_else(|| panic!("{rel} missing from the preview"))
+        };
+        assert_eq!(len("bin/index.js"), Some("release".len() as u64));
+        assert_eq!(len("bin/scene.js"), Some("release-only".len() as u64));
+        assert_eq!(len("asset.glb"), Some("asset".len() as u64));
+        assert_eq!(preview.files.len(), prepared.files.len());
+        assert_eq!(
+            payload_path(&t.0, "bin/index.js"),
+            t.0.join(".dcl-one/release/bin/index.js")
+        );
+        assert_eq!(payload_path(&t.0, "asset.glb"), t.0.join("asset.glb"));
     }
 }

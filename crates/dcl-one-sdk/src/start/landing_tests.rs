@@ -9,11 +9,29 @@ use std::sync::Mutex;
 const LOCAL: &str = "http://127.0.0.1:8000";
 
 async fn scene_html(st: &AppState) -> String {
-    let resp = scene_page(st, &axum::http::HeaderMap::new());
+    let resp = scene_page(st, &axum::http::HeaderMap::new(), true);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// The scene page as a viewer on another machine receives it: the same
+/// card, plus the sentence explaining why its edits will not save.
+#[tokio::test]
+async fn an_off_host_viewer_of_the_scene_page_is_told_edits_will_not_save() {
+    let st = scene_state(json!({ "display": { "title": "Gather" } }));
+    let local = scene_html(&st).await;
+    assert!(!local.contains("hosted on another machine"), "{local}");
+    let resp = scene_page(&st, &axum::http::HeaderMap::new(), false);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let remote = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        remote.contains(r#"<p class="note lay__remote">This preview is hosted on another machine, so the shape, spawn points and permissions only save from there."#),
+        "{remote}"
+    );
 }
 
 fn landing_state(projects: Vec<Project>) -> AppState {
@@ -285,8 +303,8 @@ fn realm_carry_calls_only_loopback_loopback() {
         assert_eq!(realm_carry(loopback), Carry::Loopback, "{loopback}");
     }
     for routable in [
-        "http://192.168.1.9:8000",
-        "http://10.0.0.4:8000",
+        "http://192.168.1.5:8000",
+        "http://10.0.0.5:8000",
         "https://preview.example.org",
         "http://127.0.0.1.evil.example:8000",
     ] {
@@ -304,7 +322,7 @@ fn the_lan_target_drops_the_knobs_its_client_would_throw_away() {
     let page = |where_key: &str| {
         render_local(
             &st,
-            Some("http://192.168.1.9:8000"),
+            Some("http://192.168.1.5:8000"),
             &gather_knobs(&format!("{query}&where={where_key}")),
         )
     };
@@ -316,7 +334,7 @@ fn the_lan_target_drops_the_knobs_its_client_would_throw_away() {
 
     let lan = page(WHERE_LAN);
     let link = launch_href(&lan);
-    assert!(link.contains("192.168.1.9"), "the lan card is selected");
+    assert!(link.contains("192.168.1.5"), "the lan card is selected");
     for dropped in ["multi-instance", "hub=true", "mcp=true", "mcp-port"] {
         assert!(
             !link.contains(dropped),
@@ -897,7 +915,14 @@ fn the_layout_card_leads_with_info_and_counts_its_tabs() {
     assert!(card.contains(r#"<section class="lay__pane" data-pane="parcels" hidden><span class="knob__k">Scene bounds</span>"#));
     assert!(card.contains(r#"<section class="lay__pane" data-pane="spawns" hidden>"#));
     assert!(card.contains(r#"<section class="lay__pane" data-pane="perms" hidden>"#));
-    assert!(card.contains("32 × 16 m"), "{card}");
+    assert!(
+        card.contains(r#"<span class="lay__size">2 parcels · 32 × 16 m</span>"#),
+        "the size label counts parcels: {card}"
+    );
+    assert!(
+        !card.contains("lay__swatch--base") && !card.contains("lay__swatch--add") && !card.contains("lay-sempty"),
+        "the legend keeps only what the grid shows at rest, and the spawn pane carries no placeholder: {card}"
+    );
     assert!(card.contains(r#"<code>0,0 → 1,0</code>"#));
     assert!(card.contains("X 1 · Z 1 · Y 0"), "{card}");
     assert!(!card.contains("<form"), "the card rides no form");

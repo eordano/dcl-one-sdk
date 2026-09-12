@@ -1,6 +1,6 @@
 use super::*;
 use crate::deploy::WORLDS_CONTENT_SERVER;
-use crate::start::deploy_rights::{Holdings, ParcelRight, WorldRow};
+use crate::start::deploy_rights::{Holdings, LandScene, LandUse, ParcelRight, WorldRow};
 use crate::start::deploy_status::*;
 use axum::body::to_bytes;
 use axum::http::{header, StatusCode};
@@ -88,7 +88,7 @@ async fn served(st: &Arc<AppState>) -> String {
 }
 
 async fn served_target(st: &Arc<AppState>) -> String {
-    body_of(target_page(st, &HeaderMap::new()).await).await
+    body_of(target_page(st, &HeaderMap::new(), true).await).await
 }
 
 fn status(remote: Remote) -> LiveStatus {
@@ -322,8 +322,7 @@ fn the_destination_resolves_like_the_deploy_will() {
         json!({ "scene": { "parcels": ["85,40", "86,40", "85,41", "86,41"], "base": "85,40" } });
     let d = resolve_dest(&land, None, None);
     assert_eq!(d.headline, "Parcels 85,40\u{2013}86,41");
-    assert!(d.server_line.contains("Genesis City"), "{}", d.server_line);
-    assert_eq!(d.server_line, "on a public Genesis City catalyst");
+    assert_eq!(d.server_line, "on peer.decentraland.org");
     assert_eq!(d.base_pointer, "85,40");
     assert_eq!(d.read_bases, [GENESIS_READ]);
 
@@ -562,7 +561,7 @@ async fn the_reuse_hashes_are_the_publish_time_cids() {
     let print = fingerprint(&project.root, &p);
     let rels: Vec<String> = p.files.iter().map(|(rel, _)| rel.clone()).collect();
     let st = state(project.clone());
-    let hashes = cached_hashes(&st.deploy.caches, project.root.clone(), print, rels).await;
+    let hashes = cached_hashes(&st.deploy.caches, project.root.clone(), print.clone(), rels).await;
     let map = hashes.as_ref().as_ref().expect("hashing succeeds");
     assert_eq!(
         map.get("bin/index.js").map(String::as_str),
@@ -570,6 +569,22 @@ async fn the_reuse_hashes_are_the_publish_time_cids() {
         "same CID the deploy golden test pins for these bytes"
     );
     assert_eq!(map.len(), p.files.len(), "every readable file is hashed");
+    // A release copy is what the deploy signs, so it is what the forecast
+    // hashes — and its arrival moves the fingerprint.
+    let twin = project.root.join(".dcl-one/release/bin/index.js");
+    std::fs::create_dir_all(twin.parent().unwrap()).unwrap();
+    std::fs::write(&twin, "console.log(\"release\");\n").unwrap();
+    let p2 = deploy::preview(&project).unwrap();
+    let print2 = fingerprint(&project.root, &p2);
+    assert_ne!(print2, print, "the twin's arrival moves the print");
+    let rels: Vec<String> = p2.files.iter().map(|(rel, _)| rel.clone()).collect();
+    let hashes = cached_hashes(&st.deploy.caches, project.root.clone(), print2, rels).await;
+    let map = hashes.as_ref().as_ref().expect("hashing succeeds");
+    assert_eq!(
+        map.get("bin/index.js").map(String::as_str),
+        Some(catalyrst_hashing::hash_bytes_v1(b"console.log(\"release\");\n").as_str()),
+        "the release copy's CID, as the deploy signs it"
+    );
 }
 
 #[test]
@@ -579,6 +594,9 @@ fn ago_reads_like_a_person() {
     assert_eq!(ago(now - 5 * 60_000, now), "5 minutes ago");
     assert_eq!(ago(now - 3 * 3_600_000, now), "3 hours ago");
     assert_eq!(ago(now - 3 * 86_400_000, now), "3 days ago");
+    assert_eq!(ago(now - 59 * 86_400_000, now), "59 days ago");
+    assert_eq!(ago(now - 95 * 86_400_000, now), "3 months ago");
+    assert_eq!(ago(now - 1925 * 86_400_000, now), "5 years ago");
     assert_eq!(
         ago(now + 60_000, now),
         "just now",
@@ -602,7 +620,7 @@ fn the_run_region_marks_its_state_for_the_script_and_the_no_js_refresh() {
             "abc123".into(),
         )
     };
-    let html = run_region_for("/t/abc", Some(&run), None, Some(PANEL));
+    let html = run_region_for("/t/abc", Some(&run), Some(PANEL));
     assert!(
         html.contains(r#"<noscript><meta http-equiv="refresh" content="2"></noscript>"#),
         "{html}"
@@ -617,7 +635,7 @@ fn the_run_region_marks_its_state_for_the_script_and_the_no_js_refresh() {
     );
 
     run.signing = None;
-    let html = run_region_for("/t/abc", Some(&run), None, None);
+    let html = run_region_for("/t/abc", Some(&run), None);
     assert!(!html.contains("sign-panel"), "{html}");
     assert!(
         html.contains("wallet hand-off appears here"),
@@ -626,32 +644,40 @@ fn the_run_region_marks_its_state_for_the_script_and_the_no_js_refresh() {
     run.signing = Some("/deploy".into());
 
     run.state = RunState::Done("Deployed bafy (HTTP 200)".into());
-    let html = run_region_for(
-        "",
-        Some(&run),
-        Some("https://decentraland.org/play/?realm=w.dcl.eth"),
-        None,
-    );
+    let html = run_region_for("", Some(&run), None);
     assert!(!html.contains("http-equiv"), "{html}");
     assert!(!html.contains("data-signing"), "{html}");
     assert!(html.contains(r#"data-state="done""#), "{html}");
     assert!(html.contains("Published"), "{html}");
-    assert!(html.contains(">Jump in</a>"), "{html}");
+    assert!(
+        html.contains(r#"<span class="dep__cid">bafy</span>"#)
+            && !html.contains("HTTP 200")
+            && !html.contains("Uploaded to")
+            && !html.contains("Deployed bafy"),
+        "one finished state: the id, not the log line: {html}"
+    );
+    run.state = RunState::Done("Deployed bafy to peer.example (HTTP 201)".into());
+    let html = run_region_for("", Some(&run), None);
+    assert!(
+        html.contains(r#"<p class="note">https://worlds-content-server.decentraland.org on peer.example</p><span class="dep__cid">bafy</span>"#),
+        "{html}"
+    );
+    assert!(!html.contains("Jump in"), "Jump in is the footer's: {html}");
 
     run.state = RunState::Failed("the content server rejected it".into());
-    let html = run_region_for("", Some(&run), None, None);
+    let html = run_region_for("", Some(&run), None);
     assert!(!html.contains("http-equiv"), "{html}");
     assert!(html.contains(r#"data-state="failed""#), "{html}");
     assert!(html.contains("Deploy failed"), "{html}");
     assert!(html.contains("panel--warn"), "{html}");
 
     run.state = RunState::Stale(vec!["assets/model.glb".into()]);
-    let html = run_region_for("", Some(&run), None, None);
+    let html = run_region_for("", Some(&run), None);
     assert!(html.contains(r#"data-state="stale""#), "{html}");
     assert!(html.contains("Nothing was published"), "{html}");
     assert!(html.contains("assets/model.glb"), "{html}");
     assert_eq!(
-        run_region_for("", None, None, None),
+        run_region_for("", None, None),
         r#"<div id="run-status" data-state="idle"></div>"#,
         "no run is still a region, so the script always has its element"
     );
@@ -712,9 +738,116 @@ async fn the_card_names_the_destination_once_and_the_bare_command() {
     let p = deploy::preview(&project).unwrap();
     let status = LiveStatus::unknown("Live checks are off for this run");
     let html = card(
-        "", "tok", "Gather", &dest, &p, &status, "fp", None, None, false, "",
+        "",
+        "tok",
+        "Gather",
+        &dest,
+        &p,
+        &status,
+        "fp",
+        None,
+        None,
+        Phase::Idle,
+        "",
     );
     assert!(html.contains("dcl-one-sdk deploy</code>"), "{html}");
+    assert!(html.contains("live state unknown"), "{html}");
+    assert!(
+        html.contains(&format!("· {} files · ", p.files.len())),
+        "{html}"
+    );
+    // The head states the forecast's split in the upload's words once the
+    // server has answered — the same sentence the /target column says.
+    let forecast = LiveStatus {
+        remote: Remote::Empty,
+        reuse: Some(reuse(2, 2000, 1, 79)),
+    };
+    let told = card(
+        "",
+        "tok",
+        "Gather",
+        &dest,
+        &p,
+        &forecast,
+        "fp",
+        None,
+        None,
+        Phase::Idle,
+        "",
+    );
+    assert!(
+        told.contains(
+            "· 2 of 3 files are already on the server — 1 to upload (79 bytes) · first publish"
+        ),
+        "{told}"
+    );
+    // Published: the head says so, Jump in is the call to action, another
+    // run is the quiet button, and the explaining stops — one finished
+    // state, not two.
+    let done = card(
+        "",
+        "tok",
+        "Gather",
+        &dest,
+        &p,
+        &status,
+        "fp",
+        None,
+        None,
+        Phase::Done(Some("https://decentraland.org/play/?realm=my.dcl.eth")),
+        "",
+    );
+    assert!(
+        done.contains(
+            r#"<a class="jn__cta" href="https://decentraland.org/play/?realm=my.dcl.eth">Jump in</a>"#
+        ) && done.contains(r#"<button class="knob__go" type="submit">Publish again</button>"#),
+        "{done}"
+    );
+    assert_eq!(
+        done.matches("jn__cta").count(),
+        1,
+        "one call to action: {done}"
+    );
+    let no_realm = card(
+        "",
+        "tok",
+        "Gather",
+        &dest,
+        &p,
+        &status,
+        "fp",
+        None,
+        None,
+        Phase::Done(None),
+        "",
+    );
+    assert!(
+        no_realm.contains(r#"<button class="jn__cta" type="submit">Publish again</button>"#)
+            && !no_realm.contains("Jump in"),
+        "without a realm url the run button keeps the call to action: {no_realm}"
+    );
+    assert!(
+        !done.contains("dcl-one-sdk deploy") && !done.contains("Publish signs with"),
+        "{done}"
+    );
+    assert!(
+        done.contains("just published") && !done.contains("live state unknown"),
+        "{done}"
+    );
+    let running = card(
+        "",
+        "tok",
+        "Gather",
+        &dest,
+        &p,
+        &status,
+        "fp",
+        None,
+        None,
+        Phase::Running,
+        "",
+    );
+    assert!(!running.contains("jn__cta"), "no button mid-run: {running}");
     assert!(html.contains("World my.dcl.eth"), "{html}");
     assert!(
         !html.contains(r#"name="target_content""#),
@@ -755,18 +888,37 @@ async fn the_target_page_separates_destinations_from_world_details_and_history()
         html.contains(r#"value="world" checked"#),
         "a world scene lands on the World tab: {html}"
     );
-    assert_eq!(html.matches("name=\"tgt\"").count(), 2);
+    assert_eq!(html.matches("name=\"tgt\"").count(), 5);
     assert!(
-        !html.contains("name=\"tgt\" value=\"multi\"")
-            && !html.contains("name=\"tgt\" value=\"history\"")
+        html.contains("name=\"tgt\" value=\"multi\">Multiscene world")
+            && html.contains("name=\"tgt\" value=\"history\">History")
+            && html.contains("name=\"tgt\" value=\"help\">Help"),
+        "the design's four segments plus Help: {html}"
     );
-    assert!(html.contains(
-        "<details class=\"tgt__advanced\"><summary>Multi-Scene World (Advanced)</summary>"
-    ));
-    assert!(html.contains("<details class=\"tgt__history\"><summary>Deployment history</summary>"));
-    for pane in ["tgt__pane--world", "tgt__pane--land"] {
+    assert!(
+        !html.contains("<details class=\"tgt__advanced\"")
+            && !html.contains("<details class=\"tgt__history\""),
+        "Multiscene and History are tabs, not folds: {html}"
+    );
+    for pane in [
+        "tgt__pane--world",
+        "tgt__pane--land",
+        "tgt__pane--multi",
+        "tgt__pane--history",
+    ] {
         assert!(html.contains(pane), "missing {pane}: {html}");
     }
+    let multi = html
+        .split("tgt__pane--multi\">")
+        .nth(1)
+        .unwrap()
+        .split("tgt__pane--history\">")
+        .next()
+        .unwrap();
+    assert!(
+        !multi.contains("/target/point") && !multi.contains("/target/base"),
+        "a view of the destination carries no select form: {multi}"
+    );
     assert!(
         html.contains(r#"<span class="knob__k">On the server now</span>"#)
             && html.contains(r#"<span class="knob__k">Upload</span>"#),
@@ -1166,8 +1318,17 @@ async fn the_bar_connects_an_account_and_the_page_checks_with_it() {
         "no account, no card row — the bar is the whole story: {html}"
     );
     assert!(
-        html.contains("Connect an account above"),
-        "the world list says what it is waiting on: {html}"
+        html.contains("Connect an account to list") && html.matches(" data-wallet>").count() >= 2,
+        "the world list says what it is waiting on and repeats the bar's connect pill: {html}"
+    );
+    assert!(
+        !html.contains("hosted on another machine"),
+        "the hosting machine sees no read-only notice: {html}"
+    );
+    let off_host = body_of(target_page(&st, &HeaderMap::new(), false).await).await;
+    assert!(
+        off_host.contains(r#"<p class="note tgt__remote">This preview is hosted on another machine, so choosing a destination and connecting an account only work from there."#),
+        "an off-host viewer is told why the forms will not act: {off_host}"
     );
 
     *address_slot(&st) = Some(ADDR.to_string());
@@ -1278,7 +1439,11 @@ async fn a_finished_run_lands_in_history_and_survives_a_restart() {
     let pane = history_rows_pane(&history_rows(&st, &root));
     assert!(pane.contains("World w.dcl.eth"), "{pane}");
     assert!(pane.contains("published"), "{pane}");
-    assert!(pane.contains("Deployed bafy (HTTP 200)"), "{pane}");
+    assert!(
+        pane.contains(r#"<span class="tgt__history-cid" title="bafy">bafy</span>"#)
+            && pane.contains(r#"<span class="tgt__history-http">HTTP 200</span>"#),
+        "the published line is split into its entity and status chips: {pane}"
+    );
     assert!(
         pane.contains("rejected this deployment (HTTP 400)") && pane.contains("must be number"),
         "a failure row says why: {pane}"
@@ -1549,6 +1714,76 @@ async fn a_drifted_pending_run_is_reminted_before_the_wallet_sees_it() {
     assert_eq!(r.print, "bbbb");
     assert!(r.auto, "provenance survives the re-mint");
     assert!(r.signing.is_none(), "the new build has not registered yet");
+}
+
+/// A payload that moves on every poll is a build writing into its own
+/// fingerprint: the chase ends after MAX_REMINTS and the run keeps the
+/// entity it has.
+#[tokio::test]
+async fn the_remint_chase_ends_after_max_remints() {
+    let (_dir, project) = gather("drift-cap");
+    let st = state(project);
+    claim(&st, "World w.dcl.eth".into(), false, "p0".into()).expect("free slot");
+    let registered = |st: &AppState| {
+        runs(st).as_mut().expect("held").signing = Some("/deploy".into());
+        *signer_slot(st) = Some(parked_signer());
+    };
+    registered(&st);
+    for i in 1..=MAX_REMINTS {
+        let print = format!("p{i}");
+        drift_reclaim(&st, "World w.dcl.eth".into(), &print)
+            .unwrap_or_else(|| panic!("re-mint {i} of {MAX_REMINTS}"));
+        assert_eq!(runs(&st).as_ref().expect("held").remints, i);
+        registered(&st);
+    }
+    assert!(
+        drift_reclaim(&st, "World w.dcl.eth".into(), "p-more").is_none(),
+        "past the cap, drift no longer re-mints"
+    );
+    assert!(
+        drift_reclaim(&st, "World w.dcl.eth".into(), "p-again").is_none(),
+        "and stays that way"
+    );
+    let slot = runs(&st);
+    let r = slot.as_ref().expect("the slot is still held");
+    assert_eq!(
+        r.print,
+        format!("p{MAX_REMINTS}"),
+        "the last minted run stands"
+    );
+    assert!(signer_slot(&st).is_some(), "its signer is kept");
+}
+
+/// Re-anchoring after a build refreshes the preview the polls read, so a
+/// file the build alone emits is in the polls' walk and the print they draw
+/// is the one the run was re-anchored to.
+#[tokio::test]
+async fn reanchoring_hands_the_polls_the_tree_as_the_build_left_it() {
+    let (_dir, project) = gather("reanchor");
+    let st = state(project.clone());
+    let before = cached_preview(&st, &project).await;
+    let before = before.as_ref().as_ref().expect("the walk succeeds");
+    assert!(
+        !before.files.iter().any(|(rel, _)| rel == "bin/extra.js"),
+        "no release-only chunk before the build"
+    );
+    claim(&st, "World w.dcl.eth".into(), false, "p0".into()).expect("free slot");
+    let twin = project.root.join(".dcl-one/release/bin/extra.js");
+    std::fs::create_dir_all(twin.parent().unwrap()).unwrap();
+    std::fs::write(&twin, "release-only").unwrap();
+    let print = reanchor_preview(&st).expect("a walk of the built tree");
+    let held = cached_preview(&st, &project).await;
+    let held = held.as_ref().as_ref().expect("the refreshed walk");
+    assert!(
+        held.files.iter().any(|(rel, _)| rel == "bin/extra.js"),
+        "the polls' walk lists what the build wrote: {:?}",
+        held.files
+    );
+    assert_eq!(
+        fingerprint(&project.root, held),
+        print,
+        "the polls draw the re-anchored print"
+    );
 }
 
 /// ...and it declines everywhere a re-mint would be wrong: a build still
@@ -1872,7 +2107,7 @@ fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
         ),
         ..Rights::unchecked(ADDR, "")
     };
-    let html = land_rights_col(Some(&rights));
+    let html = land_rights_col("", "token", Some(&rights));
     assert!(html.contains("Parcels you may publish to"), "{html}");
     assert!(
         html.contains("5,-3 \u{b7} 6,-3 \u{b7} 100,7"),
@@ -1900,12 +2135,121 @@ fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
         parcels_note: None,
         ..rights
     };
-    let html = land_rights_col(Some(&none));
+    let html = land_rights_col("", "token", Some(&none));
     assert!(
         !html.contains("Parcels you may publish to"),
         "no rights, no list: {html}"
     );
     assert!(!html.contains("parcel rights read from"), "{html}");
+}
+
+/// The LAND view carries the clustered picker: folded over the scene's own
+/// published parcels, a Move here on every other area, and the flat
+/// per-parcel list gone. A World target shows it too, open, because a scene
+/// coming back from a World has no LAND under it yet.
+#[test]
+fn the_land_view_offers_the_wallets_areas_to_move_to() {
+    let coords: Vec<_> = (12..16).flat_map(|y| (2..8).map(move |x| (x, y))).collect();
+    let pointers: Vec<_> = coords.iter().map(|(x, y)| format!("{x},{y}")).collect();
+    let (_dir, project) = scene(
+        "land-picker",
+        json!({
+            "display": { "title": "Hexabricks" },
+            "scene": { "base": "2,12", "parcels": pointers }
+        }),
+    );
+    let dest = resolve_dest(&project.scene_json, None, None);
+    let preview = deploy::preview(&project).unwrap();
+    let live = status(Remote::Unknown("dry run".into()));
+    let mut held = coords.clone();
+    held.extend([(40, 40), (41, 40), (40, 41), (41, 41), (90, -3)]);
+    let rights = Rights {
+        verdict: Verdict::May("rights held on all 24 declared parcels".into()),
+        holdings: Some(Holdings {
+            parcels: held.len() as i64,
+            estates: 0,
+            operated: 0,
+            coords: held.clone(),
+            owned: held.clone(),
+            operated_coords: Vec::new(),
+        }),
+        land_use: Some(LandUse {
+            scenes: vec![LandScene {
+                title: "Hexabricks".into(),
+                timestamp: Some(deploy::now_ms() - 18_000_000),
+                coords: coords.clone(),
+            }],
+            note: None,
+        }),
+        ..Rights::unchecked(ADDR, "")
+    };
+    let land_of = |card: &str| -> String {
+        card.split("tgt__pane--land\">")
+            .nth(1)
+            .unwrap()
+            .split("tgt__pane--multi\">")
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let land = land_of(&target_card(
+        "Hexabricks",
+        "/t/demo",
+        "test-token",
+        &dest,
+        &preview,
+        &live,
+        Some(&rights),
+        None,
+        &[],
+    ));
+    assert!(
+        land.contains(r#"<details class="tgt__picker"><summary>Your LAND · 3 areas · 5 empty parcels of 29</summary>"#),
+        "folded over its own published scene: {land}"
+    );
+    assert!(land.contains("Scene is here"), "{land}");
+    assert!(
+        land.contains(r#"name="base" value="40,40"><button class="deep__copy" type="submit">Move here</button>"#),
+        "{land}"
+    );
+    assert!(
+        land.contains("too small for this 24-parcel scene"),
+        "{land}"
+    );
+    assert!(
+        !land.contains("Set base here"),
+        "the flat per-parcel list is gone: {land}"
+    );
+
+    let (_dir, project) = scene(
+        "land-picker-world",
+        json!({
+            "display": { "title": "Hexabricks" },
+            "scene": { "base": "0,0", "parcels": ["0,0"] },
+            "worldConfiguration": { "name": "stage.dcl.eth" }
+        }),
+    );
+    let dest = resolve_dest(&project.scene_json, None, None);
+    let preview = deploy::preview(&project).unwrap();
+    let land = land_of(&target_card(
+        "Hexabricks",
+        "/t/demo",
+        "test-token",
+        &dest,
+        &preview,
+        &live,
+        Some(&rights),
+        None,
+        &[],
+    ));
+    assert!(
+        land.contains(r#"<details class="tgt__picker" open>"#),
+        "a World target shows the picker open: {land}"
+    );
+    assert!(
+        land.contains("Select LAND then makes Genesis City the target"),
+        "{land}"
+    );
 }
 
 #[test]
@@ -1987,10 +2331,14 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
             .split("tgt__pane--land\">")
             .nth(1)
             .unwrap()
-            .split("<details class=\"tgt__history\">")
+            .split("tgt__pane--multi\">")
             .next()
             .unwrap();
         assert!(land.contains("Selected destination: LAND · Base 2,12"));
+        assert!(
+            card.contains("The deploy target is Genesis City LAND. Multiscene applies to Worlds"),
+            "{card}"
+        );
         assert!(land.contains("action=\"/t/demo/target/base\""));
         assert!(land.contains("name=\"token\" value=\"test-token\""));
         assert_eq!(land.contains("href=\"/t/demo/deploy\""), !denied);
@@ -2000,8 +2348,31 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
             denied
         );
         assert!(
-            card.contains("Worlds you collaborate on")
-                && card.contains("Show 1 world with no scenes yet")
+            card.contains("Shared with you") && card.contains("Show 1 world with no scenes yet")
+        );
+        assert!(
+            land.contains(r#"<div class="tgt__map-head"><span class="knob__k">Map</span><div class="lay__legend">"#)
+                && land.contains(r#"><span>2,12</span></div>"#),
+            "the map card leads with its legend and prints coordinates in the cells: {land}"
+        );
+        assert_eq!(
+            land.contains(r#"title="Base parcel 2,12"><span>2,12</span></div>"#),
+            !denied,
+            "the base cell keeps its coordinates whichever class it wears: {land}"
+        );
+        assert!(
+            land.contains(r#"<details class="tgt__move"><summary><span class="tgt__coord tgt__coord--base">2,12</span><span class="deep__copy">Move scene</span></summary><form class="tgt__base""#),
+            "the base parcel is a chip; Move scene reveals the form: {land}"
+        );
+        assert_eq!(
+            land.contains("You can't publish to 1 of 24 parcels")
+                && land.contains(r#"<i class="tgt__bang" aria-hidden="true">!</i>"#),
+            denied,
+            "{land}"
+        );
+        assert!(
+            card.contains(r#"<span class="tgt__history-cid" title="bafy-test">bafy-test</span><span class="tgt__history-http">HTTP 200</span>"#),
+            "the published line splits into its chips: {card}"
         );
         // Optional snapshots for browser review, using the real renderer and CSS.
         if let Ok(dir) = std::env::var("DCL_TARGET_DESIGN_CAPTURE") {
@@ -2164,7 +2535,7 @@ fn world_selection_shows_coordinates_server_and_review_without_inferring_a_mode(
     );
     assert!(html.contains("Selected destination: World example.eth · Base 0,0"));
     assert!(html.contains("Publishing on custom.example.org"));
-    assert!(html.contains(r#"href="/t/demo/deploy">Review deployment"#));
+    assert!(html.contains(r#"href="/t/demo/deploy">Deploy <span"#));
     assert!(!html.contains("Deploy 0 changes"));
     assert!(!html.contains("· Multiscene World"));
     assert!(html.contains("assigned coordinates") && html.contains("Permission to visit a World"));

@@ -515,7 +515,7 @@ fn render(
 
 /// `/scene` — the layout card with an Info tab holding the scene hero, so
 /// every fact about the scene edits in one card under one sub-navigation.
-pub(super) fn scene_page(st: &AppState, headers: &HeaderMap) -> Response {
+pub(super) fn scene_page(st: &AppState, headers: &HeaderMap, local: bool) -> Response {
     let prefix = forwarded_prefix(headers);
     let projects = st.projects();
     let scene = scene_data(&projects);
@@ -530,9 +530,15 @@ pub(super) fn scene_page(st: &AppState, headers: &HeaderMap) -> Response {
     );
     let sections = format!(
         r##"  <section id="scene" class="sec">
+    {remote}
     {layout_card}
     {more_scenes}
   </section>"##,
+        remote = super::deploy_page::remote_notice(
+            local,
+            "lay__remote",
+            "the shape, spawn points and permissions only save from there"
+        ),
         layout_card = scene_layout_card(scene.json, &scene.grid, scene.base, scene.spawns, &info),
         more_scenes = more_scenes_chips(projects.get(1..).unwrap_or_default()),
     );

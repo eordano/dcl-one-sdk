@@ -305,7 +305,10 @@ The scene decides where it goes: a `worldConfiguration.name` goes to the
 public worlds server, parcels walk a rotation of public catalysts until one
 is healthy. `--target-server` overrides that for one run — a bare domain is a
 catalyst whose `/about` names the content server, a URL with a scheme is a
-content server used verbatim — and `DCL_ONE_SDK_TARGET_SERVER` is the same
+content server used verbatim, and a scene that names a world sends it to a
+worlds server, used verbatim too (a worlds server answers `/status`, never a
+catalyst's `/about`, so `--target-server https://worlds.example` publishes a
+World there as it is) — and `DCL_ONE_SDK_TARGET_SERVER` is the same
 override from the environment. Absent either, the scene's own default is two
 named constants a fork can point at its own realm:
 `deploy::net::DEFAULT_WORLDS_TARGET_SERVER` (the public worlds server) for a
@@ -319,6 +322,17 @@ the server otherwise. A `worldConfiguration` section that names no world is
 refused before anything is signed: a World needs the name, and a Genesis City
 catalyst refuses the section (ADR-173) — remove it (the /target page's "Point
 at Genesis City LAND" does this) or name the world.
+
+Only what the server lacks travels. Before the upload, `deploy` asks the
+content server which of the payload's hashes it already stores
+(`GET /available-content`, the check the upstream toolchain runs) and leaves
+those files out of the request — a republish after a one-texture edit sends
+the entity and that texture. The question goes by the same carrier as the
+upload (node, then curl, then reqwest), so a Cloudflare-fronted worlds server
+sees one fingerprint throughout; whatever goes unanswered is uploaded. The
+/target and /deploy pages forecast the same split with the same question, the
+terminal and the signing panel's progress say what stayed home in the same
+sentence, and `DCL_ONE_SDK_UPLOAD_ALL=1` sends everything regardless.
 
 Related: `unpublish` takes a scene down, `pack` builds the `.zip` a smart
 wearable is submitted as, and `world` reads and writes a world's settings and

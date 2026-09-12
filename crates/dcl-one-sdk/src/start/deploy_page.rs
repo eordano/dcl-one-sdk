@@ -39,8 +39,12 @@ pub(super) async fn route(
     page(&st, &headers, peer.ip().is_loopback()).await
 }
 
-pub(super) async fn target_route(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    target_page(&st, &headers).await
+pub(super) async fn target_route(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    target_page(&st, &headers, peer.ip().is_loopback()).await
 }
 
 /// The deploy entry's badge in the section nav, so a publish's liveness
@@ -61,6 +65,7 @@ const PAGE_CSS: &str = "
 .jn2__col > .knob__k + * { margin-top: calc(-1 * var(--s-2)); }
 .datum__unit + .datum__num { margin-left: var(--s-3); }
 .jn2__foot .note { flex-basis: 100%; }
+.jn2__foot .knob__go { align-self: auto; }
 .files .kv { grid-template-columns: minmax(0, 1fr) 8.5rem; }
 .files .k--file, .files .sz { font-size: var(--fs-13); }
 .files .sz {
@@ -88,7 +93,7 @@ const PAGE_CSS: &str = "
 .wl__n { display: inline-flex; align-items: center; gap: var(--s-2); min-width: 0; overflow-wrap: anywhere; }
 .wl__d { color: var(--ink-6); font-size: var(--fs-13); min-width: 0; }
 .files__more > summary { cursor: pointer; padding: var(--s-2-5) 0; color: var(--ink-6); font-size: var(--fs-13); border-top: 1px solid var(--line); }
-.dep__err { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow-y: auto; }
+.dep__err { white-space: pre; max-height: 24rem; overflow: auto; }
 .panel--ok { border-color: var(--success); }
 .panel--ok > h2 { color: var(--success); }
 .dep__ok { color: var(--success); }
@@ -218,6 +223,7 @@ pub(super) struct PastRun {
 const DETAIL_CAP: usize = 800;
 
 fn failure_detail(why: &str) -> String {
+    let why = &super::ansi::strip(why);
     let mut kept: Vec<&str> = why
         .lines()
         .filter(|l| !l.trim_start().starts_with("\u{2192} try:"))
@@ -371,6 +377,8 @@ struct Run {
     /// The payload fingerprint this run was claimed against. Empty for an
     /// adopted CLI signing, which the page never re-mints.
     print: String,
+    /// How many drift re-mints led to this run; [`MAX_REMINTS`] ends the chase.
+    remints: u32,
     state: RunState,
 }
 
@@ -383,10 +391,18 @@ impl Run {
             signing: None,
             auto,
             print,
+            remints: 0,
             state: RunState::Running,
         }
     }
 }
+
+/// Re-mints one pending run may go through. A payload that moves on every
+/// poll is not an author editing — it is a build writing into its own
+/// fingerprint, and one more build will not settle it — so past this the run
+/// keeps the entity it has, and the POST's own fingerprint check still
+/// refuses a stale page.
+const MAX_REMINTS: u32 = 5;
 
 /// One counter for every way a run comes to exist, so a re-mint can never
 /// collide with a claim.
@@ -412,25 +428,39 @@ pub(super) struct DeployForm {
     fingerprint: String,
 }
 
-fn modified_at(root: &Path, rel: &str) -> Option<std::time::SystemTime> {
-    std::fs::metadata(root.join(rel))
-        .and_then(|m| m.modified())
+/// Size and mtime (unix ms) of one file, or nothing when it is not there.
+fn stamp(path: &Path) -> Option<(u64, u128)> {
+    let m = std::fs::metadata(path).ok()?;
+    let mtime = m
+        .modified()
         .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_millis());
+    Some((m.len(), mtime))
 }
 
-/// What the page drew, in one line: every publishable path with its size and
-/// mtime, plus the bundle's state. Size alone misses the edit that changes a
-/// character and not the length.
+/// The two files a payload path may live in: the tree's own copy and its
+/// release twin under `RELEASE_OUT`. Both are stamped, so an edit the
+/// watcher lands in the tree moves the print (a pending run re-mints on
+/// that) and so does a fresh release build (the forecast's hashes are keyed
+/// on it, and they read the twin). Both come from disk, never from a held
+/// preview, so two prints of one tree agree whichever walk drew them.
+fn copies(root: &Path, rel: &str) -> [Option<(u64, u128)>; 2] {
+    [
+        stamp(&root.join(rel)),
+        stamp(&root.join(crate::build::RELEASE_OUT).join(rel)),
+    ]
+}
+
+/// What the page drew, in one line: every publishable path with the size and
+/// mtime of each copy it has, plus the bundle's state. Size alone misses the
+/// edit that changes a character and not the length.
 fn fingerprint(root: &Path, p: &deploy::DeployPreview) -> String {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     digest.update(format!("{:?}\n", p.main).as_bytes());
-    for (rel, len) in &p.files {
-        let mtime = modified_at(root, rel)
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        digest.update(format!("{rel}\u{1f}{len:?}\u{1f}{mtime}\n").as_bytes());
+    for (rel, _) in &p.files {
+        digest.update(format!("{rel}\u{1f}{:?}\n", copies(root, rel)).as_bytes());
     }
     hex(&digest.finalize()[..12])
 }
@@ -443,9 +473,13 @@ fn moved_since(root: &Path, p: &deploy::DeployPreview) -> Vec<String> {
         .files
         .iter()
         .filter(|(rel, _)| {
-            modified_at(root, rel)
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|e| e < Duration::from_secs(300))
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            copies(root, rel)
+                .iter()
+                .flatten()
+                .any(|(_, mtime)| now.saturating_sub(*mtime) < 300_000)
         })
         .map(|(rel, _)| rel.clone())
         .collect();
@@ -547,6 +581,25 @@ pub(super) async fn start(
     back
 }
 
+/// A fresh walk of the tree as a build left it, handed to the polls: the
+/// preview held for a run's duration is what every poll's print is drawn
+/// from, so it must list the files the build wrote (a release-only chunk is
+/// absent from a walk that predates the first build) or the print the run is
+/// re-anchored to and the print the polls draw never meet, and the run
+/// re-mints on every poll. Returns the print of that walk.
+fn reanchor_preview(st: &AppState) -> Option<String> {
+    let p = st.first_project()?;
+    let fresh = deploy::preview(&p).ok()?;
+    let print = fingerprint(&p.root, &fresh);
+    cache_put(
+        &mut cache(st),
+        p.root.clone(),
+        Arc::new(Ok(fresh)),
+        PREVIEW_CACHE_TTL,
+    );
+    Some(print)
+}
+
 /// Everything past the gates, shared by the button and the page's own
 /// auto-start. A live delegated identity signs the deploy itself; otherwise
 /// the linker hands its signing state to THIS server, and the signing URL is
@@ -565,6 +618,14 @@ fn launch(st: Arc<AppState>, root: PathBuf, id: u64) {
             let register_st = st.clone();
             Some(crate::linker::HostSigner {
                 register: Arc::new(move |state| {
+                    // The build just regenerated derived files (main.crdt and
+                    // the release twins take fresh mtimes with byte-identical
+                    // content); re-anchor the run's fingerprint to the tree as
+                    // the build left it, or the next poll reads that
+                    // regeneration as drift and re-mints forever, wiping this
+                    // wallet panel each cycle. Walked before the lock: a scene
+                    // walk must not run under runs().
+                    let rebuilt = reanchor_preview(&register_st);
                     // Only the run that still owns the slot gets to install
                     // its signer: a build that finished after its run was
                     // re-minted must not hand the wallet panel a stale
@@ -574,6 +635,9 @@ fn launch(st: Arc<AppState>, root: PathBuf, id: u64) {
                     if let Some(r) = slot.as_mut() {
                         if r.id == id {
                             r.signing = Some("/deploy".to_string());
+                            if let Some(print) = rebuilt {
+                                r.print = print;
+                            }
                             *signer_slot(&register_st) = Some(state);
                         }
                     }
@@ -726,6 +790,16 @@ pub(super) async fn sign_submit(
     }
 }
 
+/// `GET /deploy/progress` — how far the signed upload has got, for the
+/// panel's bar; `idle` when nothing is signing.
+pub(super) async fn sign_progress(State(st): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let state = signer_slot(&st).clone();
+    Json(match state {
+        Some(s) => serde_json::to_value(s.progress()).unwrap_or_default(),
+        None => serde_json::json!({ "phase": "idle" }),
+    })
+}
+
 /// Check and claim in one acquisition, returning the id the completion path
 /// must present before it may write a terminal state.
 fn claim(st: &AppState, target: String, auto: bool, print: String) -> Option<u64> {
@@ -746,17 +820,26 @@ fn claim(st: &AppState, target: String, auto: bool, print: String) -> Option<u64
 /// fingerprint). The provenance survives: an auto run re-mints auto.
 fn drift_reclaim(st: &AppState, target: String, print: &str) -> Option<u64> {
     let mut slot = runs(st);
-    let auto = match slot.as_ref() {
+    let (auto, remints) = match slot.as_ref() {
         Some(r)
             if matches!(r.state, RunState::Running)
                 && r.signing.is_some()
                 && !r.print.is_empty()
                 && r.print != print =>
         {
-            r.auto
+            (r.auto, r.remints)
         }
         _ => return None,
     };
+    if remints >= MAX_REMINTS {
+        if remints == MAX_REMINTS {
+            tracing::warn!(
+                "the payload moved on {MAX_REMINTS} consecutive polls; keeping the entity as built"
+            );
+            slot.as_mut().expect("matched above").remints += 1;
+        }
+        return None;
+    }
     {
         // Lock order runs → signer, same as the register closure in
         // [`launch`], so the two cannot deadlock.
@@ -770,7 +853,10 @@ fn drift_reclaim(st: &AppState, target: String, print: &str) -> Option<u64> {
         *signer = None;
     }
     let id = next_run_id();
-    *slot = Some(Run::new(id, target, auto, print.to_string()));
+    *slot = Some(Run {
+        remints: remints + 1,
+        ..Run::new(id, target, auto, print.to_string())
+    });
     Some(id)
 }
 
@@ -1348,9 +1434,9 @@ const SCRIPT: &str = concat!(
 /// to swap and one `data-state` to read. `show_sign` is the signing gate's
 /// answer for the requesting peer: the wallet panel renders only for a peer
 /// `sign_submit` would accept.
-fn run_region(st: &AppState, prefix: &str, jump: Option<&str>, show_sign: bool) -> String {
+fn run_region(st: &AppState, prefix: &str, show_sign: bool) -> String {
     let sign_panel = show_sign.then(|| pending_sign_panel(st, prefix)).flatten();
-    run_region_for(prefix, runs(st).as_ref(), jump, sign_panel.as_deref())
+    run_region_for(prefix, runs(st).as_ref(), sign_panel.as_deref())
 }
 
 /// Pure over the run state, so a test can render every state without
@@ -1358,12 +1444,7 @@ fn run_region(st: &AppState, prefix: &str, jump: Option<&str>, show_sign: bool) 
 /// region carries a `<noscript>` meta refresh and the signing path as a data
 /// attribute — part of the shape the script compares before swapping, so a
 /// live wallet panel is never wiped mid-flow.
-fn run_region_for(
-    prefix: &str,
-    run: Option<&Run>,
-    jump: Option<&str>,
-    sign_panel: Option<&str>,
-) -> String {
+fn run_region_for(prefix: &str, run: Option<&Run>, sign_panel: Option<&str>) -> String {
     let state = match run.map(|r| &r.state) {
         None => "idle",
         Some(RunState::Running) => "running",
@@ -1378,11 +1459,11 @@ fn run_region_for(
         .unwrap_or_default();
     format!(
         r#"<div id="run-status" data-state="{state}"{signing}>{panel}</div>"#,
-        panel = run_panel_for(run, jump, sign_panel)
+        panel = run_panel_for(run, sign_panel)
     )
 }
 
-fn run_panel_for(run: Option<&Run>, jump: Option<&str>, sign_panel: Option<&str>) -> String {
+fn run_panel_for(run: Option<&Run>, sign_panel: Option<&str>) -> String {
     let Some(r) = run else {
         return String::new();
     };
@@ -1405,24 +1486,31 @@ fn run_panel_for(run: Option<&Run>, jump: Option<&str>, sign_panel: Option<&str>
             )
         }
         RunState::Done(message) => {
-            let jump = match jump {
-                Some(url) => format!(r#" <a class="knob__go" href="{}">Jump in</a>"#, esc(url)),
-                None => String::new(),
-            };
-            (
-                "Published",
-                format!(
-                    r#"<p class="note dep__ok">Uploaded to {} — {}.</p>{jump}"#,
+            // Where it went and what it is — the head already names the
+            // scene, the footer carries Jump in, and the server's status
+            // code is the log's business.
+            let detail = match deployed_parts(message) {
+                Some((entity, Some(server), _)) => format!(
+                    r#"<p class="note">{} on {}</p><span class="dep__cid">{}</span>"#,
                     esc(&r.target),
-                    esc(message)
+                    esc(server),
+                    esc(entity)
                 ),
-                "",
-                " panel--ok",
-            )
+                Some((entity, None, _)) => format!(
+                    r#"<p class="note">{}</p><span class="dep__cid">{}</span>"#,
+                    esc(&r.target),
+                    esc(entity)
+                ),
+                None => format!(r#"<p class="note">{}</p>"#, esc(message)),
+            };
+            ("Published", detail, "", " panel--ok")
         }
         RunState::Failed(why) => (
             "Deploy failed",
-            format!(r#"<pre class="note dep__err">{}</pre>"#, esc(why)),
+            format!(
+                r#"<pre class="note dep__err">{}</pre>"#,
+                super::ansi::to_html(why)
+            ),
             "",
             " panel--warn",
         ),
@@ -1553,8 +1641,7 @@ async fn page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response 
                     launch(st.clone(), project.root.clone(), id);
                 }
             }
-            let signing_now =
-                matches!(runs(st).as_ref().map(|r| &r.state), Some(RunState::Running));
+            let phase = Phase::of(runs(st).as_ref(), Some(jump.as_str()));
             format!(
                 r#"<main class="dash"><section id="deploy" class="sec">{alarms}{verdict}{card}{drawer}{warm}</section></main><script>{script}</script>"#,
                 warm = warming_marker(warming),
@@ -1570,8 +1657,8 @@ async fn page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response 
                     &print,
                     blocked,
                     rights.as_deref(),
-                    signing_now,
-                    &run_region(st, &prefix, Some(jump.as_str()), may_publish),
+                    phase,
+                    &run_region(st, &prefix, may_publish),
                 ),
                 drawer = payload_drawer(p),
                 script = SCRIPT,
@@ -1636,7 +1723,7 @@ fn hint_row(inner: &str) -> String {
     format!(r#"<div class="jn2__noterow"><span class="jn__hint">{inner}</span></div>"#)
 }
 
-fn note_span(text: &str) -> String {
+pub(super) fn note_span(text: &str) -> String {
     format!(r#"<span class="note">{}</span>"#, esc(text))
 }
 
@@ -1787,21 +1874,7 @@ fn upload_panel(p: &deploy::DeployPreview, status: &LiveStatus) -> String {
         s = plural(p.files.len()),
     );
     let reuse_line = match &status.reuse {
-        Some(r) if r.reused_files > 0 => format!(
-            "<span class=\"note\">{reused} of {total} files are already on the server \u{2014} \
-             {up} to upload ({size}).</span>",
-            reused = r.reused_files,
-            total = r.reused_files + r.upload_files,
-            up = r.upload_files,
-            size = deploy::human_size(r.upload_bytes),
-        ),
-        Some(r) => format!(
-            "<span class=\"note\">All {up} file{s} upload ({size}) \u{2014} the server has none \
-             of them yet.</span>",
-            up = r.upload_files,
-            s = plural(r.upload_files),
-            size = deploy::human_size(r.upload_bytes),
-        ),
+        Some(r) => format!(r#"<span class="note">{}.</span>"#, esc(&r.sentence())),
         None => String::new(),
     };
     let meter = status.reuse.as_ref().map(|r| {
@@ -1815,20 +1888,33 @@ fn upload_panel(p: &deploy::DeployPreview, status: &LiveStatus) -> String {
 /// The card's footer: the primary button and the terminal line — or, for a
 /// reader off the hosting machine, the refusal said out loud instead of a
 /// button whose POST would be refused anyway.
-fn foot(prefix: &str, tok: &str, print: &str, blocked: Option<&str>) -> String {
+fn foot(prefix: &str, tok: &str, print: &str, blocked: Option<&str>, phase: Phase) -> String {
     if let Some(why) = blocked {
         return format!(
             r#"<div class="jn2__foot"><span class="note">{}</span></div>"#,
             esc(why)
         );
     }
+    // After a publish the panel above says what happened and the next thing
+    // to do is see it: Jump in takes the call to action, another run is the
+    // quiet button beside it, and the explainer is gone.
+    let actions = match phase {
+        Phase::Done(Some(jump)) => format!(
+            r#"<a class="jn__cta" href="{}">Jump in</a>
+          <button class="knob__go" type="submit">Publish again</button>"#,
+            esc(jump)
+        ),
+        Phase::Done(None) => r#"<button class="jn__cta" type="submit">Publish again</button>"#.to_string(),
+        _ => r#"<button class="jn__cta" type="submit">Publish</button>
+          <span class="note">Publish signs with your connected session, or asks your wallet for a signature.
+            You can also run <code>dcl-one-sdk deploy</code> in the scene folder.</span>"#
+            .to_string(),
+    };
     format!(
         r#"<form class="jn2__foot" id="publish" method="post" action="{prefix_esc}/deploy">
           <input type="hidden" name="token" value="{tok}">
           <input type="hidden" name="fingerprint" value="{print_esc}">
-          <button class="jn__cta" type="submit">Publish</button>
-          <span class="note">Publish signs with your connected session, or asks your wallet for a signature.
-            You can also run <code>dcl-one-sdk deploy</code> in the scene folder.</span>
+          {actions}
         </form>"#,
         prefix_esc = esc(prefix),
         tok = esc(tok),
@@ -1836,8 +1922,30 @@ fn foot(prefix: &str, tok: &str, print: &str, blocked: Option<&str>) -> String {
     )
 }
 
+/// Where the card's run stands, as far as the head line and footer care.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase<'a> {
+    /// No run, or one that failed or went stale: the button starts one.
+    Idle,
+    /// Building or signing: no button, the region carries the hand-off.
+    Running,
+    /// Published: the head says so, Jump in (at the realm URL, when there
+    /// is one) is the call to action, and another run is the quiet button.
+    Done(Option<&'a str>),
+}
+
+impl<'a> Phase<'a> {
+    fn of(run: Option<&Run>, jump: Option<&'a str>) -> Self {
+        match run.map(|r| &r.state) {
+            Some(RunState::Running) => Phase::Running,
+            Some(RunState::Done(_)) => Phase::Done(jump),
+            _ => Phase::Idle,
+        }
+    }
+}
+
 /// `0x` plus enough hex to recognize a wallet without a full line of it.
-fn short_addr(addr: &str) -> String {
+pub(super) fn short_addr(addr: &str) -> String {
     match addr.len() > 12 {
         true => format!("{}\u{2026}{}", &addr[..6], &addr[addr.len() - 4..]),
         false => addr.to_string(),
@@ -1894,34 +2002,45 @@ fn card(
     print: &str,
     blocked: Option<&str>,
     rights: Option<&Rights>,
-    running: bool,
+    phase: Phase,
     run: &str,
 ) -> String {
     let (size_num, size_unit) = split_size(p.total_bytes);
-    let state_word = match &status.remote {
-        Remote::Known(state) if state.current.is_some() => "updates the live scene",
-        Remote::Known(_) | Remote::Empty => "first publish",
-        Remote::Unreachable(_) | Remote::Unknown(_) => "live state unknown",
+    // A finished run clears the status cache, so the probe would only say
+    // "unknown" here; the run itself is the freshest fact on the page.
+    let state_word = match (phase, &status.remote) {
+        (Phase::Done(_), _) => "just published",
+        (_, Remote::Known(state)) if state.current.is_some() => "updates the live scene",
+        (_, Remote::Known(_) | Remote::Empty) => "first publish",
+        (_, Remote::Unreachable(_) | Remote::Unknown(_)) => "live state unknown",
     };
     let parcels = dest.pointers.len().max(1);
+    // The forecast's split, in the upload's own words, once the server has
+    // answered; the whole payload until then.
+    let payload = match &status.reuse {
+        Some(r) => esc(&r.sentence()),
+        None => format!(
+            "{} file{} · {size_num} {size_unit}",
+            p.files.len(),
+            plural(p.files.len())
+        ),
+    };
     format!(
         r#"<div class="jn">
       <div class="jn2__head"><div class="jn2__title">
         <h2>{title} → {headline}</h2>
-        <span class="jn__hint">{parcels} parcel{ps} · {files} file{fs} · {size_num} {size_unit} · {state_word}{verdict} — <a href="{prefix_esc}/target">review the target</a></span></div></div>
+        <span class="jn__hint">{parcels} parcel{ps} · {payload} · {state_word}{verdict} — <a href="{prefix_esc}/target">review the target</a></span></div></div>
       {run}
       {foot}
     </div>"#,
         title = esc(scene_title),
         headline = esc(&dest.headline),
         ps = plural(parcels),
-        files = p.files.len(),
-        fs = plural(p.files.len()),
         verdict = verdict_bit(rights),
         prefix_esc = esc(prefix),
-        foot = match running {
-            true => String::new(),
-            false => foot(prefix, tok, print, blocked),
+        foot = match phase {
+            Phase::Running => String::new(),
+            _ => foot(prefix, tok, print, blocked, phase),
         },
     )
 }
@@ -1935,10 +2054,96 @@ fn empty_col(head: &str, note: &str) -> String {
     col(head, &format!(r#"<span class="note">{note}</span>"#))
 }
 
+/// An empty state whose remedy is connecting: the bar's split pill again,
+/// right where the page says it is waiting on an account, so nobody has to
+/// hunt for it.
+fn connect_col(head: &str, note: &str, prefix: &str, tok: &str) -> String {
+    col(
+        head,
+        &format!(
+            r#"<span class="note">{note}</span>{}"#,
+            connect_buttons(prefix, tok)
+        ),
+    )
+}
+
+/// The bar's two doors, again: the browser wallet (script-armed through
+/// `data-wallet`, inert without one) and the Decentraland sign-in form.
+pub(super) fn connect_buttons(prefix: &str, tok: &str) -> String {
+    format!(
+        r#"<span class="bar__acct--split tgt__connect"><button class="bar__cta" type="button" data-wallet>Connect Wallet</button><form method="post" action="{action}"><input type="hidden" name="token" value="{tok}"><button class="bar__cta" type="submit">Connect with DCL</button></form></span>"#,
+        action = esc(&format!("{prefix}/target/connect")),
+        tok = esc(tok),
+    )
+}
+
+/// The publishing guide, opened beside the preview.
+const HELP_ACTION: &str = r#"<a class="jn__cta" href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene" target="_blank" rel="noopener">Publishing guide <span aria-hidden="true">↗</span></a>"#;
+
+/// The guide's sections this page's behaviour follows, one row each.
+const HELP_GUIDES: &[(&str, &str)] = &[
+    (
+        "Publish your scene",
+        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#publish-your-scene",
+    ),
+    (
+        "Kinds of projects",
+        "https://docs.decentraland.org/creator/scenes-sdk7/kinds-of-projects/kinds-of-project",
+    ),
+    (
+        "Multi-scene Worlds",
+        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#multi-scene-worlds",
+    ),
+    (
+        "Collaborators",
+        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#adding-collaborators-to-a-multi-scene-world",
+    ),
+    (
+        "Scene metadata",
+        "https://docs.decentraland.org/creator/scenes-sdk7/projects/scene-metadata",
+    ),
+    (
+        "Scene overwriting",
+        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#scene-overwriting",
+    ),
+    (
+        "Custom servers",
+        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#custom-servers",
+    ),
+];
+
+fn help_rows() -> String {
+    let rows: String = HELP_GUIDES
+        .iter()
+        .map(|(label, url)| {
+            kv(
+                label,
+                format!(
+                    r#"<a href="{url}" target="_blank" rel="noopener">{}</a>"#,
+                    esc(url.trim_start_matches("https://docs.decentraland.org/"))
+                ),
+            )
+        })
+        .collect();
+    format!(r#"<div class="kvs">{rows}</div>"#)
+}
+
+/// What an off-host viewer gets instead of silent 403s: this page's forms
+/// only act from the machine hosting the preview.
+pub(super) fn remote_notice(local: bool, class: &str, clause: &str) -> String {
+    if local {
+        return String::new();
+    }
+    format!(
+        r#"<p class="note {class}">This preview is hosted on another machine, so {clause}. Open this page on the hosting machine to make changes.</p>"#
+    )
+}
+
 /// The account's row inside the card, drawn only when there is something to
 /// say beyond the bar's pill: the wait on a pending sign-in, or why the last
-/// one failed. The connect button lives in the bar — the account is a
-/// server-wide fact, not this card's field.
+/// one failed. The connect buttons live in the bar, and again inside the
+/// empty columns waiting on an account — the account is a server-wide fact,
+/// not this card's field.
 fn account_row(rights: Option<&Rights>, connect: Option<&Connect>) -> String {
     if rights.is_some() {
         return String::new();
@@ -1989,11 +2194,12 @@ fn point_form(prefix: &str, tok: &str, world: &str, label: &str) -> String {
     )
 }
 
-/// The one-row form that moves the scene's footprint. Land only — a world
+/// The base parcel as a chip with "Move scene" beside it; opening it reveals
+/// the one-row form that moves the scene's footprint. Land only — a world
 /// positions its scenes internally.
 fn base_form(prefix: &str, tok: &str, dest: &Dest) -> String {
     format!(
-        r#"<div class="jn2__noterow"><form class="tgt__base" method="post" action="{prefix_esc}/target/base"><input type="hidden" name="token" value="{tok_esc}"><span class="jn__hint">Base parcel</span><input name="base" value="{base_esc}" aria-label="base parcel x,y" spellcheck="false" autocomplete="off"><button class="deep__copy" type="submit">Set base parcel</button><span class="jn__hint">Shifts this project's entire footprint. Publish to apply the new location.</span></form></div>"#,
+        r#"<div class="tgt__base-row"><span class="knob__k">Base parcel</span><details class="tgt__move"><summary><span class="tgt__coord tgt__coord--base">{base_esc}</span><span class="deep__copy">Move scene</span></summary><form class="tgt__base" method="post" action="{prefix_esc}/target/base"><input type="hidden" name="token" value="{tok_esc}"><input name="base" value="{base_esc}" aria-label="base parcel x,y" spellcheck="false" autocomplete="off"><button class="deep__copy" type="submit">Set base parcel</button><span class="jn__hint">Shifts this project's entire footprint. Publish to apply the new location.</span></form></details></div>"#,
         prefix_esc = esc(prefix),
         tok_esc = esc(tok),
         base_esc = esc(&dest.base_pointer),
@@ -2006,9 +2212,11 @@ fn base_form(prefix: &str, tok: &str, dest: &Dest) -> String {
 /// cap can never be the reason it is missing.
 fn your_worlds(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>) -> String {
     let Some(r) = rights else {
-        return empty_col(
+        return connect_col(
             "Your worlds",
-            "Connect an account above to list its Decentraland NAMEs, ENS domains, and Worlds where it has deployment permission.",
+            "Connect an account to list its Decentraland NAMEs, ENS domains, and Worlds where it has deployment permission.",
+            prefix,
+            tok,
         );
     };
     if let Verdict::Unchecked(why) = &r.verdict {
@@ -2088,7 +2296,7 @@ fn your_worlds(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>) ->
             if owned {
                 "Your worlds"
             } else {
-                "Worlds you collaborate on"
+                "Shared with you"
             },
             &format!(r#"<div class="wl">{rows}</div>{folded}{nothing}"#),
         )
@@ -2106,27 +2314,51 @@ fn span(vs: impl Iterator<Item = i64>) -> (i64, i64) {
 fn parcel_grid(
     keys: &[(&str, &str)],
     label: &str,
-    (x0, x1): (i64, i64),
-    (y0, y1): (i64, i64),
+    xs: (i64, i64),
+    ys: (i64, i64),
     classify: impl Fn((i64, i64)) -> (&'static str, String),
 ) -> String {
-    let legend: String = keys
-        .iter()
+    format!(
+        r#"<div class="lay__legend">{}</div>{}"#,
+        parcel_legend(keys),
+        parcel_cells(label, xs, ys, false, classify)
+    )
+}
+
+/// The swatch keys alone, so a card can seat them in its own header row.
+fn parcel_legend(keys: &[(&str, &str)]) -> String {
+    keys.iter()
         .map(|(class, name)| {
             format!(r#"<span class="lay__key"><i class="lay__swatch {class}"></i>{name}</span>"#)
         })
-        .collect();
+        .collect()
+}
+
+/// The cell grid alone. `coords` prints each parcel's coordinates inside its
+/// cell, the target map's idiom; the after-map keeps its cells bare.
+fn parcel_cells(
+    label: &str,
+    (x0, x1): (i64, i64),
+    (y0, y1): (i64, i64),
+    coords: bool,
+    classify: impl Fn((i64, i64)) -> (&'static str, String),
+) -> String {
     let mut cells = String::new();
     for y in (y0..=y1).rev() {
         for x in x0..=x1 {
             let (class, title) = classify((x, y));
+            let inner = if coords {
+                format!("<span>{x},{y}</span>")
+            } else {
+                String::new()
+            };
             cells.push_str(&format!(
-                r#"<div class="lay__cell{class}" title="{title}"></div>"#
+                r#"<div class="lay__cell{class}" title="{title}">{inner}</div>"#
             ));
         }
     }
     format!(
-        r#"<div class="lay__legend">{legend}</div><div class="lay__map" style="--lay-cols:{cols}"><div class="lay__grid" role="img" aria-label="{label}">{cells}</div></div>"#,
+        r#"<div class="lay__map" style="--lay-cols:{cols}"><div class="lay__grid" role="img" aria-label="{label}">{cells}</div></div>"#,
         cols = x1 - x0 + 1
     )
 }
@@ -2140,14 +2372,23 @@ fn land_map(
     owned: &[(i64, i64)],
     missing: &HashSet<(i64, i64)>,
 ) -> String {
+    let head = |legend: &str| {
+        format!(
+            r#"<div class="tgt__map-head"><span class="knob__k">Map</span><div class="lay__legend">{legend}</div></div>"#
+        )
+    };
     if declared.is_empty() {
-        return String::new();
+        return head("");
     }
     let (dx0, dx1) = span(declared.iter().map(|p| p.0));
     let (dy0, dy1) = span(declared.iter().map(|p| p.1));
     if dx1 - dx0 > 63 || dy1 - dy0 > 63 {
-        return note_span(
-            "This footprint is too spread out for the map. Review the parcel list below.",
+        return format!(
+            "{}{}",
+            head(""),
+            note_span(
+                "This footprint is too spread out for the map. Review the parcel list below.",
+            )
         );
     }
     let pad_x = (10 - (dx1 - dx0 + 1)).max(2) / 2;
@@ -2170,11 +2411,11 @@ fn land_map(
     if !missing.is_empty() {
         keys.push(("tgt__cell--missing", "No rights"));
     }
-    let grid = parcel_grid(
-        &keys,
+    let cells = parcel_cells(
         "your land around this scene",
         (x0, x1),
         (y0, y1),
+        true,
         |p| {
             let (x, y) = p;
             if missing.contains(&p) {
@@ -2197,12 +2438,12 @@ fn land_map(
             s = plural(n),
         ),
     };
-    format!("{grid}{off}")
+    format!("{}{cells}{off}", head(&parcel_legend(&keys)))
 }
 
 /// The declared parcels and the base among them (the first parcel, or 0,0,
 /// when the base does not parse).
-fn footprint(dest: &Dest) -> (Vec<(i64, i64)>, (i64, i64)) {
+pub(super) fn footprint(dest: &Dest) -> (Vec<(i64, i64)>, (i64, i64)) {
     let declared = deploy_status::parse_coords(&dest.pointers);
     let base = catalyrst_auth_chain::pointer::parse_pointer(&dest.base_pointer)
         .unwrap_or_else(|| declared.first().copied().unwrap_or((0, 0)));
@@ -2211,11 +2452,13 @@ fn footprint(dest: &Dest) -> (Vec<(i64, i64)>, (i64, i64)) {
 
 /// One row per declared parcel with the strongest right the wallet holds on
 /// it, and the holdings line under them.
-fn land_rights_col(rights: Option<&Rights>) -> String {
+fn land_rights_col(prefix: &str, tok: &str, rights: Option<&Rights>) -> String {
     let Some(r) = rights else {
-        return empty_col(
+        return connect_col(
             "Your rights here",
-            "Connect an account above to check every declared parcel against its on-chain rights.",
+            "Connect an account to check every declared parcel against its on-chain rights.",
+            prefix,
+            tok,
         );
     };
     let mut rows = String::new();
@@ -2321,7 +2564,7 @@ fn target_card(
         format!(
             r#"<a class="jn__cta" href="{}/deploy">{} <span aria-hidden="true">→</span></a>"#,
             esc(prefix),
-            "Review deployment"
+            "Deploy"
         )
     };
     let current = match world {
@@ -2347,24 +2590,52 @@ fn target_card(
             esc(server)
         )
     };
-    let mut verdict = match rights.map(|r| &r.verdict) {
-        Some(Verdict::MayNot { why, remedy }) => format!(
-            r#"<div class="panel tgt__rights-failure"><h2>You can't publish here</h2><p>{}</p><p class="note">{}</p></div>"#,
-            esc(why),
-            esc(remedy)
-        ),
+    // On land the denied parcels are listed one per row under a count, the
+    // design's shape; the verdict's own sentence carries the world case.
+    let missing: Vec<&str> = match (world, rights) {
+        (None, Some(r)) if blocked => r
+            .parcel_rights
+            .iter()
+            .filter(|pr| pr.leg.is_none())
+            .map(|pr| pr.pointer.as_str())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let verdict = match rights.map(|r| &r.verdict) {
+        Some(Verdict::MayNot { why, remedy }) => {
+            let (title, why_line) = if missing.is_empty() {
+                (
+                    "You can't publish here".to_string(),
+                    format!("<p>{}</p>", esc(why)),
+                )
+            } else {
+                let total = rights.map(|r| r.parcel_rights.len()).unwrap_or(0);
+                (
+                    format!(
+                        "You can't publish to {} of {total} parcel{}",
+                        missing.len(),
+                        plural(total)
+                    ),
+                    String::new(),
+                )
+            };
+            let rows: String = missing
+                .iter()
+                .map(|pointer| {
+                    format!(
+                        r#"<div class="tgt__missing-row"><span class="tgt__coord">{}</span><span>No update rights on this parcel</span></div>"#,
+                        esc(pointer)
+                    )
+                })
+                .collect();
+            format!(
+                r#"<div class="panel tgt__rights-failure"><h2><i class="tgt__bang" aria-hidden="true">!</i>{title}</h2>{why_line}{rows}<p class="note">{}</p></div>"#,
+                esc(remedy)
+            )
+        }
         Some(Verdict::Unchecked(why)) => note_span(why),
         _ => String::new(),
     };
-    if blocked && world.is_none() {
-        if let Some(r) = rights {
-            let missing: String = r.parcel_rights.iter().filter(|pr| pr.leg.is_none())
-                .map(|pr| format!(r#"<div class="tgt__missing-row"><span class="tgt__coord">{}</span><span>No update rights on this parcel</span></div>"#, esc(&pr.pointer))).collect();
-            if !missing.is_empty() {
-                verdict = verdict.replace("</div>", &format!("{missing}</div>"));
-            }
-        }
-    }
     let summary = format!(
         r#"<div class="tgt__summary">{}{}</div>"#,
         col("Upload", &upload_panel(p, status)),
@@ -2377,22 +2648,20 @@ fn target_card(
     };
     let land_pane = if let Some(world) = world {
         format!(
-            "{}{}",
+            r#"{}<p class="tgt__inactive"><b aria-hidden="true">·</b><span>The deploy target is World {}. Select LAND to deploy to Genesis City with this scene's parcel coordinates. You need deployment permission on every parcel.</span></p><div class="tgt__map-panel tgt__map-panel--solo">{}</div>"#,
             header("Publish to LAND", &land_action),
-            note_span(&format!(
-                "This project currently targets World {}. Select LAND to use its Genesis City parcel coordinates instead. You need deployment permission on every parcel.",
-                world
-            ))
+            esc(world),
+            super::land_picker::land_picker(prefix, tok, dest, rights, status)
         )
     } else {
         format!(
             r#"{}{}<div class="tgt__land">{summary}<div class="tgt__map-panel">{}{}</div></div>"#,
             header("Publish to LAND", &land_action),
             verdict,
-            target_land_map(prefix, tok, dest, rights),
+            target_land_map(prefix, tok, dest, rights, status),
             format_args!(
                 r#"<details class="tgt__rights-detail"><summary>Parcel rights and holdings</summary>{}</details>"#,
-                land_rights_col(rights)
+                land_rights_col(prefix, tok, rights)
             )
         )
     };
@@ -2401,17 +2670,39 @@ fn target_card(
     } else {
         note_span("Select a World below")
     };
-    let world_details = if world.is_some() {
-        format!(
-            r#"<details class="tgt__advanced"><summary>Multi-Scene World (Advanced)</summary><div class="tgt__advanced-body"><p class="note">A World can contain multiple scenes. Publishing from this preview preserves scenes that do not overlap this project's parcels. World settings and collaborator permissions are managed by the World owner.</p><p class="note">These coordinates are inside the selected World; they are not Genesis City LAND. <a href="{}/scene">Edit this scene's parcel layout</a>.</p>{}<a href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#multi-scene-worlds">About Multi-Scene Worlds</a></div></details>"#,
+    // Multiscene and History are views of the selected destination, never
+    // destinations themselves: neither carries a select form.
+    let record_action = if world.is_some() || !p.nameless_world {
+        deploy_action.clone()
+    } else {
+        note_span("Select a World or LAND first")
+    };
+    let multi_pane = match world {
+        Some(_) => format!(
+            r#"{}<div class="tgt__advanced-body"><p class="note">A World can contain multiple scenes. Publishing from this preview preserves scenes that do not overlap this project's parcels. World settings and collaborator permissions are managed by the World owner.</p><p class="note">These coordinates are inside the selected World; they are not Genesis City LAND. <a href="{}/scene">Edit this scene's parcel layout</a>.</p>{}<a href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#multi-scene-worlds">About Multi-Scene Worlds</a></div>"#,
+            header("Multiscene world", &record_action),
             esc(prefix),
             multiscene_pane(dest, status)
-        )
-    } else {
-        String::new()
+        ),
+        None => format!(
+            r#"{}<p class="tgt__inactive"><b aria-hidden="true">·</b><span>The deploy target is Genesis City LAND. Multiscene applies to Worlds: select a World first.</span></p>"#,
+            header("Multiscene world", &record_action)
+        ),
     };
+    let history_pane = format!(
+        "{}{}",
+        header("Deployment history", &record_action),
+        history_rows_pane(history)
+    );
+    // The publishing guide is the Help tab's call to action, in the slot the
+    // other tabs give Deploy; the guide's own anchors fill the column.
+    let help_pane = format!(
+        "{}{}",
+        header("Help", HELP_ACTION),
+        col("Guides", &help_rows())
+    );
     let world_pane = format!(
-        r#"{}{}{}<div id="target-worlds" class="tgt__worlds">{}</div>{world_details}"#,
+        r#"{}{}{}<div id="target-worlds" class="tgt__worlds">{}</div>"#,
         header("Publish to a World", &world_action),
         if world.is_some() {
             verdict.as_str()
@@ -2426,20 +2717,23 @@ fn target_card(
         your_worlds(prefix, tok, dest, rights)
     );
     let tabs = format!(
-        "{}{}",
+        "{}{}{}{}{}",
         tab("world", "World", world.is_some()),
-        tab("land", "LAND (Genesis City)", world.is_none())
+        tab("land", "LAND (Genesis City)", world.is_none()),
+        tab("multi", "Multiscene world", false),
+        tab("history", "History", false),
+        tab("help", "Help", false)
     );
     format!(
         r#"<div class="jn tgt" data-target-kind="{target_kind}">
       {addr}
-      <p class="note tgt__selection-note">Choose where to publish. Use Select World or Select LAND to update this project, then Review deployment to continue. <a href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene">Publishing guide</a></p>
       <fieldset class="knob knob--tabs"><legend class="knob__k u-sr-only">Browse publishing destinations</legend><div class="jn2__tabs">{tabs}</div></fieldset>
       <div class="tgt__pane tgt__pane--world">{world_pane}</div>
       <div class="tgt__pane tgt__pane--land">{land_pane}</div>
-      <details class="tgt__history"><summary>Deployment history</summary>{history_pane}</details>
+      <div class="tgt__pane tgt__pane--multi">{multi_pane}</div>
+      <div class="tgt__pane tgt__pane--history">{history_pane}</div>
+      <div class="tgt__pane tgt__pane--help">{help_pane}</div>
     </div>"#,
-        history_pane = history_rows_pane(history),
         addr = account_row(rights, connect),
         target_kind = if world.is_some() { "world" } else { "land" },
     )
@@ -2447,7 +2741,13 @@ fn target_card(
 
 /// The map and move actions use real coordinates; mock estate titles and
 /// owner identities from the design must never stand in for chain data.
-fn target_land_map(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>) -> String {
+fn target_land_map(
+    prefix: &str,
+    tok: &str,
+    dest: &Dest,
+    rights: Option<&Rights>,
+    status: &LiveStatus,
+) -> String {
     let (declared, base) = footprint(dest);
     let owned = rights
         .and_then(|r| r.holdings.as_ref())
@@ -2460,18 +2760,44 @@ fn target_land_map(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>
         .filter_map(|pr| catalyrst_auth_chain::pointer::parse_pointer(&pr.pointer))
         .collect();
     let map = land_map(&declared, base, owned, &missing);
-    let rows: String = owned.iter().take(PARCELS_LISTED).map(|&(x,y)| {
-        let current = (x,y) == base;
-        let action = if current { r#"<span class="tgt__badge">Current base</span>"#.to_string() } else {
-            format!(r#"<form method="post" action="{}/target/base"><input type="hidden" name="token" value="{}"><input type="hidden" name="base" value="{x},{y}"><button class="deep__copy" type="submit">Set base here</button></form>"#, esc(prefix), esc(tok))
-        };
-        let leg = if rights.and_then(|r| r.holdings.as_ref()).is_some_and(|h| h.owned.contains(&(x,y))) { "Owned parcel" } else { "Operated parcel" };
-        format!(r#"<div class="wl__r"><span class="tgt__coord">{x},{y}</span><span class="wl__d">{leg}</span>{action}</div>"#)
-    }).collect();
     format!(
-        r#"<span class="knob__k">Map</span>{map}{}<div class="wl">{rows}</div>"#,
-        base_form(prefix, tok, dest)
+        "{map}{}{}",
+        base_form(prefix, tok, dest),
+        super::land_picker::land_picker(prefix, tok, dest, rights, status)
     )
+}
+
+/// The deploy's own success line, `Deployed <entity> to <server> (HTTP <n>)`,
+/// taken apart as (entity, server, status); `None` for any other wording.
+fn deployed_parts(detail: &str) -> Option<(&str, Option<&str>, &str)> {
+    let rest = detail.strip_prefix("Deployed ")?;
+    let (body, tail) = rest.rsplit_once(" (HTTP ")?;
+    let http = tail.strip_suffix(')')?;
+    if http.is_empty() || !http.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let (entity, server) = match body.split_once(" to ") {
+        Some((e, s)) => (e, Some(s)),
+        None => (body, None),
+    };
+    if entity.is_empty() || entity.contains(' ') {
+        return None;
+    }
+    Some((entity, server, http))
+}
+
+/// The success line as the design's three chips; any other detail stays a
+/// plain note.
+fn published_detail(detail: &str) -> Option<String> {
+    let (entity, server, http) = deployed_parts(detail)?;
+    let server = server
+        .map(|s| format!(r#"<span class="note">to <b>{}</b></span>"#, esc(s)))
+        .unwrap_or_default();
+    Some(format!(
+        r#"<div class="tgt__history-detail"><span class="tgt__history-cid" title="{e}">{e}</span>{server}<span class="tgt__history-http">HTTP {}</span></div>"#,
+        esc(http),
+        e = esc(entity)
+    ))
 }
 
 /// Deployment history: what this preview (and, through the on-disk record,
@@ -2495,7 +2821,7 @@ fn history_rows_pane(history: &[PastRun]) -> String {
                 Some(d) if d.contains('\n') => {
                     format!(r#"<pre class="note dep__err">{}</pre>"#, esc(d))
                 }
-                Some(d) => note_span(d),
+                Some(d) => published_detail(d).unwrap_or_else(|| note_span(d)),
                 None => String::new(),
             };
             let tone = match h.outcome.as_str() {
@@ -2685,7 +3011,7 @@ fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
 }
 
 /// `/target` — the destination detail that used to crowd the publish card.
-async fn target_page(st: &Arc<AppState>, headers: &HeaderMap) -> Response {
+async fn target_page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response {
     let prefix = forwarded_prefix(headers);
     let Some(project) = st.first_project() else {
         return deploy_document(
@@ -2709,7 +3035,16 @@ async fn target_page(st: &Arc<AppState>, headers: &HeaderMap) -> Response {
             let history = history_rows(st, &project.root);
             let connect = connect_slot(st).clone();
             format!(
-                r#"<main class="dash"><section id="target" class="sec">{card}{warm}</section></main><script>{script}</script>"#,
+                r#"<main class="dash"><section id="target" class="sec">{remote}{card}{warm}</section></main><script>{script}</script>"#,
+                remote = remote_notice(
+                    local,
+                    "tgt__remote",
+                    if st.allow_remote_deploy {
+                        "choosing a destination only works from there"
+                    } else {
+                        "choosing a destination and connecting an account only work from there"
+                    },
+                ),
                 warm = warming_marker(warming),
                 card = target_card(
                     &scene_title,

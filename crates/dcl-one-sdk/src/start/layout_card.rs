@@ -294,7 +294,7 @@ pub(super) fn scene_layout_card(
         by = base.1,
     );
     let spawns_pane = format!(
-        r#"<section class="lay__pane" data-pane="spawns" hidden><span class="knob__k">Spawn areas</span><div class="lay__srows">{rows}</div><p class="note" id="lay-sempty">Pick an area from the list, click one on the grid, or add a new one to edit its coordinates.</p><div id="lay-sed"></div></section>"#,
+        r#"<section class="lay__pane" data-pane="spawns" hidden><span class="knob__k">Spawn areas</span><div class="lay__srows">{rows}</div><div id="lay-sed"></div></section>"#,
         rows = spawn_rows(spawns),
     );
     let perms_pane = format!(
@@ -302,9 +302,9 @@ pub(super) fn scene_layout_card(
         rows = permission_rows(scene_json),
     );
     format!(
-        r#"<div class="jn lay lay--info" id="scene-layout"><div class="jn2__tabs" role="tablist">{tabs}</div><div class="lay__body"><div class="lay__left"><div class="lay__legend"><span class="lay__key"><i class="lay__swatch lay__swatch--base"></i>Base {bx},{by}</span><span class="lay__key"><i class="lay__swatch lay__swatch--in"></i>In scene</span><span class="lay__key"><i class="lay__swatch lay__swatch--add"></i>Add</span><span class="lay__key"><i class="lay__swatch lay__swatch--area"></i>Spawn area</span><span class="lay__size">{w} × {h} m</span></div>{map}<div class="note lay__hint" id="lay-hint">Click the title, description, tags or cover to edit — changes save to scene.json</div></div><div class="lay__rail">{info_pane}{parcels_pane}{spawns_pane}{perms_pane}</div></div></div>"#,
-        bx = base.0,
-        by = base.1,
+        r#"<div class="jn lay lay--info" id="scene-layout"><div class="jn2__tabs" role="tablist">{tabs}</div><div class="lay__body"><div class="lay__left"><div class="lay__legend"><span class="lay__key"><i class="lay__swatch lay__swatch--in"></i>In scene</span><span class="lay__key"><i class="lay__swatch lay__swatch--area"></i>Spawn area</span><span class="lay__size">{n} parcel{s} · {w} × {h} m</span></div>{map}<div class="note lay__hint" id="lay-hint">Click the title, description, tags or cover to edit — changes save to scene.json</div></div><div class="lay__rail">{info_pane}{parcels_pane}{spawns_pane}{perms_pane}</div></div></div>"#,
+        n = parcels.len(),
+        s = if parcels.len() == 1 { "" } else { "s" },
         map = layout_grid(parcels, base, spawns),
     )
 }

@@ -1,7 +1,7 @@
 use super::net::{
     confirm_world_overwrite, delete_world_scenes, ephemeral_auth_chain, jump_in_url,
     non_upstream_note, resolve_target, simple_auth_chain, upload_entity_with_chain_to,
-    PermissionGate, UploadDestination,
+    PermissionGate, UploadDestination, UploadProgress,
 };
 use super::{
     base_parcel, build_entity, build_metadata, caused, extract_pointers, nameless_world_section,
@@ -298,6 +298,7 @@ async fn deploy_headless(
         &address,
         auth_chain,
         destination,
+        &UploadProgress::default(),
     )
     .await?;
     steps.done(&message);

@@ -22,19 +22,22 @@ const parsePage = (html) => {
   for (const n of doc.querySelectorAll('noscript')) n.remove();
   return doc;
 };
-/* The bar's wallet half: eth_requestAccounts, then the same gated POST the
+/* Every wallet button (the bar's half and the copies inside the target
+   page's empty columns): eth_requestAccounts, then the same gated POST the
    pasted-address route takes — the token rides in from the sibling DCL form,
    the prefix from its action. No signature: revealing an address is all a
    direct wallet connect can honestly claim. */
 (() => {
-  const wallet = document.getElementById('bar-wallet');
-  if (!wallet) return;
+  const wallets = document.querySelectorAll('[data-wallet]');
+  if (!wallets.length) return;
   if (!window.ethereum) {
-    wallet.disabled = true;
-    wallet.title = 'No browser wallet found';
+    for (const wallet of wallets) {
+      wallet.disabled = true;
+      wallet.title = 'No browser wallet found';
+    }
     return;
   }
-  wallet.addEventListener('click', async () => {
+  const connect = async (wallet) => {
     try {
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       const form = wallet.nextElementSibling;
@@ -50,7 +53,8 @@ const parsePage = (html) => {
     } catch {
       pageToast('The wallet did not answer', true);
     }
-  });
+  };
+  for (const wallet of wallets) wallet.addEventListener('click', () => connect(wallet));
 })();
 
 // A page rendered before its remote answers arrived marks itself with

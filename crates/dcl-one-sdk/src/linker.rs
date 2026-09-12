@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct LinkerDeploy {
     /// The scene root: the signing page is the preview server's landing page.
@@ -54,13 +54,40 @@ pub fn linker_timeout() -> Duration {
 struct PendingEntity {
     bytes: Vec<u8>,
     delete_payload: Option<String>,
+    minted: Instant,
+    /// The entity timestamp, so a re-mint never repeats a signable id.
+    ts: i64,
 }
+
+/// The entity the panel currently shows. The deploy page re-renders the
+/// panel every couple of seconds while it waits, and the browser keeps the
+/// first render's id for as long as the wallet takes; minting per render
+/// would leave that id behind within a minute (which is exactly what used
+/// to happen: 32 renders, then "unknown or stale entity id" for anyone who
+/// took over a minute to sign).
+struct Minted {
+    entity_id: String,
+    delete_payload: Option<String>,
+    at: Instant,
+}
+
+/// How long one minted entity is re-rendered as-is. A fresh timestamp after
+/// this keeps the entity from losing to anything published on the parcels in
+/// the meantime; the ids minted before stay signable (see [`PENDING_KEEP`]).
+const MINT_FRESH: Duration = Duration::from_secs(600);
+
+/// How many minted ids stay signable at once: with one mint per
+/// [`MINT_FRESH`], the panel a browser opened stays valid for over an hour.
+const PENDING_KEEP: usize = 8;
 
 pub(crate) type DoneSender = tokio::sync::oneshot::Sender<Result<String>>;
 
 pub struct LinkerState {
     dep: LinkerDeploy,
     pending: Mutex<HashMap<String, PendingEntity>>,
+    minted: Mutex<Option<Minted>>,
+    /// How far the signed upload has got, for the panel's bar.
+    progress: deploy::UploadProgress,
     done: Mutex<Option<DoneSender>>,
     /// The address that signed, kept past the upload: the preview pages
     /// personalize on it, and a signature is the one moment a wallet names
@@ -78,6 +105,11 @@ impl LinkerState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The upload so far: idle until a signature arrives.
+    pub(crate) fn progress(&self) -> deploy::ProgressState {
+        self.progress.snapshot()
     }
 
     /// What [`sign`] does the moment a signature arrives, for tests that need
@@ -99,6 +131,8 @@ pub fn new_state(
         Arc::new(LinkerState {
             dep,
             pending: Mutex::new(HashMap::new()),
+            minted: Mutex::new(None),
+            progress: deploy::UploadProgress::default(),
             done: Mutex::new(Some(tx)),
             signer: Mutex::new(None),
         }),
@@ -106,15 +140,76 @@ pub fn new_state(
     )
 }
 
-/// The signing panel. The entity is minted NOW and registered pending, so
-/// the id printed is the id the wallet signs; the browser is left exactly one
-/// job, the wallet hand-off. `api` is the absolute path the script POSTs the
+/// The id the panel draws: the one already minted while it is fresh, else a
+/// new entity registered pending. Only the oldest ids past [`PENDING_KEEP`]
+/// stop being signable.
+fn mint(st: &Arc<LinkerState>) -> Result<(String, Option<String>)> {
+    let d = &st.dep;
+    let mut minted = st.minted.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(m) = minted.as_ref().filter(|m| m.at.elapsed() < MINT_FRESH) {
+        return Ok((m.entity_id.clone(), m.delete_payload.clone()));
+    }
+    let ts = match d.timestamp_override {
+        Some(t) => t,
+        // Never the entity a still-signable id names: a rebuild landing in
+        // the same millisecond would otherwise re-mint the id it replaces.
+        None => {
+            let floor = st
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .map(|p| p.ts)
+                .max()
+                .map_or(0, |t| t + 1);
+            deploy::now_ms().max(floor)
+        }
+    };
+    let (entity_id, entity_bytes) = deploy::build_entity(&d.prepared, ts)?;
+    let delete_payload = match d.needs_delete {
+        true => d.world.as_deref().map(deploy::build_delete_payload),
+        false => None,
+    };
+    let now = Instant::now();
+    {
+        let mut pending = st.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        pending.insert(
+            entity_id.clone(),
+            PendingEntity {
+                bytes: entity_bytes,
+                delete_payload: delete_payload.clone(),
+                minted: now,
+                ts,
+            },
+        );
+        while pending.len() > PENDING_KEEP {
+            let oldest = pending
+                .iter()
+                .min_by_key(|(_, p)| p.minted)
+                .map(|(id, _)| id.clone());
+            match oldest {
+                Some(id) => pending.remove(&id),
+                None => break,
+            };
+        }
+    }
+    *minted = Some(Minted {
+        entity_id: entity_id.clone(),
+        delete_payload: delete_payload.clone(),
+        at: now,
+    });
+    Ok((entity_id, delete_payload))
+}
+
+/// The signing panel. The entity is minted once and registered pending, so
+/// the id printed is the id the wallet signs, and every re-render within
+/// [`MINT_FRESH`] draws the same id; the browser is left exactly one job,
+/// the wallet hand-off. `api` is the absolute path the script POSTs the
 /// signature to.
 pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
     use crate::start::chrome::{esc, kv};
     let d = &st.dep;
-    let ts = d.timestamp_override.unwrap_or_else(deploy::now_ms);
-    let (entity_id, entity_bytes) = match deploy::build_entity(&d.prepared, ts) {
+    let (entity_id, delete_payload) = match mint(st) {
         Ok(x) => x,
         Err(e) => {
             return format!(
@@ -123,23 +218,6 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
             )
         }
     };
-    let delete_payload = match d.needs_delete {
-        true => d.world.as_deref().map(deploy::build_delete_payload),
-        false => None,
-    };
-    {
-        let mut pending = st.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        if pending.len() > 32 {
-            pending.clear();
-        }
-        pending.insert(
-            entity_id.clone(),
-            PendingEntity {
-                bytes: entity_bytes,
-                delete_payload: delete_payload.clone(),
-            },
-        );
-    }
     // The deep link is what actually reaches the realm this deploy lands in.
     // decentraland.org forwards `realm` only for realms it whitelists, so for
     // anything self-hosted its play URL silently drops the realm and boots
@@ -184,7 +262,7 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
         )
     };
     format!(
-        r#"<div class="panel" id="sign-panel" data-api="{api}" data-entity-id="{id}"{delete_attr} data-deep-link="{deep}">
+        r#"<div class="panel" id="sign-panel" data-api="{api}" data-entity-id="{id}"{delete_attr} data-deep-link="{deep}" data-target="{target}">
   <h2>Sign the deployment</h2>
   <span class="note">Connect the wallet that may publish this scene; nothing uploads until it answers.</span>
   <div class="kvs">
@@ -192,6 +270,11 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
   </div>
   {delete_warn}
   <button class="jn__cta" id="sign-go" type="button">Connect wallet and sign</button>
+  <div class="sign-progress" id="sign-progress" hidden>
+    <div class="sign-progress__head"><span class="sign-progress__big" id="sign-progress-big"></span><span class="sign-progress__pct" id="sign-progress-pct"></span></div>
+    <div class="sign-progress__bar"><div class="sign-progress__fill" id="sign-progress-fill"></div></div>
+    <div class="sign-progress__meta" id="sign-progress-meta"></div>
+  </div>
   <p class="note sign-status" id="sign-status" hidden></p>
   <noscript><p class="note">The wallet hand-off needs JavaScript; everything above is exact without it.</p></noscript>
 </div>"#,
@@ -202,6 +285,7 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
             None => String::new(),
         },
         deep = esc(&deep_link),
+        target = esc(&d.target_content),
         scene = kv("Scene", esc(&d.scene_title)),
         where_kv = kv("Deploying to", esc(&where_to)),
         parcels = kv("Parcels", esc(&parcels)),
@@ -243,13 +327,29 @@ pub(crate) async fn sign(
     State(st): State<Arc<LinkerState>>,
     Json(req): Json<SignReq>,
 ) -> Json<Value> {
-    let pending = st
-        .pending
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .remove(&req.entity_id);
-    let Some(pending) = pending else {
-        return retry("unknown or stale entity id — reload the page and sign again");
+    let pending = {
+        let mut pending = st.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(entry) = pending.get(&req.entity_id) else {
+            drop(pending);
+            // The page holds an id this process never minted (the preview
+            // restarted, or the run was rebuilt under it). Forget the
+            // current mint too, so the page's next render carries an id
+            // that is certainly fresh, and tell the page to rebuild rather
+            // than the person to reload.
+            *st.minted.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            return Json(json!({
+                "ok": false,
+                "fatal": false,
+                "stale": true,
+                "error": "that signing request is no longer on the server — the preview was rebuilt or restarted since this page loaded",
+            }));
+        };
+        if entry.delete_payload.is_some() && req.delete_signature.is_none() {
+            return retry("this deploy also removes the existing world scenes and needs the second signature — sign both prompts");
+        }
+        pending
+            .remove(&req.entity_id)
+            .expect("looked up under the same lock")
     };
     *st.signer.lock().unwrap_or_else(PoisonError::into_inner) = Some(req.address.clone());
     let world = st.dep.world.as_deref();
@@ -258,7 +358,7 @@ pub(crate) async fn sign(
     }
     if let Some(payload) = &pending.delete_payload {
         let Some(dsig) = &req.delete_signature else {
-            return retry("this deploy also removes the existing world scenes and needs the second signature — reload and sign both prompts");
+            return retry("this deploy also removes the existing world scenes and needs the second signature — sign both prompts");
         };
         let chain = deploy::simple_auth_chain(&req.address, payload, dsig);
         if let Err(e) =
@@ -286,6 +386,7 @@ pub(crate) async fn sign(
         &req.address,
         &req.signature,
         destination,
+        &st.progress,
     )
     .await
     {
@@ -497,10 +598,61 @@ mod tests {
             state.pending.lock().unwrap().contains_key(&id),
             "the rendered id is registered pending"
         );
+        assert!(
+            section.contains(r#"id="sign-progress" hidden"#),
+            "{section}"
+        );
+
+        // The page re-renders the panel every poll: the same id comes back
+        // and the pending map does not grow, so the id a browser holds
+        // stays signable for as long as the wallet takes.
+        for _ in 0..40 {
+            assert_eq!(minted_entity_id(&sign_section(&state, "/deploy/sign")), id);
+        }
+        assert_eq!(state.pending.lock().unwrap().len(), 1);
+        assert!(
+            state.pending.lock().unwrap().contains_key(&id),
+            "forty renders later the first id is still pending"
+        );
 
         let stale = sign_as(&state, "0x0".into(), "0x0".into(), "bogus".into()).await;
         assert_eq!(stale["ok"], false);
         assert_eq!(stale["fatal"], false);
+        assert_eq!(stale["stale"], true, "{stale}");
+        assert!(
+            stale["error"]
+                .as_str()
+                .unwrap()
+                .contains("no longer on the server"),
+            "{stale}"
+        );
+        // A stale answer drops the current mint: the page's rebuild draws a
+        // fresh id, and both stay signable.
+        let fresh = minted_entity_id(&sign_section(&state, "/deploy/sign"));
+        assert_ne!(fresh, id);
+        assert_eq!(state.pending.lock().unwrap().len(), 2);
+        assert_eq!(state.progress().phase, "idle");
+    }
+
+    /// Past the keep count only the oldest ids stop being signable.
+    #[test]
+    fn only_the_oldest_minted_ids_fall_out() {
+        let (_t, dep) = fixture("keep", None);
+        let (state, _rx) = new_state(dep);
+        let mut ids = Vec::new();
+        for _ in 0..(PENDING_KEEP + 3) {
+            ids.push(minted_entity_id(&sign_section(&state, "/deploy/sign")));
+            *state.minted.lock().unwrap() = None;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let pending = state.pending.lock().unwrap();
+        assert_eq!(pending.len(), PENDING_KEEP);
+        for id in &ids[..3] {
+            assert!(!pending.contains_key(id), "the oldest fell out");
+        }
+        for id in &ids[3..] {
+            assert!(pending.contains_key(id), "the newest stay");
+        }
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@ pub fn refuse_nameless_world() -> anyhow::Error {
     UserError::new(
         "scene.json has a worldConfiguration section that names no world",
         TrySteps::one(
-            "to deploy to Genesis City parcels: remove the worldConfiguration section from scene.json (the /target page's \"Point at Genesis City LAND\" does this)",
+            "to deploy to Genesis City parcels: remove the worldConfiguration section from scene.json (the /target page's \"Select LAND\" does this)",
         )
         .and("to publish a World: set worldConfiguration.name, e.g. \"myname.dcl.eth\""),
     )
@@ -37,7 +37,7 @@ pub(super) fn refuse_plain_scene_at_worlds() -> anyhow::Error {
         TrySteps::one(
             "to deploy to Genesis City parcels: drop --target-server / DCL_ONE_SDK_TARGET_SERVER so the scene routes to a Genesis catalyst",
         )
-        .and("to publish a World: set worldConfiguration.name in scene.json (the /target page's world picker does this)"),
+        .and("to publish a World: set worldConfiguration.name in scene.json (the /target page's \"Select World\" does this)"),
     )
     .why("worlds and Genesis parcels are different deploy destinations; this target is a worlds server")
     .into()
@@ -52,7 +52,7 @@ pub(super) fn refuse_world_at_genesis() -> anyhow::Error {
             "to publish the World: drop --target-server / DCL_ONE_SDK_TARGET_SERVER so it routes to the worlds server ({}), or point the target at a worlds server",
             super::WORLDS_CONTENT_SERVER
         ))
-        .and("to deploy to Genesis City parcels instead: remove worldConfiguration from scene.json (the /target page's \"Point at Genesis City LAND\" does this)"),
+        .and("to deploy to Genesis City parcels instead: remove worldConfiguration from scene.json (the /target page's \"Select LAND\" does this)"),
     )
     .why("worlds and Genesis parcels are different deploy destinations; this target is a Genesis catalyst")
     .into()
@@ -97,7 +97,7 @@ mod tests {
             "{e}"
         );
         assert!(e.contains("ADR-173"), "{e}");
-        assert!(e.contains("Point at Genesis City LAND"), "{e}");
+        assert!(e.contains("\"Select LAND\""), "{e}");
         assert!(e.contains("worldConfiguration.name"), "{e}");
     }
 

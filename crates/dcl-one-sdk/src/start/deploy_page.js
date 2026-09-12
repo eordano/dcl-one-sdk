@@ -46,6 +46,11 @@
     const nextMain = doc.querySelector('main.dash');
     const liveMain = document.querySelector('main.dash');
     if (nextMain && liveMain) liveMain.replaceWith(nextMain);
+    /* The nav's "signing…" / "live" badge sits outside main; a finished run
+       must not leave the header saying signing while the card says Published. */
+    const nextBadge = doc.getElementById('deploy-badge');
+    const liveBadge = document.getElementById('deploy-badge');
+    if (nextBadge && liveBadge) liveBadge.textContent = nextBadge.textContent;
     signInit();
     settle();
   };
@@ -68,7 +73,7 @@
     const form = event.target.closest && event.target.closest('#publish');
     if (!form) return;
     event.preventDefault();
-    const button = form.querySelector('.jn__cta');
+    const button = form.querySelector('button[type="submit"]');
     if (button) button.disabled = true;
     const response = await fetch(form.action, {
       method: 'POST',

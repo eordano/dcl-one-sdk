@@ -3,6 +3,7 @@
 //! the remote entity lookups, the CID/reuse split, and their caches.
 
 use super::landing::parse_parcels;
+pub(super) use crate::deploy::Reuse;
 use crate::deploy::{self, WORLDS_CONTENT_SERVER};
 use crate::scene::Project;
 use serde::de::DeserializeOwned;
@@ -133,7 +134,7 @@ pub(super) fn resolve_dest(
                     vec![GENESIS_READ.to_string()],
                     GENESIS_LAMBDAS.to_string(),
                     public_worlds,
-                    "on a public Genesis City catalyst".to_string(),
+                    format!("on {}", host_of(deploy::DEFAULT_GENESIS_TARGET_SERVER)),
                 ),
             }
         };
@@ -154,12 +155,6 @@ pub(super) fn resolve_dest(
 /// page is not a hung page.
 pub(super) const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 pub(super) const STATUS_TTL: Duration = Duration::from_secs(30);
-
-/// `available-content` is a GET with one `cid` pair per hash: batches keep the
-/// URL under proxy header limits, and past the cap reuse falls back to the
-/// active entity's own manifest and simply undercounts.
-pub(super) const AVAILABILITY_BATCH: usize = 80;
-pub(super) const AVAILABILITY_CAP: usize = 240;
 
 pub(super) struct CurrentScene {
     pub(super) title: String,
@@ -366,34 +361,10 @@ pub(super) async fn fetch_remote(dest: &Dest) -> (Remote, Option<String>) {
     (Remote::Unreachable(last), None)
 }
 
-/// Which of `cids` the server already stores, by the same `available-content`
-/// check the upload protocol runs. `None` means the question went unanswered.
-pub(super) async fn available_on_server(base: &str, cids: &[String]) -> Option<HashSet<String>> {
-    let batches = cids.chunks(AVAILABILITY_BATCH).map(|batch| {
-        let query: String = batch
-            .iter()
-            .map(|c| format!("cid={c}"))
-            .collect::<Vec<_>>()
-            .join("&");
-        fetch_json::<Vec<serde_json::Value>>(
-            status_client().get(format!("{base}/available-content?{query}")),
-        )
-    });
-    let mut have = HashSet::new();
-    for body in futures::future::join_all(batches).await {
-        have.extend(body.ok()?.iter().filter_map(|e| {
-            match e.get("available").and_then(|a| a.as_bool())? {
-                true => e.get("cid").and_then(|c| c.as_str()).map(str::to_string),
-                false => None,
-            }
-        }));
-    }
-    Some(have)
-}
-
-/// The publish-time CIDs (`hash_bytes_v1`, as `deploy::prepare` signs them)
-/// of the payload, cached against the payload fingerprint so they are paid
-/// once per edit. A file that cannot be read is absent and counts as an upload.
+/// The publish-time CIDs (`hash_bytes_v1` over the bytes `deploy::prepare`
+/// signs, release copy first) of the payload, cached against the payload
+/// fingerprint so they are paid once per edit. A file that cannot be read is
+/// absent and counts as an upload.
 pub(super) type HashResult = Arc<Result<HashMap<String, String>, String>>;
 
 pub(super) async fn cached_hashes(
@@ -411,7 +382,7 @@ pub(super) async fn cached_hashes(
     let computed = tokio::task::spawn_blocking(move || {
         let mut out = HashMap::new();
         for rel in &rels {
-            if let Ok(bytes) = std::fs::read(hash_root.join(rel)) {
+            if let Ok(bytes) = std::fs::read(deploy::payload_path(&hash_root, rel)) {
                 out.insert(rel.clone(), catalyrst_hashing::hash_bytes_v1(&bytes));
             }
         }
@@ -424,35 +395,18 @@ pub(super) async fn cached_hashes(
     entry
 }
 
-/// The reuse split: a file whose hash the server holds transfers nothing; a
-/// file with no hash (unreadable, or hashing failed) counts as an upload.
-pub(super) struct Reuse {
-    pub(super) reused_files: usize,
-    pub(super) reused_bytes: u64,
-    pub(super) upload_files: usize,
-    pub(super) upload_bytes: u64,
-}
-
+/// The forecast's split over the preview's names and sizes: a file whose
+/// hash the server holds transfers nothing; a file with no hash (unreadable,
+/// or hashing failed) counts as an upload.
 pub(super) fn split_reuse(
     files: &[(String, Option<u64>)],
     hashes: &HashMap<String, String>,
     on_server: &HashSet<String>,
 ) -> Reuse {
-    let mut r = Reuse {
-        reused_files: 0,
-        reused_bytes: 0,
-        upload_files: 0,
-        upload_bytes: 0,
-    };
-    for (rel, len) in files {
-        let (count, bytes) = match hashes.get(rel).is_some_and(|h| on_server.contains(h)) {
-            true => (&mut r.reused_files, &mut r.reused_bytes),
-            false => (&mut r.upload_files, &mut r.upload_bytes),
-        };
-        *count += 1;
-        *bytes += len.unwrap_or(0);
-    }
-    r
+    Reuse::tally(files.iter().map(|(rel, len)| {
+        let held = hashes.get(rel).is_some_and(|h| on_server.contains(h));
+        (held, len.unwrap_or(0))
+    }))
 }
 
 pub(super) struct LiveStatus {
@@ -556,7 +510,8 @@ pub(super) async fn cached_status(
 }
 
 /// The local CIDs against what the server holds: the entity manifests, plus
-/// an `available-content` check for the rest when there are few enough.
+/// the upload's own `available-content` question for the rest, so the
+/// forecast and the upload agree.
 async fn reuse_split(
     caches: &StatusCaches,
     project: &Project,
@@ -573,18 +528,12 @@ async fn reuse_split(
         _ => HashSet::new(),
     };
     if let Some(b) = base {
-        let mut unknown: Vec<String> = map
+        let unknown: Vec<&str> = map
             .values()
             .filter(|h| !on_server.contains(*h))
-            .cloned()
+            .map(String::as_str)
             .collect();
-        unknown.sort();
-        unknown.dedup();
-        if !unknown.is_empty() && unknown.len() <= AVAILABILITY_CAP {
-            if let Some(have) = available_on_server(&b, &unknown).await {
-                on_server.extend(have);
-            }
-        }
+        on_server.extend(deploy::stored_cids(&b, &unknown).await);
     }
     Some(split_reuse(&p.files, map, &on_server))
 }
@@ -596,9 +545,12 @@ pub(super) fn ago(ts_ms: i64, now_ms: i64) -> String {
         2..=119 => format!("{mins} minutes ago"),
         _ => {
             let hours = mins / 60;
+            let days = hours / 24;
             match hours {
                 2..=47 => format!("{hours} hours ago"),
-                _ => format!("{} days ago", hours / 24),
+                _ if days < 60 => format!("{days} days ago"),
+                _ if days < 730 => format!("{} months ago", days / 30),
+                _ => format!("{} years ago", days / 365),
             }
         }
     }

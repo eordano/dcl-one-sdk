@@ -5,10 +5,12 @@
 //! sentence, never a guess: a verdict is ✓, ✗, or "could not check".
 
 use super::deploy_status::{
-    cache_get, cache_put, fetch_json, host_of, lock, plural, status_client, Dest, STATUS_TTL,
+    cache_get, cache_put, fetch_json, host_of, lock, parse_coords, plural, status_client, Dest,
+    GENESIS_READ, STATUS_TTL,
 };
 use crate::deploy::{self, DocAnswer, WORLDS_CONTENT_SERVER};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -54,6 +56,28 @@ pub(super) struct Holdings {
     pub(super) operated_coords: Vec<(i64, i64)>,
 }
 
+/// The lambdas page the holdings come from: past this many owned (or
+/// operated) parcels the rest are unlisted, and the page says so.
+pub(super) const HOLDINGS_PAGE: usize = 100;
+
+/// One scene the wallet's parcels currently carry, from `entities/active`.
+#[derive(Clone, Debug)]
+pub(super) struct LandScene {
+    pub(super) title: String,
+    pub(super) timestamp: Option<i64>,
+    pub(super) coords: Vec<(i64, i64)>,
+}
+
+/// What sits on the wallet's parcels right now, read in batches from the
+/// content server, so the LAND picker can rank areas by how empty they are
+/// and when they were last published to.
+#[derive(Clone, Debug)]
+pub(super) struct LandUse {
+    pub(super) scenes: Vec<LandScene>,
+    /// Set when some batch went unanswered: parcels in it look empty.
+    pub(super) note: Option<String>,
+}
+
 /// Everything the rights fetch learned about one address at one destination.
 pub(super) struct Rights {
     pub(super) address: String,
@@ -67,6 +91,9 @@ pub(super) struct Rights {
     pub(super) unchecked_parcels: usize,
     /// Set when the parcel rows came from the chain lambdas, not the target's.
     pub(super) parcels_note: Option<String>,
+    /// What is deployed on the wallet's parcels; `None` when there are no
+    /// parcels to ask about or no content server answered.
+    pub(super) land_use: Option<LandUse>,
 }
 
 impl Rights {
@@ -80,6 +107,7 @@ impl Rights {
             parcel_rights: Vec::new(),
             unchecked_parcels: 0,
             parcels_note: None,
+            land_use: None,
         }
     }
 }
@@ -99,7 +127,7 @@ pub(super) struct AuthBases {
 
 /// The configured target's own pair when its sites tier serves `/auth/native`
 /// (a stale self-hosted realm 404s it, and a sign-in on a 404 helps nobody),
-/// else the catalyst.example.com pair, which grants catalyst.example.com no authority.
+/// else the dcl.one pair, which grants dcl.one no authority.
 pub(super) async fn working_auth_bases(default_target: Option<&str>) -> AuthBases {
     let own = auth_bases(default_target);
     let public = auth_bases(None);
@@ -124,7 +152,7 @@ pub(super) fn auth_bases(default_target: Option<&str>) -> AuthBases {
             let base = deploy::sanitize_catalyst_url(t);
             base.trim_end_matches("/content").to_string()
         }
-        None => "https://catalyst.example.com".to_string(),
+        None => "https://dcl.one".to_string(),
     };
     AuthBases {
         page: format!("{root}/auth/native"),
@@ -481,6 +509,10 @@ pub(super) async fn fetch_rights(dest: &Dest, address: &str) -> Rights {
         (Ok(l), Err(_)) => Some(parse_holdings(l, &Value::Null)),
         _ => None,
     };
+    let land_use = match holdings.as_ref().filter(|h| !h.coords.is_empty()) {
+        Some(h) => fetch_land_use(&land_read_bases(dest), &h.coords).await,
+        None => None,
+    };
 
     Rights {
         address: address.to_string(),
@@ -491,7 +523,89 @@ pub(super) async fn fetch_rights(dest: &Dest, address: &str) -> Rights {
         parcel_rights: target.rows,
         unchecked_parcels: target.unchecked,
         parcels_note: target.note,
+        land_use,
     }
+}
+
+/// Where the LAND picker reads Genesis City from: the target's own content
+/// server when the target is LAND, else the public one — a World target's
+/// read base answers about the World, not about parcels.
+pub(super) fn land_read_bases(dest: &Dest) -> Vec<String> {
+    match dest.world {
+        None => dest.read_bases.clone(),
+        Some(_) => vec![GENESIS_READ.to_string()],
+    }
+}
+
+/// `entities/active` takes this many pointers per call.
+const LAND_USE_BATCH: usize = 100;
+
+/// Active entities as scenes, one per entity id however many batches it
+/// showed up in.
+pub(super) fn parse_land_use(entities: &[Value]) -> Vec<LandScene> {
+    let mut seen: HashSet<String> = HashSet::new();
+    entities
+        .iter()
+        .filter(|e| {
+            let id = e.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+            id.is_empty() || seen.insert(id.to_string())
+        })
+        .map(|e| {
+            let pointers: Vec<String> = e
+                .get("pointers")
+                .and_then(|p| p.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            LandScene {
+                title: deploy::entity_title(e),
+                timestamp: e.get("timestamp").and_then(|t| t.as_i64()),
+                coords: parse_coords(&pointers),
+            }
+        })
+        .collect()
+}
+
+/// What is deployed on `coords`, asked in batches of [`LAND_USE_BATCH`]
+/// against `bases` in order. `None` when no batch was answered at all; a
+/// partial answer carries a note instead of passing off gaps as empties.
+pub(super) async fn fetch_land_use(bases: &[String], coords: &[(i64, i64)]) -> Option<LandUse> {
+    let mut entities: Vec<Value> = Vec::new();
+    let mut failed = 0usize;
+    let batches = coords.chunks(LAND_USE_BATCH);
+    let total = batches.len();
+    for chunk in batches {
+        let pointers: Vec<String> = chunk.iter().map(|(x, y)| format!("{x},{y}")).collect();
+        let mut answered = false;
+        for base in bases {
+            let req = status_client()
+                .post(format!("{}/entities/active", base.trim_end_matches('/')))
+                .json(&serde_json::json!({ "pointers": pointers }));
+            if let Ok(got) = fetch_json::<Vec<Value>>(req).await {
+                entities.extend(got);
+                answered = true;
+                break;
+            }
+        }
+        if !answered {
+            failed += 1;
+        }
+    }
+    if failed == total {
+        return None;
+    }
+    let note = (failed > 0).then(|| {
+        format!(
+            "{failed} of {total} parcel batches went unanswered, so some parcels may only look empty."
+        )
+    });
+    Some(LandUse {
+        scenes: parse_land_use(&entities),
+        note,
+    })
 }
 
 /// The declared target's verdict, with the per-parcel rows behind a land one
@@ -709,6 +823,61 @@ mod tests {
 
     /// The names page answers bare labels; the worlds tier speaks
     /// `name.dcl.eth`, so the parser does too and the merge has one spelling.
+    /// Batches of 100 pointers, one scene per entity id even when it spans
+    /// two batches, and a closed port answers nothing at all.
+    #[tokio::test]
+    async fn land_use_batches_the_parcels_and_dedupes_entities() {
+        use axum::routing::post;
+        use axum::Json;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = Router::new().route(
+            "/entities/active",
+            post(move |Json(body): Json<Value>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let asked: Vec<&str> = body["pointers"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.as_str().unwrap())
+                        .collect();
+                    let mut out = Vec::new();
+                    if asked.iter().any(|p| *p == "99,0" || *p == "100,0") {
+                        out.push(json!({ "id": "bafy-span", "pointers": ["99,0", "100,0"],
+                            "timestamp": 1_000, "metadata": { "display": { "title": "Spanner" } } }));
+                    }
+                    if asked.contains(&"150,0") {
+                        out.push(json!({ "id": "bafy-edge", "pointers": ["150,0"],
+                            "timestamp": 2_000, "metadata": { "display": { "title": "Edge" } } }));
+                    }
+                    Json(out)
+                }
+            }),
+        );
+        let base = serve(app).await;
+        let coords: Vec<(i64, i64)> = (0..=150).map(|x| (x, 0)).collect();
+        let got = fetch_land_use(&[base], &coords).await.expect("answered");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "151 parcels are two batches"
+        );
+        let titles: Vec<&str> = got.scenes.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Spanner", "Edge"],
+            "one row per entity: {titles:?}"
+        );
+        assert_eq!(got.scenes[0].coords, [(99, 0), (100, 0)]);
+        assert_eq!(got.scenes[1].timestamp, Some(2_000));
+        assert!(got.note.is_none());
+        let dead = ["http://127.0.0.1:1".to_string()];
+        assert!(fetch_land_use(&dead, &coords).await.is_none());
+    }
+
     #[test]
     fn names_become_world_names() {
         let v = json!({ "elements": [
@@ -870,7 +1039,7 @@ mod tests {
 
     /// A configured target keeps the sign-in on its own domain only while it
     /// serves the authorize page: a 404 and an unreachable host both fall
-    /// back to the catalyst.example.com pair.
+    /// back to the dcl.one pair.
     #[tokio::test]
     async fn the_connect_bases_fall_back_when_the_target_page_is_missing() {
         let serve_page = |ok: bool| {
@@ -895,13 +1064,13 @@ mod tests {
         let stale = serve_page(false).await;
         let bases = working_auth_bases(Some(&stale)).await;
         assert_eq!(
-            bases.page, "https://catalyst.example.com/auth/native",
+            bases.page, "https://dcl.one/auth/native",
             "a 404 falls back"
         );
 
         let bases = working_auth_bases(Some("http://127.0.0.1:9")).await;
         assert_eq!(
-            bases.page, "https://catalyst.example.com/auth/native",
+            bases.page, "https://dcl.one/auth/native",
             "unreachable falls back"
         );
     }
@@ -962,12 +1131,12 @@ mod tests {
     #[test]
     fn the_auth_bases_follow_the_target() {
         let public = auth_bases(None);
-        let public_relay = "https://catalyst.example.com/internal/native-auth-relay";
-        assert_eq!(public.page, "https://catalyst.example.com/auth/native");
+        let public_relay = "https://dcl.one/internal/native-auth-relay";
+        assert_eq!(public.page, "https://dcl.one/auth/native");
         assert_eq!(public.relay, public_relay);
-        let own = auth_bases(Some("peer.example.net/content"));
-        let own_relay = "https://peer.example.net/internal/native-auth-relay";
-        assert_eq!(own.page, "https://peer.example.net/auth/native");
+        let own = auth_bases(Some("peer.dcl.social/content"));
+        let own_relay = "https://peer.dcl.social/internal/native-auth-relay";
+        assert_eq!(own.page, "https://peer.dcl.social/auth/native");
         assert_eq!(own.relay, own_relay);
         assert_eq!(auth_bases(Some("  ")).page, public.page, "blank is unset");
     }

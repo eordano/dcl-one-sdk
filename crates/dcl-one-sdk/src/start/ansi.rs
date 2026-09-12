@@ -42,7 +42,6 @@ impl Style {
     }
 }
 
-/// HTML for `s`, escaped, with SGR colour and weight as spans.
 pub fn to_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut style = Style::default();
@@ -52,10 +51,8 @@ pub fn to_html(s: &str) -> String {
         push_escaped(&mut out, &rest[..i]);
         rest = &rest[i + 1..];
         let Some(after) = rest.strip_prefix('[') else {
-            // A lone ESC (or one starting another kind of sequence) is dropped.
             continue;
         };
-        // CSI: parameter bytes, then one final byte in 0x40..=0x7e.
         let end = after
             .char_indices()
             .find(|(_, c)| ('\u{40}'..='\u{7e}').contains(c));
@@ -74,8 +71,6 @@ pub fn to_html(s: &str) -> String {
         }
         let mut codes = params.split(';').map(|c| c.parse::<u8>().unwrap_or(0));
         while let Some(code) = codes.next() {
-            // 256-colour and truecolour selectors carry arguments; skip them
-            // rather than reading `5`/`2` and the channels as codes.
             if code == 38 || code == 48 {
                 match codes.next() {
                     Some(5) => {
@@ -109,8 +104,6 @@ pub fn to_html(s: &str) -> String {
     out
 }
 
-/// The same text with every escape sequence removed, for places that keep
-/// no colour (a history row, a log line).
 pub fn strip(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -150,8 +143,6 @@ fn push_escaped(out: &mut String, text: &str) {
 mod tests {
     use super::*;
 
-    /// tsc's pretty output: colour and reset land as spans, the text is
-    /// escaped, and a bare reset closes what is open.
     #[test]
     fn sgr_colour_becomes_spans_and_text_is_escaped() {
         let s = "\u{1b}[96msrc/a.ts\u{1b}[0m:\u{1b}[93m73\u{1b}[0m - \u{1b}[91merror\u{1b}[0m \u{1b}[90mTS2339: \u{1b}[0mtype 'A<B>' does not exist";
@@ -165,8 +156,6 @@ mod tests {
         );
     }
 
-    /// Bold and dim stack with colour, 22 drops both, and an unterminated or
-    /// non-SGR sequence leaves no litter.
     #[test]
     fn weight_stacks_and_other_sequences_vanish() {
         assert_eq!(

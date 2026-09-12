@@ -75,7 +75,7 @@ fn forget(st: &Arc<AppState>) {
 /// while `page` printed the absolute path of the scene.
 async fn served(st: &Arc<AppState>) -> String {
     forget(st);
-    let resp = route(State(st.clone()), ConnectInfo(LOCAL), HeaderMap::new()).await;
+    let resp = fetch(st, LOCAL).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(resp
         .headers()
@@ -166,11 +166,182 @@ fn linker_deploy(target: &str, world: Option<&str>) -> crate::linker::LinkerDepl
 
 /// A live signer with no wallet answer yet.
 fn parked_signer() -> Arc<crate::linker::LinkerState> {
-    crate::linker::new_state(linker_deploy(
-        "https://worlds-content-server.decentraland.org",
-        Some("w.dcl.eth"),
-    ))
-    .0
+    crate::linker::new_state(linker_deploy(WORLDS_CONTENT_SERVER, Some("w.dcl.eth"))).0
+}
+
+/// `None` for the default target on purpose: reading the environment would
+/// make a test say something different on a machine that exports
+/// `DCL_ONE_SDK_TARGET_SERVER`.
+fn dest_of(scene_json: &serde_json::Value) -> Dest {
+    resolve_dest(scene_json, None, None)
+}
+
+fn remote_state(current: Option<CurrentScene>, others: Vec<RemoteScene>) -> RemoteState {
+    RemoteState {
+        current,
+        others,
+        hashes: HashSet::new(),
+    }
+}
+
+fn status_with(remote: Remote, r: Reuse) -> LiveStatus {
+    LiveStatus {
+        remote,
+        reuse: Some(r),
+    }
+}
+
+fn holdings(
+    parcels: i64,
+    estates: i64,
+    operated: i64,
+    coords: Vec<(i64, i64)>,
+    owned: Vec<(i64, i64)>,
+    operated_coords: Vec<(i64, i64)>,
+) -> Holdings {
+    Holdings {
+        parcels,
+        estates,
+        operated,
+        coords,
+        owned,
+        operated_coords,
+    }
+}
+
+fn identity(signer: &str, expiration_ms: i64) -> deploy::DeployIdentity {
+    deploy::DeployIdentity {
+        signer: signer.into(),
+        ephemeral_key: "0x0000000000000000000000000000000000000000000000000000000000000042".into(),
+        delegation_payload: "Decentraland Login\nEphemeral address: x\nExpiration: y".into(),
+        delegation_signature: "0xsig".into(),
+        expiration_ms,
+    }
+}
+
+/// The slice of `html` between two markers: one pane of the target card.
+fn between<'a>(html: &'a str, from: &str, to: &str) -> &'a str {
+    html.split(from).nth(1).unwrap().split(to).next().unwrap()
+}
+
+fn land_pane(card: &str) -> &str {
+    between(card, "tgt__pane--land\">", "tgt__pane--multi\">")
+}
+
+fn scene_on_disk(root: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(root.join("scene.json")).unwrap()).unwrap()
+}
+
+fn world_scene(tag: &str) -> (Tree, Project) {
+    scene(
+        tag,
+        json!({ "display": { "title": "Gather" }, "worldConfiguration": { "name": "my.dcl.eth" } }),
+    )
+}
+
+const WORLD: &str = "World w.dcl.eth";
+
+fn claim_world(st: &AppState, auto: bool, print: &str) -> Option<u64> {
+    claim(st, WORLD.into(), auto, print.into())
+}
+
+fn drift_world(st: &AppState, print: &str) -> Option<u64> {
+    drift_reclaim(st, WORLD.into(), print)
+}
+
+/// The linker has bound the pending run's signing page.
+fn note_signing(st: &AppState) {
+    runs(st).as_mut().expect("held").signing = Some("/deploy".into());
+}
+
+/// One mutating handler, called the way the router calls it.
+async fn post<B, F, Fut>(st: &Arc<AppState>, peer: SocketAddr, body: B, handler: F) -> Response
+where
+    F: FnOnce(State<Arc<AppState>>, ConnectInfo<SocketAddr>, HeaderMap, B) -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    handler(State(st.clone()), ConnectInfo(peer), HeaderMap::new(), body).await
+}
+
+async fn fetch(st: &Arc<AppState>, peer: SocketAddr) -> Response {
+    route(State(st.clone()), ConnectInfo(peer), HeaderMap::new()).await
+}
+
+fn card_at(
+    dest: &Dest,
+    p: &deploy::DeployPreview,
+    status: &LiveStatus,
+    phase: Phase<'_>,
+) -> String {
+    card(
+        "", "tok", "Gather", dest, p, status, "fp", None, None, phase, "",
+    )
+}
+
+/// The Hexabricks fixture: a 6×4 footprint based at 2,12, as coords, as
+/// pointers, and as a scene.
+fn hexabricks(tag: &str) -> (Vec<(i64, i64)>, Vec<String>, Tree, Project) {
+    let coords: Vec<_> = (12..16).flat_map(|y| (2..8).map(move |x| (x, y))).collect();
+    let pointers: Vec<_> = coords.iter().map(|(x, y)| format!("{x},{y}")).collect();
+    let (dir, project) = scene(
+        tag,
+        json!({
+            "display": { "title": "Hexabricks" },
+            "scene": { "base": "2,12", "parcels": pointers }
+        }),
+    );
+    (coords, pointers, dir, project)
+}
+
+fn demo_card(
+    dest: &Dest,
+    p: &deploy::DeployPreview,
+    live: &LiveStatus,
+    rights: Option<&Rights>,
+    history: &[PastRun],
+) -> String {
+    target_card(
+        "Hexabricks",
+        "/t/demo",
+        "test-token",
+        dest,
+        p,
+        live,
+        rights,
+        None,
+        history,
+    )
+}
+
+/// Writes the rendered target page to `DCL_TARGET_DESIGN_CAPTURE`, when set.
+fn capture_design(file: &str, badge: &'static str, tok: &'static str, card: &str) {
+    let Ok(dir) = std::env::var("DCL_TARGET_DESIGN_CAPTURE") else {
+        return;
+    };
+    let nav = super::super::chrome::Nav {
+        active: "target",
+        badge,
+        host: "127.0.0.1:8001",
+        account: Some(ADDR.into()),
+        token: tok,
+    };
+    let body = format!(
+        r#"<main class="dash"><section id="target" class="sec">{card}</section></main><script>{TARGET_SCRIPT}</script>"#
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        Path::new(&dir).join(file),
+        document(
+            "Target",
+            "/t/demo",
+            target_css(),
+            "#target",
+            "Skip to target",
+            Some(&nav),
+            &body,
+        ),
+    )
+    .unwrap();
 }
 
 /// The loopback gate, which the router tests cannot reach: their client is
@@ -181,14 +352,14 @@ async fn a_peer_off_this_machine_cannot_publish() {
     let (_tree, project) = gather("remote");
     let st = state(project);
 
-    let refused = start(
-        State(st.clone()),
-        ConnectInfo(LAN),
-        HeaderMap::new(),
+    let refused = post(
+        &st,
+        LAN,
         Form(DeployForm {
             token: token(&st).to_string(),
             fingerprint: String::new(),
         }),
+        start,
     )
     .await;
     assert_eq!(
@@ -303,13 +474,8 @@ fn the_page_local_css_adds_layout_and_never_a_second_palette() {
 #[test]
 fn the_destination_resolves_like_the_deploy_will() {
     let world = json!({ "worldConfiguration": { "name": "gather.dcl.eth" } });
-    let d = resolve_dest(&world, None, None);
+    let d = dest_of(&world);
     assert_eq!(d.headline, "World gather.dcl.eth");
-    assert!(
-        d.server_line.contains("worlds-content-server"),
-        "{}",
-        d.server_line
-    );
     assert_eq!(d.server_line, "on worlds-content-server.decentraland.org");
     assert_eq!(d.read_bases, [WORLDS_CONTENT_SERVER]);
     assert_eq!(
@@ -320,14 +486,14 @@ fn the_destination_resolves_like_the_deploy_will() {
 
     let land =
         json!({ "scene": { "parcels": ["85,40", "86,40", "85,41", "86,41"], "base": "85,40" } });
-    let d = resolve_dest(&land, None, None);
+    let d = dest_of(&land);
     assert_eq!(d.headline, "Parcels 85,40\u{2013}86,41");
     assert_eq!(d.server_line, "on peer.decentraland.org");
     assert_eq!(d.base_pointer, "85,40");
     assert_eq!(d.read_bases, [GENESIS_READ]);
 
     let one = json!({ "scene": { "parcels": ["3,-2"], "base": "3,-2" } });
-    assert_eq!(resolve_dest(&one, None, None).headline, "Parcel 3,-2");
+    assert_eq!(dest_of(&one).headline, "Parcel 3,-2");
 
     let env = resolve_dest(&world, Some("my-server.example.com"), None);
     assert_eq!(env.headline, "World gather.dcl.eth");
@@ -436,25 +602,18 @@ fn a_genesis_answer_headlines_the_base_parcel_entity() {
 /// `multi_scene: true` only holds on a worlds server.
 #[test]
 fn every_remote_state_renders_and_names_the_fate_of_neighbours() {
-    let world = resolve_dest(
+    let world = dest_of(
         &json!({ "worldConfiguration": { "name": "w.dcl.eth" }, "scene": { "parcels": ["0,0"], "base": "0,0" } }),
-        None,
-        None,
     );
-    let land = resolve_dest(
-        &json!({ "scene": { "parcels": ["0,0"], "base": "0,0" } }),
-        None,
-        None,
-    );
-    let known = status(Remote::Known(RemoteState {
-        current: Some(current_scene(
+    let land = dest_of(&json!({ "scene": { "parcels": ["0,0"], "base": "0,0" } }));
+    let known = status(Remote::Known(remote_state(
+        Some(current_scene(
             "Gathering Stage",
             Some(deploy::now_ms() - 3 * 86_400_000),
             vec![(0, 0), (0, 1), (1, 0), (1, 1)],
         )),
-        others: vec![remote_scene("Bazaar", vec![(5, 5), (5, 6), (6, 5)])],
-        hashes: HashSet::new(),
-    }));
+        vec![remote_scene("Bazaar", vec![(5, 5), (5, 6), (6, 5)])],
+    )));
     let html = server_panel(&world, &known);
     assert!(html.contains("Gathering Stage"), "{html}");
     assert!(html.contains("3 days ago"), "{html}");
@@ -467,12 +626,8 @@ fn every_remote_state_renders_and_names_the_fate_of_neighbours() {
     let html = server_panel(&land, &known);
     assert!(html.contains("replaced by this publish"), "{html}");
 
-    let empty = status(Remote::Empty);
-    assert!(
-        server_panel(&world, &empty).contains("Nothing is deployed here yet"),
-        "{}",
-        server_panel(&world, &empty)
-    );
+    let html = server_panel(&world, &status(Remote::Empty));
+    assert!(html.contains("Nothing is deployed here yet"), "{html}");
 
     let down = status(Remote::Unreachable(
         "could not reach worlds-content-server.decentraland.org".into(),
@@ -482,11 +637,8 @@ fn every_remote_state_renders_and_names_the_fate_of_neighbours() {
     assert!(html.contains("Publishing may still work"), "{html}");
 
     let off = LiveStatus::unknown("Live checks are off for this run");
-    assert!(
-        server_panel(&world, &off).contains("Live checks are off"),
-        "{}",
-        server_panel(&world, &off)
-    );
+    let html = server_panel(&world, &off);
+    assert!(html.contains("Live checks are off"), "{html}");
 }
 
 /// A file the server holds transfers nothing, a file with no hash is an
@@ -514,16 +666,12 @@ fn the_reuse_split_counts_files_and_bytes_by_server_hash() {
     assert_eq!(none.upload_files, 4);
 }
 
-/// The upload column says the split in one line, and only when there is a
-/// split to say.
+/// ...and only when there is a split to say.
 #[test]
 fn the_upload_column_says_the_split_in_one_line() {
     let (_dir, project) = gather("upline");
     let p = deploy::preview(&project).unwrap();
-    let with = LiveStatus {
-        remote: Remote::Empty,
-        reuse: Some(reuse(2, 2000, 1, 79)),
-    };
+    let with = status_with(Remote::Empty, reuse(2, 2000, 1, 79));
     let html = upload_panel(&p, &with);
     assert!(
         html.contains("2 of 3 files are already on the server"),
@@ -531,10 +679,7 @@ fn the_upload_column_says_the_split_in_one_line() {
     );
     assert!(html.contains("1 to upload (79 bytes)"), "{html}");
 
-    let fresh = LiveStatus {
-        remote: Remote::Empty,
-        reuse: Some(reuse(0, 0, 3, 2079)),
-    };
+    let fresh = status_with(Remote::Empty, reuse(0, 0, 3, 2079));
     let html = upload_panel(&p, &fresh);
     assert!(html.contains("All 3 files upload"), "{html}");
 
@@ -557,11 +702,20 @@ async fn the_reuse_hashes_are_the_publish_time_cids() {
         "console.log(\"golden\");\n",
     )
     .unwrap();
+    async fn hashed(
+        st: &AppState,
+        project: &Project,
+        p: &deploy::DeployPreview,
+    ) -> (String, HashResult) {
+        let print = fingerprint(&project.root, p);
+        let rels = p.files.iter().map(|(rel, _)| rel.clone()).collect();
+        let hashes =
+            cached_hashes(&st.deploy.caches, project.root.clone(), print.clone(), rels).await;
+        (print, hashes)
+    }
     let p = deploy::preview(&project).unwrap();
-    let print = fingerprint(&project.root, &p);
-    let rels: Vec<String> = p.files.iter().map(|(rel, _)| rel.clone()).collect();
     let st = state(project.clone());
-    let hashes = cached_hashes(&st.deploy.caches, project.root.clone(), print.clone(), rels).await;
+    let (print, hashes) = hashed(&st, &project, &p).await;
     let map = hashes.as_ref().as_ref().expect("hashing succeeds");
     assert_eq!(
         map.get("bin/index.js").map(String::as_str),
@@ -569,16 +723,12 @@ async fn the_reuse_hashes_are_the_publish_time_cids() {
         "same CID the deploy golden test pins for these bytes"
     );
     assert_eq!(map.len(), p.files.len(), "every readable file is hashed");
-    // A release copy is what the deploy signs, so it is what the forecast
-    // hashes — and its arrival moves the fingerprint.
     let twin = project.root.join(".dcl-one/release/bin/index.js");
     std::fs::create_dir_all(twin.parent().unwrap()).unwrap();
     std::fs::write(&twin, "console.log(\"release\");\n").unwrap();
     let p2 = deploy::preview(&project).unwrap();
-    let print2 = fingerprint(&project.root, &p2);
+    let (print2, hashes) = hashed(&st, &project, &p2).await;
     assert_ne!(print2, print, "the twin's arrival moves the print");
-    let rels: Vec<String> = p2.files.iter().map(|(rel, _)| rel.clone()).collect();
-    let hashes = cached_hashes(&st.deploy.caches, project.root.clone(), print2, rels).await;
     let map = hashes.as_ref().as_ref().expect("hashing succeeds");
     assert_eq!(
         map.get("bin/index.js").map(String::as_str),
@@ -613,12 +763,7 @@ fn the_run_region_marks_its_state_for_the_script_and_the_no_js_refresh() {
         r#"<div class="panel" id="sign-panel" data-api="/t/abc/deploy/sign">…</div>"#;
     let mut run = Run {
         signing: Some("/deploy".into()),
-        ..Run::new(
-            1,
-            "https://worlds-content-server.decentraland.org".into(),
-            false,
-            "abc123".into(),
-        )
+        ..Run::new(1, WORLDS_CONTENT_SERVER.into(), false, "abc123".into())
     };
     let html = run_region_for("/t/abc", Some(&run), Some(PANEL));
     assert!(
@@ -734,68 +879,29 @@ async fn the_card_names_the_destination_once_and_the_bare_command() {
         "world",
         json!({ "worldConfiguration": { "name": "my.dcl.eth" } }),
     );
-    let dest = resolve_dest(&project.scene_json, None, None);
+    let dest = dest_of(&project.scene_json);
     let p = deploy::preview(&project).unwrap();
     let status = LiveStatus::unknown("Live checks are off for this run");
-    let html = card(
-        "",
-        "tok",
-        "Gather",
-        &dest,
-        &p,
-        &status,
-        "fp",
-        None,
-        None,
-        Phase::Idle,
-        "",
-    );
+    let html = card_at(&dest, &p, &status, Phase::Idle);
     assert!(html.contains("dcl-one-sdk deploy</code>"), "{html}");
     assert!(html.contains("live state unknown"), "{html}");
     assert!(
         html.contains(&format!("· {} files · ", p.files.len())),
         "{html}"
     );
-    // The head states the forecast's split in the upload's words once the
-    // server has answered — the same sentence the /target column says.
-    let forecast = LiveStatus {
-        remote: Remote::Empty,
-        reuse: Some(reuse(2, 2000, 1, 79)),
-    };
-    let told = card(
-        "",
-        "tok",
-        "Gather",
-        &dest,
-        &p,
-        &forecast,
-        "fp",
-        None,
-        None,
-        Phase::Idle,
-        "",
-    );
+    let forecast = status_with(Remote::Empty, reuse(2, 2000, 1, 79));
+    let told = card_at(&dest, &p, &forecast, Phase::Idle);
     assert!(
         told.contains(
             "· 2 of 3 files are already on the server — 1 to upload (79 bytes) · first publish"
         ),
         "{told}"
     );
-    // Published: the head says so, Jump in is the call to action, another
-    // run is the quiet button, and the explaining stops — one finished
-    // state, not two.
-    let done = card(
-        "",
-        "tok",
-        "Gather",
+    let done = card_at(
         &dest,
         &p,
         &status,
-        "fp",
-        None,
-        None,
         Phase::Done(Some("https://decentraland.org/play/?realm=my.dcl.eth")),
-        "",
     );
     assert!(
         done.contains(
@@ -808,19 +914,7 @@ async fn the_card_names_the_destination_once_and_the_bare_command() {
         1,
         "one call to action: {done}"
     );
-    let no_realm = card(
-        "",
-        "tok",
-        "Gather",
-        &dest,
-        &p,
-        &status,
-        "fp",
-        None,
-        None,
-        Phase::Done(None),
-        "",
-    );
+    let no_realm = card_at(&dest, &p, &status, Phase::Done(None));
     assert!(
         no_realm.contains(r#"<button class="jn__cta" type="submit">Publish again</button>"#)
             && !no_realm.contains("Jump in"),
@@ -834,19 +928,7 @@ async fn the_card_names_the_destination_once_and_the_bare_command() {
         done.contains("just published") && !done.contains("live state unknown"),
         "{done}"
     );
-    let running = card(
-        "",
-        "tok",
-        "Gather",
-        &dest,
-        &p,
-        &status,
-        "fp",
-        None,
-        None,
-        Phase::Running,
-        "",
-    );
+    let running = card_at(&dest, &p, &status, Phase::Running);
     assert!(!running.contains("jn__cta"), "no button mid-run: {running}");
     assert!(html.contains("World my.dcl.eth"), "{html}");
     assert!(
@@ -871,10 +953,7 @@ async fn the_card_names_the_destination_once_and_the_bare_command() {
 #[tokio::test]
 async fn the_target_page_separates_destinations_from_world_details_and_history() {
     let _guard = crate::deploy::ENV_LOCK.lock().await;
-    let (_dir, project) = scene(
-        "targetpg",
-        json!({ "display": { "title": "Gather" }, "worldConfiguration": { "name": "my.dcl.eth" } }),
-    );
+    let (_dir, project) = world_scene("targetpg");
     let html = served_target(&state(project)).await;
     assert!(
         !html.contains("<h2>Deploy target</h2>"),
@@ -908,13 +987,7 @@ async fn the_target_page_separates_destinations_from_world_details_and_history()
     ] {
         assert!(html.contains(pane), "missing {pane}: {html}");
     }
-    let multi = html
-        .split("tgt__pane--multi\">")
-        .nth(1)
-        .unwrap()
-        .split("tgt__pane--history\">")
-        .next()
-        .unwrap();
+    let multi = between(&html, "tgt__pane--multi\">", "tgt__pane--history\">");
     assert!(
         !multi.contains("/target/point") && !multi.contains("/target/base"),
         "a view of the destination carries no select form: {multi}"
@@ -955,13 +1028,7 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
         ))
     };
 
-    let blocked = sign_submit(
-        State(st.clone()),
-        ConnectInfo(LAN),
-        HeaderMap::new(),
-        sig_req(),
-    )
-    .await;
+    let blocked = post(&st, LAN, sig_req(), sign_submit).await;
     assert_eq!(
         blocked.status(),
         StatusCode::FORBIDDEN,
@@ -973,13 +1040,7 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
         pending_sign_panel(&st, "").is_none(),
         "no signer, no panel to draw"
     );
-    let idle = sign_submit(
-        State(st.clone()),
-        ConnectInfo(LOCAL),
-        HeaderMap::new(),
-        sig_req(),
-    )
-    .await;
+    let idle = post(&st, LOCAL, sig_req(), sign_submit).await;
     assert_eq!(
         idle.status(),
         StatusCode::NOT_FOUND,
@@ -1005,7 +1066,7 @@ async fn the_signing_endpoint_is_hosted_gated_and_pending_aware() {
     );
 
     forget(&st);
-    let remote = body_of(route(State(st.clone()), ConnectInfo(LAN), HeaderMap::new()).await).await;
+    let remote = body_of(fetch(&st, LAN).await).await;
     assert!(
         !remote.contains(r#"id="sign-panel""#),
         "a peer the signing gate refuses gets no payload facts: {remote}"
@@ -1208,8 +1269,7 @@ async fn the_walk_is_reused_for_a_moment() {
     let st = state(project.clone());
     let first = served(&st).await;
     std::fs::write(project.root.join("assets/late.glb"), vec![1u8; 4096]).unwrap();
-    let cached =
-        body_of(route(State(st.clone()), ConnectInfo(LOCAL), HeaderMap::new()).await).await;
+    let cached = body_of(fetch(&st, LOCAL).await).await;
     assert_eq!(cached, first, "the second request did not walk again");
     assert!(!cached.contains("late.glb"));
     let fresh = served(&st).await;
@@ -1253,14 +1313,14 @@ async fn the_address_form_is_gated_like_the_publish_post() {
     let (_dir, project) = gather("addrgate");
     let st = state(project);
     let submit = |peer: SocketAddr, token: &str, address: &str| {
-        target_address(
-            State(st.clone()),
-            ConnectInfo(peer),
-            HeaderMap::new(),
+        post(
+            &st,
+            peer,
             Form(AddressForm {
                 token: token.to_string(),
                 address: address.to_string(),
             }),
+            target_address,
         )
     };
 
@@ -1297,10 +1357,7 @@ async fn the_address_form_is_gated_like_the_publish_post() {
 #[tokio::test]
 async fn the_bar_connects_an_account_and_the_page_checks_with_it() {
     let _guard = crate::deploy::ENV_LOCK.lock().await;
-    let (_dir, project) = scene(
-        "addrpage",
-        json!({ "display": { "title": "Gather" }, "worldConfiguration": { "name": "my.dcl.eth" } }),
-    );
+    let (_dir, project) = world_scene("addrpage");
     let st = state(project);
     let html = served_target(&st).await;
     assert!(
@@ -1364,13 +1421,13 @@ async fn the_connect_post_is_gated_and_off_in_dry_runs() {
     let (_dir, project) = gather("connectgate");
     let st = state(project);
     let submit = |peer: SocketAddr, token: &str| {
-        target_connect(
-            State(st.clone()),
-            ConnectInfo(peer),
-            HeaderMap::new(),
+        post(
+            &st,
+            peer,
             Form(ConnectForm {
                 token: token.to_string(),
             }),
+            target_connect,
         )
     };
 
@@ -1396,11 +1453,9 @@ async fn a_finished_run_lands_in_history_and_survives_a_restart() {
     let (_dir, project) = gather("history");
     let root = project.root.clone();
     let st = state(project.clone());
-    let id =
-        claim(&st, "World w.dcl.eth".into(), false, "abc123".into()).expect("nothing is running");
+    let id = claim_world(&st, false, "abc123").expect("nothing is running");
     finish(&st, id, RunState::Done("Deployed bafy (HTTP 200)".into()));
-    let id =
-        claim(&st, "World w.dcl.eth".into(), false, "abc123".into()).expect("done is not running");
+    let id = claim_world(&st, false, "abc123").expect("done is not running");
     finish(&st, id, RunState::Stale(vec![]));
     let id = claim(
         &st,
@@ -1482,11 +1537,10 @@ async fn a_finished_run_lands_in_history_and_survives_a_restart() {
 /// footprint dashed — and past the span cap, no grid at all.
 #[test]
 fn the_after_map_draws_kept_replaced_and_ours() {
-    let state = RemoteState {
-        current: Some(current_scene("Old", None, vec![(0, 0), (1, 0)])),
-        others: vec![remote_scene("Bazaar", vec![(2, 0), (2, 1)])],
-        hashes: HashSet::new(),
-    };
+    let state = remote_state(
+        Some(current_scene("Old", None, vec![(0, 0), (1, 0)])),
+        vec![remote_scene("Bazaar", vec![(2, 0), (2, 1)])],
+    );
     let ours = [(0, 0), (0, 1)];
     let html = after_map(&state, &ours, (0, 0));
     assert_eq!(html.matches("lay__cell--base").count(), 1, "{html}");
@@ -1507,11 +1561,7 @@ fn the_after_map_draws_kept_replaced_and_ours() {
     );
     assert!(html.contains(r#"style="--lay-cols:3""#), "{html}");
 
-    let sprawling = RemoteState {
-        current: None,
-        others: vec![remote_scene("Far", vec![(0, 0), (40, 40)])],
-        hashes: HashSet::new(),
-    };
+    let sprawling = remote_state(None, vec![remote_scene("Far", vec![(0, 0), (40, 40)])]);
     assert_eq!(
         after_map(&sprawling, &ours, (0, 0)),
         "",
@@ -1531,15 +1581,10 @@ fn the_multiscene_pane_sums_only_reported_sizes() {
         { "parcels": ["4,4"], "entity": {
             "metadata": { "display": { "title": "Sizeless" } } } }
     ]});
-    let dest = resolve_dest(
+    let dest = dest_of(
         &json!({ "worldConfiguration": { "name": "w.dcl.eth" }, "scene": { "parcels": ["0,0"], "base": "0,0" } }),
-        None,
-        None,
     );
-    let status = LiveStatus {
-        remote: world_remote(&body, &dest.pointers),
-        reuse: Some(reuse(0, 0, 1, 500)),
-    };
+    let status = status_with(world_remote(&body, &dest.pointers), reuse(0, 0, 1, 500));
     let html = multiscene_pane(&dest, &status);
     assert!(
         html.contains(&format!(
@@ -1572,14 +1617,14 @@ async fn pointing_the_scene_rewrites_its_destination_in_scene_json() {
     let root = project.root.clone();
     let st = state(project);
     let submit = |peer: SocketAddr, world: &str| {
-        target_point(
-            State(st.clone()),
-            ConnectInfo(peer),
-            HeaderMap::new(),
+        post(
+            &st,
+            peer,
             Form(PointForm {
                 token: token(&st).to_string(),
                 world: world.to_string(),
             }),
+            target_point,
         )
     };
 
@@ -1595,8 +1640,7 @@ async fn pointing_the_scene_rewrites_its_destination_in_scene_json() {
 
     let ok = submit(LOCAL, "Gather.DCL.eth").await;
     assert_eq!(ok.status(), StatusCode::SEE_OTHER);
-    let on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("scene.json")).unwrap()).unwrap();
+    let on_disk = scene_on_disk(&root);
     assert_eq!(
         on_disk["worldConfiguration"]["name"], "gather.dcl.eth",
         "lowercased, the worlds tier's spelling"
@@ -1609,8 +1653,7 @@ async fn pointing_the_scene_rewrites_its_destination_in_scene_json() {
 
     let back = submit(LOCAL, "  ").await;
     assert_eq!(back.status(), StatusCode::SEE_OTHER);
-    let on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("scene.json")).unwrap()).unwrap();
+    let on_disk = scene_on_disk(&root);
     assert!(
         on_disk.get("worldConfiguration").is_none(),
         "an empty point returns the scene to its parcels"
@@ -1621,11 +1664,7 @@ async fn pointing_the_scene_rewrites_its_destination_in_scene_json() {
 /// the target itself does not — the row says so instead.
 #[test]
 fn the_world_rows_offer_the_re_aim() {
-    let dest = resolve_dest(
-        &json!({ "worldConfiguration": { "name": "my.dcl.eth" } }),
-        None,
-        None,
-    );
+    let dest = dest_of(&json!({ "worldConfiguration": { "name": "my.dcl.eth" } }));
     let row = |name: &str| world_row(name, Some(1), Some("My World"));
     let rights = owner_of(vec![row("my.dcl.eth"), row("other.dcl.eth")]);
     let html = your_worlds("/t", "tok", &dest, Some(&rights));
@@ -1651,11 +1690,7 @@ fn the_world_rows_offer_the_re_aim() {
 /// reason it is missing: eleven other worlds sort ahead of it alphabetically.
 #[test]
 fn the_current_target_leads_your_worlds() {
-    let dest = resolve_dest(
-        &json!({ "worldConfiguration": { "name": "zz-last.dcl.eth" } }),
-        None,
-        None,
-    );
+    let dest = dest_of(&json!({ "worldConfiguration": { "name": "zz-last.dcl.eth" } }));
     let mut worlds: Vec<WorldRow> = (0..11)
         .map(|i| world_row(&format!("w{i:02}.dcl.eth"), None, None))
         .collect();
@@ -1676,12 +1711,12 @@ async fn an_unsigned_auto_run_ends_quietly() {
     let root = project.root.clone();
     let st = state(project);
     const TIMEOUT: &str = "no signature arrived within 10 minutes \u{2014} deployment abandoned";
-    let id = claim(&st, "World w.dcl.eth".into(), true, "abc123".into()).expect("free slot");
+    let id = claim_world(&st, true, "abc123").expect("free slot");
     finish(&st, id, RunState::Failed(TIMEOUT.into()));
     assert!(runs(&st).is_none(), "the slot cleared for the next visit");
     assert!(history_rows(&st, &root).is_empty(), "nothing is recorded");
 
-    let id = claim(&st, "World w.dcl.eth".into(), false, "abc123".into()).expect("slot is free");
+    let id = claim_world(&st, false, "abc123").expect("slot is free");
     finish(&st, id, RunState::Failed(TIMEOUT.into()));
     assert!(
         matches!(
@@ -1699,11 +1734,11 @@ async fn an_unsigned_auto_run_ends_quietly() {
 async fn a_drifted_pending_run_is_reminted_before_the_wallet_sees_it() {
     let (_dir, project) = gather("drift");
     let st = state(project);
-    let old = claim(&st, "World w.dcl.eth".into(), true, "aaaa".into()).expect("free slot");
-    runs(&st).as_mut().expect("just claimed").signing = Some("/deploy".into());
+    let old = claim_world(&st, true, "aaaa").expect("free slot");
+    note_signing(&st);
     *signer_slot(&st) = Some(parked_signer());
 
-    let new = drift_reclaim(&st, "World w.dcl.eth".into(), "bbbb").expect("drift re-mints");
+    let new = drift_world(&st, "bbbb").expect("drift re-mints");
     assert_ne!(old, new, "a re-mint is a new claim, not a touch-up");
     assert!(
         signer_slot(&st).is_none(),
@@ -1723,27 +1758,23 @@ async fn a_drifted_pending_run_is_reminted_before_the_wallet_sees_it() {
 async fn the_remint_chase_ends_after_max_remints() {
     let (_dir, project) = gather("drift-cap");
     let st = state(project);
-    claim(&st, "World w.dcl.eth".into(), false, "p0".into()).expect("free slot");
+    claim_world(&st, false, "p0").expect("free slot");
     let registered = |st: &AppState| {
-        runs(st).as_mut().expect("held").signing = Some("/deploy".into());
+        note_signing(st);
         *signer_slot(st) = Some(parked_signer());
     };
     registered(&st);
     for i in 1..=MAX_REMINTS {
-        let print = format!("p{i}");
-        drift_reclaim(&st, "World w.dcl.eth".into(), &print)
+        drift_world(&st, &format!("p{i}"))
             .unwrap_or_else(|| panic!("re-mint {i} of {MAX_REMINTS}"));
         assert_eq!(runs(&st).as_ref().expect("held").remints, i);
         registered(&st);
     }
     assert!(
-        drift_reclaim(&st, "World w.dcl.eth".into(), "p-more").is_none(),
+        drift_world(&st, "p-more").is_none(),
         "past the cap, drift no longer re-mints"
     );
-    assert!(
-        drift_reclaim(&st, "World w.dcl.eth".into(), "p-again").is_none(),
-        "and stays that way"
-    );
+    assert!(drift_world(&st, "p-again").is_none(), "and stays that way");
     let slot = runs(&st);
     let r = slot.as_ref().expect("the slot is still held");
     assert_eq!(
@@ -1767,7 +1798,7 @@ async fn reanchoring_hands_the_polls_the_tree_as_the_build_left_it() {
         !before.files.iter().any(|(rel, _)| rel == "bin/extra.js"),
         "no release-only chunk before the build"
     );
-    claim(&st, "World w.dcl.eth".into(), false, "p0".into()).expect("free slot");
+    claim_world(&st, false, "p0").expect("free slot");
     let twin = project.root.join(".dcl-one/release/bin/extra.js");
     std::fs::create_dir_all(twin.parent().unwrap()).unwrap();
     std::fs::write(&twin, "release-only").unwrap();
@@ -1794,15 +1825,15 @@ async fn the_remint_declines_matching_midbuild_cli_and_signed_runs() {
     let (_dir, project) = gather("driftno");
     let st = state(project);
 
-    claim(&st, "World w.dcl.eth".into(), true, "aaaa".into()).expect("free slot");
+    claim_world(&st, true, "aaaa").expect("free slot");
     assert!(
-        drift_reclaim(&st, "World w.dcl.eth".into(), "bbbb").is_none(),
+        drift_world(&st, "bbbb").is_none(),
         "mid-build: the release tree is being written"
     );
 
-    runs(&st).as_mut().expect("held").signing = Some("/deploy".into());
+    note_signing(&st);
     assert!(
-        drift_reclaim(&st, "World w.dcl.eth".into(), "aaaa").is_none(),
+        drift_world(&st, "aaaa").is_none(),
         "an unchanged payload is not drift"
     );
 
@@ -1810,7 +1841,7 @@ async fn the_remint_declines_matching_midbuild_cli_and_signed_runs() {
     signed.note_signer_for_tests("0xe7f7000000000000000000000000000000000000");
     *signer_slot(&st) = Some(signed);
     assert!(
-        drift_reclaim(&st, "World w.dcl.eth".into(), "bbbb").is_none(),
+        drift_world(&st, "bbbb").is_none(),
         "a signed deploy is past recall"
     );
 
@@ -1818,7 +1849,7 @@ async fn the_remint_declines_matching_midbuild_cli_and_signed_runs() {
     *signer_slot(&st) = None;
     adopt_cli_signing(&st, parked_signer());
     assert!(
-        drift_reclaim(&st, "World w.dcl.eth".into(), "bbbb").is_none(),
+        drift_world(&st, "bbbb").is_none(),
         "a CLI publish is a terminal's, not this page's"
     );
 }
@@ -1830,9 +1861,9 @@ async fn a_superseded_deploy_cannot_touch_the_newer_run() {
     let (_dir, project) = gather("driftsup");
     let root = project.root.clone();
     let st = state(project);
-    let old = claim(&st, "World w.dcl.eth".into(), true, "aaaa".into()).expect("free slot");
-    runs(&st).as_mut().expect("held").signing = Some("/deploy".into());
-    let new = drift_reclaim(&st, "World w.dcl.eth".into(), "bbbb").expect("drift re-mints");
+    let old = claim_world(&st, true, "aaaa").expect("free slot");
+    note_signing(&st);
+    let new = drift_world(&st, "bbbb").expect("drift re-mints");
     *signer_slot(&st) = Some(parked_signer());
 
     finish(
@@ -1867,8 +1898,6 @@ async fn a_cold_cache_renders_now_and_the_reloads_converge() {
     st.deploy_dry_run = false;
     let st = Arc::new(st);
     *address_slot(&st) = Some("0x00000000000000000000000000000000000000ab".into());
-    // Every base aims at a port nothing listens on, so the spawned warm-up
-    // fails fast into a cached sentence without leaving the machine.
     let dest = resolve_dest(&project.scene_json, Some("http://127.0.0.1:9"), None);
     let preview = cached_preview(&st, &project).await;
 
@@ -1917,24 +1946,18 @@ async fn a_cold_cache_renders_now_and_the_reloads_converge() {
 /// one, so a deploy signs itself for the hour and falls back to the wallet after.
 #[test]
 fn a_delegated_identity_is_used_while_live_and_dropped_when_it_lapses() {
+    const SIGNER: &str = "0xe7f78d2c9a9375153476834d2db32632384b01e1";
     let (_dir, project) = gather("identity");
     let st = state(project);
-    let mk = |exp_ms: i64| deploy::DeployIdentity {
-        signer: "0xe7f78d2c9a9375153476834d2db32632384b01e1".into(),
-        ephemeral_key: "0x0000000000000000000000000000000000000000000000000000000000000042".into(),
-        delegation_payload: "Decentraland Login\nEphemeral address: x\nExpiration: y".into(),
-        delegation_signature: "0xsig".into(),
-        expiration_ms: exp_ms,
-    };
-    *identity_slot(&st) = Some(mk(deploy::now_ms() + 3_600_000));
+    *identity_slot(&st) = Some(identity(SIGNER, deploy::now_ms() + 3_600_000));
     let live = live_identity(&st).expect("an unexpired identity is live");
-    assert_eq!(live.signer, "0xe7f78d2c9a9375153476834d2db32632384b01e1");
+    assert_eq!(live.signer, SIGNER);
     assert!(
         identity_slot(&st).is_some(),
         "and still held for the next deploy"
     );
 
-    *identity_slot(&st) = Some(mk(deploy::now_ms() - 1));
+    *identity_slot(&st) = Some(identity(SIGNER, deploy::now_ms() - 1));
     assert!(
         live_identity(&st).is_none(),
         "an expired identity is not used"
@@ -1955,13 +1978,13 @@ async fn the_preflight_answers_before_the_wallet_signs() {
     let (_dir, project) = gather("preflight");
     let st = state(project);
     let ask = |peer: SocketAddr, addr: &str| {
-        preflight(
-            State(st.clone()),
-            ConnectInfo(peer),
-            HeaderMap::new(),
+        post(
+            &st,
+            peer,
             Ok(axum::Json(
                 serde_json::from_value(json!({ "address": addr })).unwrap(),
             )),
+            preflight,
         )
     };
 
@@ -2089,14 +2112,14 @@ fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
     owned.insert(1, (6, -3));
     let rights = Rights {
         verdict: Verdict::May("rights held on all 2 declared parcels".into()),
-        holdings: Some(Holdings {
-            parcels: 32,
-            estates: 0,
-            operated: 1,
-            coords: owned.iter().copied().chain([(9, 9)]).collect(),
-            owned: owned.clone(),
-            operated_coords: vec![(9, 9)],
-        }),
+        holdings: Some(holdings(
+            32,
+            0,
+            1,
+            owned.iter().copied().chain([(9, 9)]).collect(),
+            owned.clone(),
+            vec![(9, 9)],
+        )),
         parcel_rights: vec![
             ParcelRight { pointer: "5,-3".into(), leg: Some("owner") },
             ParcelRight { pointer: "6,-3".into(), leg: Some("owner") },
@@ -2124,14 +2147,7 @@ fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
     );
 
     let none = Rights {
-        holdings: Some(Holdings {
-            parcels: 0,
-            estates: 0,
-            operated: 0,
-            coords: Vec::new(),
-            owned: Vec::new(),
-            operated_coords: Vec::new(),
-        }),
+        holdings: Some(holdings(0, 0, 0, Vec::new(), Vec::new(), Vec::new())),
         parcels_note: None,
         ..rights
     };
@@ -2149,60 +2165,34 @@ fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
 /// coming back from a World has no LAND under it yet.
 #[test]
 fn the_land_view_offers_the_wallets_areas_to_move_to() {
-    let coords: Vec<_> = (12..16).flat_map(|y| (2..8).map(move |x| (x, y))).collect();
-    let pointers: Vec<_> = coords.iter().map(|(x, y)| format!("{x},{y}")).collect();
-    let (_dir, project) = scene(
-        "land-picker",
-        json!({
-            "display": { "title": "Hexabricks" },
-            "scene": { "base": "2,12", "parcels": pointers }
-        }),
-    );
-    let dest = resolve_dest(&project.scene_json, None, None);
+    let (coords, _, _dir, project) = hexabricks("land-picker");
+    let dest = dest_of(&project.scene_json);
     let preview = deploy::preview(&project).unwrap();
     let live = status(Remote::Unknown("dry run".into()));
     let mut held = coords.clone();
     held.extend([(40, 40), (41, 40), (40, 41), (41, 41), (90, -3)]);
     let rights = Rights {
         verdict: Verdict::May("rights held on all 24 declared parcels".into()),
-        holdings: Some(Holdings {
-            parcels: held.len() as i64,
-            estates: 0,
-            operated: 0,
-            coords: held.clone(),
-            owned: held.clone(),
-            operated_coords: Vec::new(),
-        }),
+        holdings: Some(holdings(
+            held.len() as i64,
+            0,
+            0,
+            held.clone(),
+            held,
+            Vec::new(),
+        )),
         land_use: Some(LandUse {
             scenes: vec![LandScene {
                 title: "Hexabricks".into(),
                 timestamp: Some(deploy::now_ms() - 18_000_000),
-                coords: coords.clone(),
+                coords,
             }],
             note: None,
         }),
         ..Rights::unchecked(ADDR, "")
     };
-    let land_of = |card: &str| -> String {
-        card.split("tgt__pane--land\">")
-            .nth(1)
-            .unwrap()
-            .split("tgt__pane--multi\">")
-            .next()
-            .unwrap()
-            .to_string()
-    };
-    let land = land_of(&target_card(
-        "Hexabricks",
-        "/t/demo",
-        "test-token",
-        &dest,
-        &preview,
-        &live,
-        Some(&rights),
-        None,
-        &[],
-    ));
+    let card = demo_card(&dest, &preview, &live, Some(&rights), &[]);
+    let land = land_pane(&card);
     assert!(
         land.contains(r#"<details class="tgt__picker"><summary>Your LAND · 3 areas · 5 empty parcels of 29</summary>"#),
         "folded over its own published scene: {land}"
@@ -2229,19 +2219,10 @@ fn the_land_view_offers_the_wallets_areas_to_move_to() {
             "worldConfiguration": { "name": "stage.dcl.eth" }
         }),
     );
-    let dest = resolve_dest(&project.scene_json, None, None);
+    let dest = dest_of(&project.scene_json);
     let preview = deploy::preview(&project).unwrap();
-    let land = land_of(&target_card(
-        "Hexabricks",
-        "/t/demo",
-        "test-token",
-        &dest,
-        &preview,
-        &live,
-        Some(&rights),
-        None,
-        &[],
-    ));
+    let card = demo_card(&dest, &preview, &live, Some(&rights), &[]);
+    let land = land_pane(&card);
     assert!(
         land.contains(r#"<details class="tgt__picker" open>"#),
         "a World target shows the picker open: {land}"
@@ -2254,27 +2235,20 @@ fn the_land_view_offers_the_wallets_areas_to_move_to() {
 
 #[test]
 fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
-    let coords: Vec<_> = (12..16).flat_map(|y| (2..8).map(move |x| (x, y))).collect();
-    let pointers: Vec<_> = coords.iter().map(|(x, y)| format!("{x},{y}")).collect();
-    let (_dir, project) = scene(
-        "target-design",
-        json!({
-            "display": { "title": "Hexabricks" },
-            "scene": { "base": "2,12", "parcels": pointers }
-        }),
-    );
-    let dest = resolve_dest(&project.scene_json, None, None);
+    let (coords, pointers, _dir, project) = hexabricks("target-design");
+    let dest = dest_of(&project.scene_json);
     let preview = deploy::preview(&project).unwrap();
-    let mut live = status(Remote::Known(RemoteState {
-        current: Some(current_scene(
-            "Hexabricks",
-            Some(deploy::now_ms() - 18_000_000),
-            coords.clone(),
+    let live = status_with(
+        Remote::Known(remote_state(
+            Some(current_scene(
+                "Hexabricks",
+                Some(deploy::now_ms() - 18_000_000),
+                coords.clone(),
+            )),
+            vec![],
         )),
-        others: vec![],
-        hashes: HashSet::new(),
-    }));
-    live.reuse = Some(reuse(2, 1_800, 1, 317));
+        reuse(2, 1_800, 1, 317),
+    );
     let mut shared = world_row("shared.dcl.eth", Some(2), Some("Shared stage"));
     shared.owned = false;
     let mut rights = Rights {
@@ -2284,14 +2258,14 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
             world_row("empty.dcl.eth", Some(0), None),
             shared,
         ],
-        holdings: Some(Holdings {
-            parcels: 2,
-            estates: 1,
-            operated: 24,
-            coords: vec![(2, 12), (20, -4), (75, -144)],
-            owned: vec![(75, -144)],
-            operated_coords: coords.clone(),
-        }),
+        holdings: Some(holdings(
+            2,
+            1,
+            24,
+            vec![(2, 12), (20, -4), (75, -144)],
+            vec![(75, -144)],
+            coords,
+        )),
         parcel_rights: pointers
             .iter()
             .map(|p| ParcelRight {
@@ -2316,24 +2290,8 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
             };
             rights.parcel_rights[0].leg = None;
         }
-        let card = target_card(
-            "Hexabricks",
-            "/t/demo",
-            "test-token",
-            &dest,
-            &preview,
-            &live,
-            Some(&rights),
-            None,
-            &history,
-        );
-        let land = card
-            .split("tgt__pane--land\">")
-            .nth(1)
-            .unwrap()
-            .split("tgt__pane--multi\">")
-            .next()
-            .unwrap();
+        let card = demo_card(&dest, &preview, &live, Some(&rights), &history);
+        let land = land_pane(&card);
         assert!(land.contains("Selected destination: LAND · Base 2,12"));
         assert!(
             card.contains("The deploy target is Genesis City LAND. Multiscene applies to Worlds"),
@@ -2374,34 +2332,12 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
             card.contains(r#"<span class="tgt__history-cid" title="bafy-test">bafy-test</span><span class="tgt__history-http">HTTP 200</span>"#),
             "the published line splits into its chips: {card}"
         );
-        // Optional snapshots for browser review, using the real renderer and CSS.
-        if let Ok(dir) = std::env::var("DCL_TARGET_DESIGN_CAPTURE") {
-            let nav = super::super::chrome::Nav {
-                active: "target",
-                badge: "live",
-                host: "127.0.0.1:8001",
-                account: Some(ADDR.into()),
-                token: "test-token",
-            };
-            let body = format!(
-                r#"<main class="dash"><section id="target" class="sec">{card}</section></main><script>{TARGET_SCRIPT}</script>"#
-            );
-            let html = document(
-                "Target",
-                "/t/demo",
-                target_css(),
-                "#target",
-                "Skip to target",
-                Some(&nav),
-                &body,
-            );
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                Path::new(&dir).join(if denied { "denied.html" } else { "land.html" }),
-                html,
-            )
-            .unwrap();
-        }
+        capture_design(
+            if denied { "denied.html" } else { "land.html" },
+            "live",
+            "test-token",
+            &card,
+        );
     }
     let unchecked = target_card(
         "<Scene>",
@@ -2421,11 +2357,7 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
 
 #[test]
 fn world_groups_keep_empty_current_targets_visible_and_unknown_counts_honest() {
-    let dest = resolve_dest(
-        &json!({"worldConfiguration": {"name": "current.dcl.eth"}}),
-        None,
-        None,
-    );
+    let dest = dest_of(&json!({"worldConfiguration": {"name": "current.dcl.eth"}}));
     let rights = owner_of(vec![
         world_row("empty.dcl.eth", Some(0), None),
         world_row("current.dcl.eth", Some(0), None),
@@ -2442,14 +2374,10 @@ fn world_groups_keep_empty_current_targets_visible_and_unknown_counts_honest() {
 
 #[test]
 fn every_overlapping_world_scene_is_shown_as_replaced_in_full() {
-    let dest = resolve_dest(
-        &json!({
-            "worldConfiguration": {"name": "w.dcl.eth"},
-            "scene": {"base": "0,0", "parcels": ["0,0", "1,0"]}
-        }),
-        None,
-        None,
-    );
+    let dest = dest_of(&json!({
+        "worldConfiguration": {"name": "w.dcl.eth"},
+        "scene": {"base": "0,0", "parcels": ["0,0", "1,0"]}
+    }));
     let body = json!({"scenes": [
         {"parcels": ["0,0", "0,1"], "entity": {"metadata": {"display": {"title": "First overlap"}}}},
         {"parcels": ["1,0", "1,1"], "entity": {"metadata": {"display": {"title": "Second overlap"}}}},
@@ -2478,11 +2406,7 @@ fn every_overlapping_world_scene_is_shown_as_replaced_in_full() {
 
 #[test]
 fn unavailable_world_layout_is_not_presented_as_an_empty_world() {
-    let dest = resolve_dest(
-        &json!({"worldConfiguration": {"name": "w.dcl.eth"}}),
-        None,
-        None,
-    );
+    let dest = dest_of(&json!({"worldConfiguration": {"name": "w.dcl.eth"}}));
     for remote in [
         Remote::Unknown("Still checking".into()),
         Remote::Unreachable("HTTP 503".into()),
@@ -2509,14 +2433,13 @@ fn world_selection_shows_coordinates_server_and_review_without_inferring_a_mode(
         None,
     );
     let preview = deploy::preview(&project).unwrap();
-    let live = LiveStatus {
-        remote: Remote::Known(RemoteState {
-            current: None,
-            others: vec![remote_scene("One neighbor", vec![(4, 4)])],
-            hashes: HashSet::new(),
-        }),
-        reuse: Some(reuse(3, 1000, 0, 0)),
-    };
+    let live = status_with(
+        Remote::Known(remote_state(
+            None,
+            vec![remote_scene("One neighbor", vec![(4, 4)])],
+        )),
+        reuse(3, 1000, 0, 0),
+    );
     let rights = owner_of(vec![world_row(
         "example.eth",
         Some(1),
@@ -2544,32 +2467,7 @@ fn world_selection_shows_coordinates_server_and_review_without_inferring_a_mode(
         !html.contains(r#"action="/t/demo/deploy""#),
         "selection never publishes"
     );
-    if let Ok(dir) = std::env::var("DCL_TARGET_DESIGN_CAPTURE") {
-        let nav = super::super::chrome::Nav {
-            active: "target",
-            badge: "",
-            host: "127.0.0.1:8001",
-            account: Some(ADDR.into()),
-            token: "token",
-        };
-        let body = format!(
-            r#"<main class="dash"><section id="target" class="sec">{html}</section></main><script>{TARGET_SCRIPT}</script>"#
-        );
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            Path::new(&dir).join("world.html"),
-            document(
-                "Target",
-                "/t/demo",
-                target_css(),
-                "#target",
-                "Skip to target",
-                Some(&nav),
-                &body,
-            ),
-        )
-        .unwrap();
-    }
+    capture_design("world.html", "", "token", &html);
 }
 
 #[tokio::test]
@@ -2581,14 +2479,7 @@ async fn reviewing_with_a_delegated_identity_waits_for_the_publish_button() {
     let dest = scene_dest(&project);
     let mut st = state(project);
     Arc::get_mut(&mut st).unwrap().deploy_dry_run = false;
-    *identity_slot(&st) = Some(deploy::DeployIdentity {
-        signer: ADDR.into(),
-        ephemeral_key: "0x0000000000000000000000000000000000000000000000000000000000000042".into(),
-        delegation_payload: "test delegation".into(),
-        delegation_signature: "0xsig".into(),
-        expiration_ms: deploy::now_ms() + 3_600_000,
-    });
-    // Leave the read-only status placeholder pending without external I/O.
+    *identity_slot(&st) = Some(identity(ADDR, deploy::now_ms() + 3_600_000));
     warm_slot(&st).insert(format!("status|{}|{print}", dest.headline));
     let html = served(&st).await;
     assert!(

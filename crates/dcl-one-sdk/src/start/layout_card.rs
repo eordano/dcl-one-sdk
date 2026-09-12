@@ -1,6 +1,3 @@
-//! The scene-layout card: the parcel grid, spawn areas, permissions, and
-//! the tabs that hold them.
-
 use super::super::chrome::esc;
 use serde_json::Value;
 
@@ -27,7 +24,6 @@ pub(super) fn coord(v: Option<&Value>) -> String {
     }
 }
 
-/// A coordinate as the `[min, max]` span it covers.
 pub(super) fn coord_range(v: Option<&Value>) -> (f64, f64) {
     let (a, b) = coord_pair(v);
     (a.min(b), a.max(b))
@@ -100,9 +96,8 @@ pub(in crate::start) fn parse_parcels(scene_json: &Value) -> (Vec<(i64, i64)>, (
 }
 
 /// Past this many cells a side the grid draws no add ring: a rendering bound
-/// only (the edit endpoint takes any connected layout), since the grid is
-/// drawn whole and a huge scene's add cells are page weight for drags nobody
-/// makes at that size.
+/// only (the edit endpoint takes any connected layout), since a huge scene's
+/// add cells are page weight for drags nobody makes at that size.
 pub(super) const GHOST_RING_SPAN: i64 = 40;
 
 /// `(min_x, min_y, max_x, max_y)` of the parcels, `(0, 0, 0, 0)` for none.
@@ -127,14 +122,11 @@ pub(super) fn grid_bounds(parcels: &[(i64, i64)]) -> (i64, i64, i64, i64, bool) 
     (min_x - r, min_y - r, max_x + r, max_y + r, ring)
 }
 
-/// The layout map as a DIV grid — ruler, row numbers, one cell per parcel of
-/// the bounding box plus the add ring, and the spawn areas positioned over it
-/// in world metres.
-///
-/// The cell size rides the `--lay-pitch` variable: the stylesheet ships a
-/// default so the map renders without JavaScript, and the script refits it
-/// to the pane. Ruler labels carry their value in `data-n` so the script can
-/// thin them to every fifth when the cells get small.
+/// Spawn areas are positioned over the grid in world metres. The cell size
+/// rides the `--lay-pitch` variable: the stylesheet ships a default so the
+/// map renders without JavaScript, and the script refits it to the pane.
+/// Ruler labels carry their value in `data-n` so the script can thin them to
+/// every fifth when the cells get small.
 pub(super) fn layout_grid(parcels: &[(i64, i64)], base: (i64, i64), spawns: &[Value]) -> String {
     let members: std::collections::HashSet<(i64, i64)> = parcels.iter().copied().collect();
     let (x0, y0, x1, y1, ring) = grid_bounds(parcels);
@@ -201,8 +193,6 @@ pub(super) fn layout_grid(parcels: &[(i64, i64)], base: (i64, i64), spawns: &[Va
     )
 }
 
-/// Each spawn area as a row that opens its editor, plus the dashed button
-/// that arms drawing a new one on the grid.
 pub(super) fn spawn_rows(spawns: &[Value]) -> String {
     let mut out: String = spawns
         .iter()
@@ -228,9 +218,8 @@ pub(super) fn spawn_rows(spawns: &[Value]) -> String {
     out
 }
 
-/// Every known permission as a switch row, plus any key the scene carries
-/// that the schema list does not — shown so toggling a neighbour cannot
-/// silently drop it.
+/// Includes any key the scene carries that the schema list does not, so
+/// toggling a neighbour cannot silently drop it.
 pub(super) fn permission_rows(scene_json: &Value) -> String {
     let required: Vec<&str> = scene_json
         .get("requiredPermissions")
@@ -262,8 +251,7 @@ pub(super) fn permission_rows(scene_json: &Value) -> String {
     out
 }
 
-/// The scene-layout card: tabs, the parcel grid, and a rail that changes per
-/// tab. The server renders the Info tab active and every control inert; the
+/// The server renders the Info tab active and every control inert; the
 /// script switches tabs, drags, and saves.
 pub(super) fn scene_layout_card(
     scene_json: &Value,

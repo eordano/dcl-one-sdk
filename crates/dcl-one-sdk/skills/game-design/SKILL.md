@@ -9,11 +9,11 @@ description: Plan and design Decentraland games and interactive experiences. Use
 
 Decentraland is a **continuous, shared 3D world**. Design around these constraints:
 
-- **No startup screen**: The scene is always live. Players walk in from adjacent parcels — there is no splash screen, no "press start." Your scene must be meaningful the instant a player arrives.
-- **No forced endings**: You cannot force a "game over" state. Players can leave at any time by walking away or teleporting. Design loops that accommodate drop-in / drop-out naturally.
+- **No startup screen**: the scene is always live. Players walk in from adjacent parcels — no splash screen, no "press start." The scene must be meaningful the instant a player arrives.
+- **No forced endings**: you cannot force a "game over" state — players leave at any time by walking away or teleporting. Design loops for drop-in / drop-out.
 - **Cannot remove players**: There is no API to eject a player from a scene. You can teleport a player, but only within the existing scene. If you're teleporting outside the scene, you can only do it with their consent (they must accept the prompt). Design around misbehaving players with game mechanics, not eviction. If the scene has admin players, admins are able to ban other players from the scene manually.
-- **Boundary awareness**: Players standing outside your parcel can see into it. Your scene is always on display. Neighboring scenes are visible too — consider visual harmony.
-- **Shared space**: Multiple players are always potentially present. Even a "single-player" puzzle is witnessed by others. Embrace or account for this.
+- **Boundary awareness**: players outside your parcel can see into it, and neighboring scenes are visible from inside — consider visual harmony.
+- **Shared space**: other players may always be present — even a "single-player" puzzle is witnessed. Embrace or account for this.
 
 ## 2. Scene Limitation Formulas
 
@@ -25,7 +25,7 @@ For the full limits table across all parcel counts, see the **optimize-scene** s
 
 - **Dimensions must be power-of-two**: 256, 512, 1024, 2048
 - **Recommended sizes**: 1024x1024 for scene objects, 512x512 for wearables
-- **Use texture atlases** to combine multiple small textures into one, reducing draw calls and material count
+- **Use texture atlases** — one texture for many small ones cuts draw calls and material count
 - Prefer compressed formats (WebP) over raw PNG where possible
 - Share texture references across materials — do not duplicate texture files
 
@@ -90,7 +90,7 @@ engine.addSystem(lodSystem)
 - Avoid allocating new objects (Vector3.create, arrays) inside systems that run every frame
 
 ### Disable Unused Colliders
-Remove collision meshes from decorative objects that players never interact with. This reduces physics body count significantly.
+Remove collision meshes from decorative objects players never interact with — it cuts physics body count significantly.
 
 ### Disable Landscape Terrain (Worlds)
 For single-scene Worlds, set `landscapeTerrain: false` in `scene.json` to remove the auto-generated grassland/trees/sea around the scene. Two payoffs: it frees rendering budget, and it lets you commit to a self-contained aesthetic (open water, space, void). Ignored in Genesis City. See the `create-scene` skill.
@@ -121,7 +121,7 @@ export function addScore(points: number) { score += points }
 ```
 
 ### Component-Based State (Complex Games)
-Use custom components as structured data containers:
+Custom components as structured data containers:
 ```typescript
 import { engine, Schemas } from '@dcl/sdk/ecs'
 
@@ -150,13 +150,13 @@ function gameStateSystem(dt: number) {
 
 ## 8. UX/UI Guidelines
 
-- **Keep UI minimal**: The metaverse is about 3D presence, not 2D overlays. Avoid large HUDs that obscure the world.
+- **Keep UI minimal**: avoid large HUDs that obscure the world — the metaverse is 3D presence, not 2D overlays.
 - **Prefer spatial UI**: Use `TextShape` on entities and 3D signs over screen-space UI whenever the information is tied to a place or object.
-- **Clear affordances**: Interactive objects should look interactive. Use glow effects, outlines, floating indicators, or subtle animations to signal "you can click this."
-- **Sound feedback**: Every significant player action should produce audio feedback. It confirms the action registered and adds polish.
-- **Progressive disclosure**: Do not dump all information at once. Reveal mechanics and story as the player engages. Start simple, layer complexity.
-- **Immediate feedback**: When a player interacts, respond within the same frame. Use tweens, sounds, or UI popups so the player never wonders "did that work?"
-- **Accessibility**: Use high-contrast text, readable font sizes (fontSize >= 16 for screen UI), and audio cues alongside visual ones.
+- **Clear affordances**: interactive objects should look interactive — glow, outlines, floating indicators, or subtle animations signal "you can click this."
+- **Sound feedback**: every significant player action should produce audio — it confirms the action registered.
+- **Progressive disclosure**: do not dump all information at once — reveal mechanics and story as the player engages.
+- **Immediate feedback**: respond within the same frame — tweens, sounds, or UI popups so the player never wonders "did that work?"
+- **Accessibility**: high-contrast text, readable font sizes (fontSize >= 16 for screen UI), and audio cues alongside visual ones.
 
 ## 9. MVP Planning
 
@@ -169,7 +169,7 @@ Ask: **What does the player DO?** The answer should be a single sentence:
 ### Prototype Fast
 - Build in **1-2 parcels** first, even if the final scene will be larger
 - Use primitive shapes (boxes, spheres) as placeholders — do not wait for final art
-- Get the core loop working before adding any secondary features
+- Get the core loop working before any secondary features
 
 ### Test Early
 - Deploy to a test world and walk through it yourself
@@ -177,9 +177,9 @@ Ask: **What does the player DO?** The answer should be a single sentence:
 - Measure: Do players understand what to do within 30 seconds?
 
 ### Iterate on Fun
-- Polish comes last. If the core loop is not fun with placeholder art, better art will not fix it
-- Cut features aggressively. A tight, small experience beats a sprawling, unfinished one
-- Replay value matters more than content volume in DCL (players return to scenes they enjoy)
+- Polish comes last: if the core loop is not fun with placeholder art, better art will not fix it
+- Cut features aggressively — a tight, small experience beats a sprawling, unfinished one
+- Replay value matters more than content volume in DCL
 
 ### MVP Checklist
 - [ ] **Core loop defined**: One sentence describing what the player does.

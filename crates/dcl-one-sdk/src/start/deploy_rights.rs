@@ -1,8 +1,7 @@
-//! Who may publish where: the verdict for the scene's declared target, and
-//! the worlds and land the remembered wallet could target instead. All of it
-//! is public chain/catalyst state keyed by an address — no signature — so the
-//! page asks for an address, never a "connection", and a fetch failure is a
-//! sentence, never a guess: a verdict is ✓, ✗, or "could not check".
+//! All of this is public chain/catalyst state keyed by an address — no
+//! signature — so the page asks for an address, never a "connection", and a
+//! fetch failure is a sentence, never a guess: a verdict is ✓, ✗, or "could
+//! not check".
 
 use super::deploy_status::{
     cache_get, cache_put, fetch_json, host_of, lock, parse_coords, plural, status_client, Dest,
@@ -27,7 +26,6 @@ pub(super) enum Verdict {
     Unchecked(String),
 }
 
-/// One world the address could deploy to.
 pub(super) struct WorldRow {
     pub(super) name: String,
     /// `None` when the worlds list never answered for this name.
@@ -39,7 +37,6 @@ pub(super) struct WorldRow {
     pub(super) owned: bool,
 }
 
-/// One declared parcel and the strongest right the address holds on it.
 pub(super) struct ParcelRight {
     pub(super) pointer: String,
     pub(super) leg: Option<&'static str>,
@@ -78,7 +75,6 @@ pub(super) struct LandUse {
     pub(super) note: Option<String>,
 }
 
-/// Everything the rights fetch learned about one address at one destination.
 pub(super) struct Rights {
     pub(super) address: String,
     pub(super) verdict: Verdict,
@@ -373,7 +369,6 @@ pub(super) fn world_grant_reason(doc: &Value, address: &str) -> &'static str {
     "deployment granted to this wallet"
 }
 
-/// The verdict for a world destination, over documents already fetched.
 pub(super) fn world_verdict(
     doc: &Value,
     scoped: Option<&Value>,
@@ -414,7 +409,6 @@ pub(super) fn world_verdict(
     }
 }
 
-/// The verdict for a land destination, over the per-parcel rights rows.
 pub(super) fn land_verdict(rows: &[ParcelRight], unchecked: usize) -> Verdict {
     if rows.is_empty() {
         return Verdict::Unchecked("no declared parcel could be checked".to_string());
@@ -481,10 +475,6 @@ pub(super) async fn fetch_rights(dest: &Dest, address: &str) -> Rights {
         }
     };
     let listed = match listed {
-        // A self-hosted realm often runs no worlds service at all — the
-        // route 404s by design, not by failure — so the list falls back to
-        // the public worlds server, where the wallet's worlds actually
-        // live, and the note says whose answer this is.
         Err(_) if worlds != WORLDS_CONTENT_SERVER => {
             get_json(&list(WORLDS_CONTENT_SERVER)).await.inspect(|_| {
                 worlds_note = Some(format!(
@@ -663,11 +653,6 @@ async fn verdict_fetch(dest: &Dest, addr: &str) -> TargetVerdict {
             "scene.json declares no parcels".to_string(),
         ));
     }
-    // A worlds server (or a self-hosted realm without a squid) has no parcel
-    // routes at all and 404s them by design; parcel rights are chain state,
-    // network-wide consistent, so the public chain lambdas answer instead
-    // and the note says whose answer the rows are. Only when neither
-    // answers is the check "unchecked".
     let target = dest.lambdas_base.trim_end_matches('/');
     let chain = dest.chain_lambdas.trim_end_matches('/');
     let (rows, note) = match probe_parcels(target, addr, &dest.pointers).await {
@@ -739,11 +724,6 @@ async fn probe_parcels(
             return Ok(rows);
         }
     }
-    // One probe per parcel, a handful in flight at once: serially this was
-    // the slowest thing a target flip could trigger (every probe a public
-    // round-trip), and the answers are independent. `buffered` keeps the
-    // rows in declared-parcel order, and the first error still ends the
-    // check exactly where the serial loop did — in-flight probes drop.
     use futures::StreamExt;
     let mut rows = Vec::new();
     let probes: Vec<_> = pointers

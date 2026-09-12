@@ -1,7 +1,4 @@
 "use strict";
-// Sanity check for the harness itself: every corpus module in each pass must be bound to
-// exactly one implementation, and the two passes must be bound to different ones.
-// (A silent cross-binding here would make the whole differential test meaningless.)
 
 const H = require("./harness");
 const path = require("path");
@@ -23,10 +20,10 @@ function probe(mods, label) {
             let hit = null;
             p.Reader.create = function (b) { hit = "mine"; return pOrig.call(this, b); };
             q.Reader.create = function (b) { hit = "ref"; return qOrig.call(this, b); };
-            try { ns.decode(new Uint8Array(0)); } catch (e) { /* ignore */ }
+            try { ns.decode(new Uint8Array(0)); } catch (e) {  }
             p.Reader.create = pOrig; q.Reader.create = qOrig;
             counts[hit || "unknown"]++;
-            break; // one namespace per module is enough
+            break;
         }
     }
     console.log(`${label}: bound-to-ref=${counts.ref} bound-to-mine=${counts.mine} unknown=${counts.unknown}`);
@@ -36,8 +33,6 @@ function probe(mods, label) {
 const a = probe(ref.mods, "pass1 (expect all ref)     ");
 const b = probe(mine.mods, "pass2 (expect all mine)    ");
 
-// The rpc/data-layer corpus is loaded from a different root with a different keep-predicate
-// and gets its own per-root cache purge, so it needs its own proof of per-module binding.
 const rpcRef = H.loadRpcCorpus("protobufjs/minimal");
 const rpcMine = H.loadRpcCorpus("pbmin");
 const c = probe(rpcRef.mods, "rpc pass1 (expect all ref) ");

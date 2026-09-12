@@ -36,8 +36,6 @@
 
   const layGrid = () => document.getElementById('lay-grid');
   const baseXY = () => (data.base || '0,0').split(',').map(Number);
-  /* The schema allows number OR number[] of any length — [85] is a legal
-     point — so mirror the server's coord_range instead of assuming a pair. */
   const nums = (v) => {
     const a = (Array.isArray(v) ? v : [v]).map((n) => Number(n ?? 0));
     return a.length ? a : [0];
@@ -104,8 +102,6 @@
     return false;
   };
 
-  /* The draft box is placed with the same --lay-step calc the server uses
-     for saved areas, so a refit moves them all together. */
   const layDraftBox = () => {
     const g = layGrid();
     if (!g) return;
@@ -508,12 +504,10 @@
       if (localStorage.getItem(key)) return true;
       localStorage.setItem(key, '1');
     } catch {
-      /* no storage: warn every time rather than never */
     }
     return false;
   };
 
-  /* Every handler below is delegated so a morph never needs to re-bind. */
   document.addEventListener('click', async (event) => {
     const t = event.target;
     const hit = (sel) => (t.closest ? t.closest(sel) : null);

@@ -3,8 +3,6 @@
 Target: <https://github.com/decentraland/sdk-skills> (default branch `main`).
 Everything below is prepared locally. Nothing has been pushed, forked, or opened.
 
----
-
 ## PR title
 
 ```
@@ -89,33 +87,29 @@ Their convention for content PRs is `skillwriter/<topic>` (maintainer-run sync b
 > read the "Why a skill" section first, the glue sections are the ones with nowhere else to
 > go.
 
----
-
 ## Directory name: `migrate-smart-items-to-code`
 
 Our local name is `dcl-scene-behaviors`, which does not fit their scheme: no repo skill
 carries a `dcl-` prefix (the repo *is* Decentraland), and "scene behaviors" names a theme
 rather than a task.
 
-Their naming is a task the agent is being asked to do — `add-interactivity`, `build-ui`,
+Their naming is a task the agent is asked to do — `add-interactivity`, `build-ui`,
 `create-scene`, `deploy-worlds`, `optimize-scene`, `migrate-sdk6-to-sdk7` — with noun names
 reserved for reference-shaped skills (`composites`, `camera-control`, `audio-video`).
 
-This skill is task-shaped and specifically porting-shaped, so it takes the same form as the
-one porting skill they already have, including the explicit source→target that skill uses:
+This skill is task-shaped and porting-shaped, so it takes the form of the one porting skill
+they already have, including its explicit source→target:
 
 | Candidate | Verdict |
 | --- | --- |
-| `migrate-smart-items-to-code` | **Chosen.** Mirrors `migrate-sdk6-to-sdk7` exactly (`migrate-<source>-to-<target>`), keeps "smart-items" as the discovery keyword, and states the direction. |
-| `migrate-smart-items` | Shorter, but ambiguous — could read as migrating items between scenes or upgrading asset-pack versions. `migrate-sdk6-to-sdk7` spells out the target for the same reason. |
+| `migrate-smart-items-to-code` | **Chosen.** Mirrors `migrate-sdk6-to-sdk7` (`migrate-<source>-to-<target>`), keeps "smart-items" as the discovery keyword, states the direction. |
+| `migrate-smart-items` | Shorter but ambiguous — could read as migrating items between scenes or upgrading asset-pack versions. `migrate-sdk6-to-sdk7` spells out the target for the same reason. |
 | `smart-items-in-code` | Noun-phrase, defensible next to `script-components`, but loses the porting verb that makes an agent pick it for a migration task. |
 | `replace-smart-items` | Rejected: reads as deprecating a shipping Creator Hub feature. The skill's position is "when the palette runs out", not "don't use smart items". |
 
-If the maintainers prefer a non-`migrate` framing (the skill is also useful for greenfield
-code that wants smart-item semantics), `smart-items-in-code` is the drop-in alternative —
-only the directory name, the `name:` field, and the cross-reference links change.
-
----
+If maintainers prefer a non-`migrate` framing (the skill also suits greenfield code wanting
+smart-item semantics), `smart-items-in-code` is the drop-in alternative — only the directory
+name, the `name:` field and the cross-reference links change.
 
 ## Files changed
 
@@ -127,8 +121,8 @@ migrate-smart-items-to-code/references/actions.md
 migrate-smart-items-to-code/references/triggers.md
 ```
 
-Prepared at `docs/upstream/sdk-skills/migrate-smart-items-to-code/` in this repo; copy the
-directory into the root of `sdk-skills` unchanged.
+The files are the shipped skill at `skills/migrate-smart-items-to-code/` in this repo
+(byte-identical); copy that directory into the root of `sdk-skills` unchanged.
 
 ### `README.md` — add to the Available Skills table, between `migrate-sdk6-to-sdk7` and `multiplayer-sync`
 
@@ -166,32 +160,29 @@ Suggested, each a single line at the end of the relevant section:
 - `migrate-sdk6-to-sdk7/SKILL.md` — in Cross-References:
   `[[migrate-smart-items-to-code]] — if the ported scene is then rebuilt in the Creator Hub with smart items, or already carries asset-packs components`
 
----
-
 ## What a reviewer should check
 
-Ordered by risk. The first four are the ones I would look at if I were reviewing.
+Ordered by risk; the first four are what I would look at.
 
-1. **Scope overlap is acceptable to you.** This is the decision that makes or breaks the PR.
-   Every component section defers to the owning skill and gives only the minimum call for
-   that palette entry — but it *is* one file that touches ten domains. If you'd rather the
-   trigger half went into `add-interactivity` and only the glue stayed here, say so and I'll
-   resplit.
+1. **Scope overlap is acceptable to you.** The decision that makes or breaks the PR. Every
+   component section defers to the owning skill and gives only the minimum call for that
+   palette entry — but it *is* one file touching ten domains. If you'd rather the trigger
+   half went into `add-interactivity` and only the glue stayed here, say so and I'll resplit.
 
 2. **`CL_MAIN_PLAYER` vs `CL_PLAYER` for trigger areas.** `references/triggers.md` recommends
    `TriggerArea.setBox(area, ColliderLayer.CL_MAIN_PLAYER)` for local-player-only zones,
    instead of the default `CL_PLAYER` + `if (result.trigger?.entity !== engine.PlayerEntity) return`
-   guard that `add-interactivity` documents and that `@dcl/asset-packs` itself uses. Verified
-   the layer exists (`@dcl/ecs` `mesh_collider.gen.d.ts`: `CL_MAIN_PLAYER = 8`, "layer
+   guard that `add-interactivity` documents and `@dcl/asset-packs` itself uses. Verified the
+   layer exists (`@dcl/ecs` `mesh_collider.gen.d.ts`: `CL_MAIN_PLAYER = 8`, "layer
    corresponding to the local (main) player avatar"). Both are documented in the file, but if
    you confirm the renderer behavior, `add-interactivity` probably wants the same note.
 
-3. **The "don't strip `@dcl/asset-packs` until the composite is clean" rule** in `SKILL.md`.
-   It is derived from your own `composites` rules (`asset-packs::Counter` is the id
-   allocator; `asset-packs::ActionTypes` and `inspector::*` are Creator Hub-managed and must
-   stay). I have not exercised every combination of "remove the import but keep the
-   composite data" on current SDKs — please sanity-check the wording against what the
-   toolchain actually does today, especially the older-SDK dependency note.
+3. **The "don't strip `@dcl/asset-packs` until the composite is clean" rule** in `SKILL.md`,
+   derived from your own `composites` rules (`asset-packs::Counter` is the id allocator;
+   `asset-packs::ActionTypes` and `inspector::*` are Creator Hub-managed and must stay). I
+   have not exercised every combination of "remove the import but keep the composite data"
+   on current SDKs — please sanity-check the wording against what the toolchain does today,
+   especially the older-SDK dependency note.
 
 4. **Permission enforcement caveat.** `SKILL.md` says `requiredPermissions` is enforced for
    portable experiences and smart wearables, and that normal parcel/World scenes are not
@@ -239,26 +230,23 @@ PY
 
 Expected: `63 19 9` and `missing: []`.
 
----
-
 ## Their process, for whoever opens the PR
 
-- **No CONTRIBUTING file, no CI, no tests.** README's Contributing section is one line:
-  open a PR in this repo. Every merge in the history is a plain squash-free merge commit by
-  `nearnshaw` (Nico Earnshaw), who is effectively the sole maintainer.
+- **No CONTRIBUTING file, no CI, no tests.** README's Contributing section is one line: open
+  a PR in this repo. Every merge in the history is a plain squash-free merge commit by
+  `nearnshaw` (Nico Earnshaw), effectively the sole maintainer.
 - **The repo is downstream of `decentraland/docs`.** The initial import commit says the
-  skills were copied from the `skills/` directory of `decentraland/docs` "for fast
-  installation via the Vercel skills CLI". A change that also belongs in the docs repo may
-  need to be made there too; ask in the PR.
-- **`.sync-state.json` is a maintainer bookkeeping file — do not touch it.** It records the
-  last reviewed commit of six source repos (`docs`, `protocol`, `js-sdk-toolchain`,
+  skills were copied from `decentraland/docs`'s `skills/` directory "for fast installation
+  via the Vercel skills CLI". A change that also belongs in the docs repo may need to be
+  made there too; ask in the PR.
+- **`.sync-state.json` is maintainer bookkeeping — do not touch it.** It records the last
+  reviewed commit of six source repos (`docs`, `protocol`, `js-sdk-toolchain`,
   `creator-hub`, `sdk7-test-scenes`, `sdk-skills`) with a `lastChecked` date. A recurring
   "skill sync" pass (branches `skillwriter/sync-<date>`, roughly every 1–2 weeks; latest
-  2026-07-27) walks the commits in those repos since the recorded state, folds anything
+  2026-07-27) walks those repos' commits since the recorded state, folds anything
   skill-relevant into the skills, and advances the file. Consequence for a submitter: a new
   skill may be rewritten by a later sync pass, and claims should be phrased so a sync can
-  re-verify them — which is why their style demands `(verified — <file>)` and named test
-  scenes.
+  re-verify them — hence their `(verified — <file>)` style and named test scenes.
 - **`sdk7-test-scenes` is the preferred evidence.** Several skills end with an "Example
   scenes" list linking to `github.com/decentraland/sdk7-test-scenes/tree/main/scenes/<coords>-<name>`,
   and inline claims cite the scene that proved them. This skill cites the package enums and
@@ -266,13 +254,11 @@ Expected: `63 19 9` and `missing: []`.
   no smart-item scene in that repo. Offering to add one would strengthen the PR.
 - **Install path is the Vercel skills CLI** (`npx skills add decentraland/sdk-skills --all`),
   which reads each top-level directory as a skill. A new top-level directory is picked up
-  with no manifest to edit — but it will be invisible in the README table and the
-  `sdk-scenes` index unless you add it there (`unity-explorer-mcp` is currently in the repo
-  and in neither, which is what that omission looks like).
+  with no manifest to edit — but it stays invisible in the README table and the `sdk-scenes`
+  index unless you add it there (`unity-explorer-mcp` is currently in the repo and in
+  neither, which is what that omission looks like).
 - **`.claude/settings.json` is the maintainer's own machine config** (a permission allowlist
-  with absolute paths under the maintainer's own home directory). It is not contributor
-  guidance; leave it
-  alone.
+  with absolute paths under their home directory). Not contributor guidance; leave it alone.
 - **Recent direction of travel**, worth matching: PR #61 pruned skill descriptions and folded
   trailing summary sections; the same series added `Done when:` completion checks to
   `create-scene` and `migrate-sdk6-to-sdk7` and fixed "progressive disclosure" across seven

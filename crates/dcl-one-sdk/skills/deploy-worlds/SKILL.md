@@ -5,7 +5,7 @@ description: Deploy a Decentraland scene to a World (personal 3D space using a D
 
 # Deploying to Decentraland Worlds
 
-Worlds are personal 3D spaces not tied to LAND. They have no parcel limitations and are automatically listed on the Places page.
+Worlds are personal 3D spaces not tied to LAND: no parcel limitations, automatically listed on the Places page, and deployed with `--target-content https://worlds-content-server.decentraland.org`.
 
 ## Requirements
 
@@ -67,7 +67,7 @@ Alternatively, deploy manually via CLI:
 npx @dcl/sdk-commands deploy --target-content https://worlds-content-server.decentraland.org
 ```
 
-This will prompt the user to sign the deployment with their wallet. Validations run automatically to allow or reject the scene.
+This prompts the user to sign the deployment with their wallet. Validations run automatically to allow or reject the scene.
 
 Files matched by `.dclignore` (at the project root) are excluded from the upload — keep working files like Blender sources, concept art, and markdown docs listed there so the World stays light. See the `.dclignore` section in the **deploy-scene** skill.
 
@@ -131,9 +131,7 @@ Beyond `name` and `placesConfig`, `worldConfiguration` supports skybox and minim
 - `skyboxConfig.fixedTime` — verified against the engine test scenes and current docs.
 - `skyboxConfig.textures`, `miniMapConfig` (`visible`/`dataImage`/`estateImage`) — [UNVERIFIED: not present in the engine test scenes or the current scene-metadata docs; confirm against js-sdk-toolchain scene schema before relying on them].
 
-**`skyboxConfig.fixedTime` values:**
-
-Values are seconds since midnight; a full day is `86400`.
+**`skyboxConfig.fixedTime` values:** seconds since midnight; a full day is `86400`.
 
 | Value | Time of day |
 |-------|------------|
@@ -149,7 +147,7 @@ Any value above `86400` is interpreted as midnight. Omit `fixedTime` for a dynam
 
 ## Multi-Scene Worlds
 
-A World can host multiple independent scenes, each at different coordinates. The World grows and shrinks dynamically as scenes are added or removed, and gaps between scenes are filled with environment.
+A World can host multiple independent scenes at different coordinates. It grows and shrinks dynamically as scenes are added or removed, and gaps between scenes are filled with environment.
 
 **Enable via Creator Hub:** When publishing, toggle **Multi-Scene World (advanced)** on the first publish.
 
@@ -187,10 +185,3 @@ Worlds go through the same asset bundle conversion as Genesis City scenes — 3D
 - https://github.com/decentraland/sdk7-test-scenes/tree/main/scenes/3,0-skybox-world-json — a World scene setting a fixed skybox time via `worldConfiguration.skyboxConfig.fixedTime`, and reading it back with `getSceneInformation`.
 
 > **Deploying to Genesis City instead?** See the **deploy-scene** skill.
-
-## Key Differences from Genesis City
-
-- **No parcel limitations** — Worlds are not constrained by LAND ownership
-- **NAME/ENS required** — must own a Decentraland NAME or ENS domain instead of LAND
-- **Different deploy target** — uses `--target-content https://worlds-content-server.decentraland.org`
-- **Auto-listed on Places** — unless opted out via `placesConfig.optOut`

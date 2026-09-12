@@ -23,11 +23,6 @@ type Files = [(String, String, Vec<u8>)];
 
 pub(crate) fn client(connect: Duration, total: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        // Honest identification: reqwest sends no User-Agent by default, and
-        // an anonymous client scores as junk with every WAF between here and
-        // a self-hosted realm. Saying who we are is not a bypass — an edge
-        // that challenges still challenges — it just stops the requests
-        // reading as nobody's.
         .user_agent(USER_AGENT)
         .connect_timeout(connect)
         .timeout(total)
@@ -147,25 +142,22 @@ impl UploadProgress {
     /// The look at what the server holds, before anything travels: the
     /// whole payload is the size on show until [`Self::begin`] narrows it.
     fn checking(&self, entity_len: usize, files: &Files) {
-        self.update(|p| {
-            *p = ProgressState {
-                phase: "checking",
-                total: payload_len(entity_len, files),
-                files: files.len(),
-                started_ms: now_ms(),
-                ..ProgressState::default()
-            }
-        });
+        self.reset("checking", entity_len, files, None);
     }
 
     /// `files` is what travels; `reuse` says what stayed home.
     fn begin(&self, entity_len: usize, files: &Files, reuse: Reuse) {
+        let reuse = (reuse.reused_files > 0).then(|| reuse.sentence());
+        self.reset("staging", entity_len, files, reuse);
+    }
+
+    fn reset(&self, phase: &'static str, entity_len: usize, files: &Files, reuse: Option<String>) {
         self.update(|p| {
             *p = ProgressState {
-                phase: "staging",
+                phase,
                 total: payload_len(entity_len, files),
                 files: files.len(),
-                reuse: (reuse.reused_files > 0).then(|| reuse.sentence()),
+                reuse,
                 started_ms: now_ms(),
                 ..ProgressState::default()
             }
@@ -407,8 +399,6 @@ async fn node_upload(
         }
     };
     progress.carrier("node");
-    // The script reports the send on stderr, one JSON line per chunk batch;
-    // anything else there is its failure message. stdout is the answer.
     let reporter = {
         let stderr = child.stderr.take();
         let progress = progress.clone();
@@ -436,10 +426,6 @@ async fn node_upload(
         Err(e) => return Some(Err(anyhow::anyhow!("node could not run: {e}"))),
     };
     let stdout = String::from_utf8_lossy(&o.stdout);
-    // No JSON on stdout means the fetch threw before a response —
-    // a connection refused / DNS failure / timeout. Report it as
-    // status 0, which the caller renders as "could not reach the
-    // content server", the same as the reqwest transport error.
     let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) else {
         return Some(Ok((0, String::new())));
     };
@@ -594,8 +580,6 @@ async fn curl_upload(
         cmd.arg("-F").arg(part(hash, "application/octet-stream"));
     }
     cmd.arg(url);
-    // curl's meter is not machine-readable; the page shows the payload size
-    // and the clock instead of a bar that never moves.
     progress.carrier("curl");
     let out = cmd.output().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -725,11 +709,9 @@ pub(super) async fn resolve_target_from(
 /// the upload refusal as its backstop.
 fn check_target_kind(base: &str, world: Option<&str>) -> Result<()> {
     let host = host_of(base);
-    let at_worlds = host.is_some() && host == host_of(WORLDS_CONTENT_SERVER);
-    let at_genesis = UPSTREAM_CATALYST_HOSTS
-        .iter()
-        .any(|u| host.is_some() && host == host_of(u));
-    match (world, at_worlds, at_genesis) {
+    let at = |u: &str| host.is_some() && host == host_of(u);
+    let at_genesis = UPSTREAM_CATALYST_HOSTS.iter().any(|u| at(u));
+    match (world, at(WORLDS_CONTENT_SERVER), at_genesis) {
         (None, true, _) => Err(super::world_gate::refuse_plain_scene_at_worlds()),
         (Some(_), _, true) => Err(super::world_gate::refuse_world_at_genesis()),
         _ => Ok(()),
@@ -832,6 +814,9 @@ fn about_content_url(about: &Value, base: &str) -> Option<String> {
     })
 }
 
+const CONTENT_URL_HINT: &str =
+    "for a content server, pass its URL with the scheme, e.g. --target-server https://host/content";
+
 async fn catalyst_content_url(t: &str) -> Result<String> {
     let base = sanitize_catalyst_url(t);
     let client = probe_client()?;
@@ -840,7 +825,7 @@ async fn catalyst_content_url(t: &str) -> Result<String> {
             UserError::new(
                 format!("could not resolve the catalyst {base}"),
                 TrySteps::one("check the domain and that the catalyst is up (GET <domain>/about)")
-                    .and("for a content server, pass its URL with the scheme, e.g. --target-server https://host/content"),
+                    .and(CONTENT_URL_HINT),
             )
             .caused_by(std::io::Error::other(format!("{e:#}"))),
         )
@@ -848,8 +833,7 @@ async fn catalyst_content_url(t: &str) -> Result<String> {
     about_content_url(&about, &base).ok_or_else(|| {
         UserError::new(
             format!("the catalyst {base} did not report a content server"),
-            TrySteps::one("check <domain>/about returns content.publicUrl")
-                .and("for a content server, pass its URL with the scheme, e.g. --target-server https://host/content"),
+            TrySteps::one("check <domain>/about returns content.publicUrl").and(CONTENT_URL_HINT),
         )
         .into()
     })
@@ -981,53 +965,41 @@ pub(crate) fn entity_title(entity: &Value) -> String {
         .to_string()
 }
 
+/// The array under `v`, or nothing: a missing list reads as empty.
+fn items(v: Option<&Value>) -> impl Iterator<Item = &Value> {
+    v.and_then(Value::as_array).into_iter().flatten()
+}
+
 fn string_list(v: Option<&Value>) -> Vec<String> {
-    v.and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    items(v)
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn entity_content_hashes(entity: &Value) -> Vec<String> {
-    entity
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|content| {
-            content
-                .iter()
-                .filter_map(|f| f.get("hash").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    items(entity.get("content"))
+        .filter_map(|f| f.get("hash").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn parse_world_scenes(body: &Value) -> Vec<WorldScene> {
-    body.get("scenes")
-        .and_then(Value::as_array)
-        .map(|scenes| {
-            scenes
-                .iter()
-                .map(|s| {
-                    let entity = s.get("entity").cloned().unwrap_or_default();
-                    WorldScene {
-                        title: entity_title(&entity),
-                        parcels: string_list(s.get("parcels")),
-                        timestamp: entity.get("timestamp").and_then(Value::as_i64),
-                        content_hashes: entity_content_hashes(&entity),
-                        size: s.get("size").and_then(|v| match v {
-                            Value::String(s) => s.parse().ok(),
-                            other => other.as_u64(),
-                        }),
-                    }
-                })
-                .collect()
+    items(body.get("scenes"))
+        .map(|s| {
+            let entity = s.get("entity").cloned().unwrap_or_default();
+            WorldScene {
+                title: entity_title(&entity),
+                parcels: string_list(s.get("parcels")),
+                timestamp: entity.get("timestamp").and_then(Value::as_i64),
+                content_hashes: entity_content_hashes(&entity),
+                size: s.get("size").and_then(|v| match v {
+                    Value::String(s) => s.parse().ok(),
+                    other => other.as_u64(),
+                }),
+            }
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 async fn fetch_world_scenes(target: &str, world: &str) -> Result<Vec<WorldScene>> {
@@ -1054,7 +1026,7 @@ struct PermissionCheck {
 /// server, and the server refuses an unpermitted upload itself. On, a
 /// refusal names the owner and the grant command instead of a bare HTTP
 /// error. Land deploys have no such document and always pass.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PermissionGate {
     pub target: String,
     pub world: Option<String>,
@@ -1064,12 +1036,7 @@ pub struct PermissionGate {
 
 impl PermissionGate {
     pub fn off() -> Self {
-        PermissionGate {
-            target: String::new(),
-            world: None,
-            pointers: Vec::new(),
-            enabled: false,
-        }
+        Self::default()
     }
 
     pub async fn verify(&self, address: &str) -> Result<()> {
@@ -1127,11 +1094,9 @@ pub(crate) fn deployment_permission_in_doc(doc: &Value, address: &str) -> DocAns
 
 /// The deploying pointers the scoped-grant list does NOT cover.
 pub(crate) fn denied_parcels_in(scoped: &Value, deploying: &[String]) -> Vec<String> {
-    let allowed: HashSet<&str> = scoped
-        .get("parcels")
-        .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    let allowed: HashSet<&str> = items(scoped.get("parcels"))
+        .filter_map(Value::as_str)
+        .collect();
     deploying
         .iter()
         .filter(|p| !allowed.contains(p.as_str()))
@@ -1754,13 +1719,10 @@ pub(crate) async fn upload_entity_with_chain_to(
     progress.checking(entity_bytes.len(), files);
     let url = format!("{}/entities", target.trim_end_matches('/'));
     tracing::info!("uploading to {url} as {address} (entity {entity_id})");
-    // Keep a publish legible beside watch events: the action owns the clock,
-    // while the long URL and signer get their own continuation lines.
     ux::note_clocked(destination.headline());
     ux::note_arrow(format!("url: {url}"));
     ux::note_arrow(format!("signer: {address}"));
 
-    // What the server already holds stays home; the entity always travels.
     let cids: Vec<&str> = files.iter().map(|(_, h, _)| h.as_str()).collect();
     let (send, reuse) = split_stored(files, &stored_cids(target, &cids).await);
     let files: &Files = &send;
@@ -1769,13 +1731,6 @@ pub(crate) async fn upload_entity_with_chain_to(
     }
     progress.begin(entity_bytes.len(), files, reuse);
 
-    // Node carries the upload, then curl, then reqwest. A Cloudflare-fronted
-    // worlds server challenges reqwest and curl but not Node — the official
-    // tooling is Node, so its fingerprint is the one the edge accepts. This
-    // is only reliable because the one request the deploy makes to the
-    // content server before it, the look at what it holds, travels by the
-    // same carrier: a reqwest pre-flight would flag the IP and the upload
-    // that follows would inherit the challenge.
     let carried = match node_upload(&url, entity_id, &entity_bytes, files, &auth_chain, progress)
         .await
     {
@@ -1799,9 +1754,6 @@ pub(crate) async fn upload_entity_with_chain_to(
     };
 
     if status == 0 {
-        // curl reached no server (connection refused, DNS failure, timeout):
-        // no HTTP response, so `-w %{http_code}` prints 000. Same sentence
-        // the reqwest transport error gives.
         progress.finish(false);
         return Err(cannot_reach(format!("no response from {url}")).into());
     }
@@ -1932,38 +1884,36 @@ mod tests {
 
     #[test]
     fn upload_headlines_name_the_scene_destination() {
-        assert_eq!(
-            UploadDestination::World {
-                name: "arcade.dcl.eth",
-                multi_scene: false,
-            }
-            .headline(),
-            "⇡ uploading scene to world arcade.dcl.eth"
-        );
-        assert_eq!(
-            UploadDestination::World {
-                name: "arcade.dcl.eth",
-                multi_scene: true,
-            }
-            .headline(),
-            "⇡ uploading scene to multi-scene world arcade.dcl.eth"
-        );
-        assert_eq!(
-            UploadDestination::Land {
-                base: "2,12",
-                parcels: 1,
-            }
-            .headline(),
-            "⇡ uploading scene to LAND at 2,12"
-        );
-        assert_eq!(
-            UploadDestination::Land {
-                base: "2,12",
-                parcels: 3,
-            }
-            .headline(),
-            "⇡ uploading scene to LAND at 2,12 (3 parcels)"
-        );
+        let world = |multi_scene| UploadDestination::World {
+            name: "arcade.dcl.eth",
+            multi_scene,
+        };
+        let land = |parcels| UploadDestination::Land {
+            base: "2,12",
+            parcels,
+        };
+        for (dest, line) in [
+            (world(false), "⇡ uploading scene to world arcade.dcl.eth"),
+            (
+                world(true),
+                "⇡ uploading scene to multi-scene world arcade.dcl.eth",
+            ),
+            (land(1), "⇡ uploading scene to LAND at 2,12"),
+            (land(3), "⇡ uploading scene to LAND at 2,12 (3 parcels)"),
+        ] {
+            assert_eq!(dest.headline(), line);
+        }
+    }
+
+    type Parts = Vec<(Option<usize>, Vec<u8>)>;
+
+    /// The multipart body for `files` behind a bare `SIGNER` link, as parts
+    /// and as the bytes on the wire.
+    fn signed_parts(files: &Files) -> (Parts, Vec<u8>) {
+        let chain = json!([{ "type": "SIGNER", "payload": "0xabc", "signature": "" }]);
+        let parts = multipart_parts("XYZ", "bafyentity", b"{}", files, &chain);
+        let wire = parts.iter().flat_map(|(_, b)| b.clone()).collect();
+        (parts, wire)
     }
 
     /// The ephemeral signature actually recovers to the ephemeral address.
@@ -2082,8 +2032,6 @@ mod tests {
             WORLDS_CONTENT_SERVER,
             "known worlds host, no /about probe"
         );
-        // A world sent to a self-hosted worlds server: verbatim too. Port 9
-        // answers nothing, so a /about probe would have failed this.
         let own_worlds = resolved(Some("127.0.0.1:9"), Some("w.dcl.eth"), true).await;
         assert_eq!(
             own_worlds.unwrap(),
@@ -2208,9 +2156,6 @@ mod tests {
         assert!(err.contains("no deploy target given"), "{err}");
     }
 
-    /// The body a counted send streams is the multipart every carrier
-    /// sends, and the count it reports walks the files in order and lands on
-    /// "validating" with the last byte.
     #[tokio::test]
     async fn a_counted_send_reports_the_file_in_flight_then_validating() {
         use futures::StreamExt;
@@ -2218,9 +2163,7 @@ mod tests {
             ("a.bin".into(), "bafya".into(), vec![1u8; 70_000]),
             ("b.bin".into(), "bafyb".into(), vec![2u8; 10]),
         ];
-        let chain = json!([{ "type": "SIGNER", "payload": "0xabc", "signature": "" }]);
-        let parts = multipart_parts("XYZ", "bafyentity", b"{}", &files, &chain);
-        let wire: Vec<u8> = parts.iter().flat_map(|(_, b)| b.clone()).collect();
+        let (parts, wire) = signed_parts(&files);
         let text = String::from_utf8_lossy(&wire);
         assert!(text.starts_with(
             "--XYZ\r\nContent-Disposition: form-data; name=\"entityId\"\r\n\r\nbafyentity\r\n"
@@ -2268,8 +2211,6 @@ mod tests {
         assert_eq!(progress.snapshot().phase, "failed");
     }
 
-    /// What the node script writes on stderr: progress lines are consumed,
-    /// anything else is not mistaken for one.
     #[test]
     fn node_progress_lines_parse_and_prose_does_not() {
         assert_eq!(
@@ -2346,9 +2287,7 @@ mod tests {
         assert_eq!(reuse.upload_bytes, payload_len(0, &send));
         assert!(matches!(send, Cow::Owned(_)));
         assert!(send.iter().all(|(_, h, _)| !h.ends_with('0')));
-        let chain = json!([{ "type": "SIGNER", "payload": "0xabc", "signature": "" }]);
-        let parts = multipart_parts("XYZ", "bafyentity", b"{}", &send, &chain);
-        let wire: Vec<u8> = parts.iter().flat_map(|(_, b)| b.clone()).collect();
+        let (_, wire) = signed_parts(&send);
         let text = String::from_utf8_lossy(&wire);
         assert!(
             text.contains("name=\"bafyentity\"; filename=\"bafyentity\""),
@@ -2404,8 +2343,6 @@ mod tests {
         assert_eq!(progress.snapshot().reuse, None, "nothing stayed home");
     }
 
-    /// The one sentence every surface says, the answer parser, and the
-    /// switch that sends everything.
     #[test]
     fn the_split_sentence_the_answer_and_the_upload_all_switch() {
         let tally = |held: &[bool]| Reuse::tally(held.iter().map(|h| (*h, 2_500_000)));

@@ -12,7 +12,6 @@ use crate::ux::{TrySteps, UserError};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Where a scene's project-local skills live, relative to the scene root.
 pub const SKILLS_DIR: &str = ".claude/skills";
 
 pub struct EmbeddedSkill {
@@ -69,7 +68,6 @@ fn skill_io_error(path: &Path, e: std::io::Error) -> anyhow::Error {
     .into()
 }
 
-/// The `name:` line of a leading `SKILL.md` YAML frontmatter block.
 #[cfg(test)]
 fn frontmatter_name(body: &str) -> Option<&str> {
     let rest = body.strip_prefix("---\n")?;

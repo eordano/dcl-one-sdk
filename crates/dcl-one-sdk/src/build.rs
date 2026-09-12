@@ -26,7 +26,6 @@ pub struct BuildOptions {
 /// production bundle lands. Stale only when `--skip-build` skips the rebuild.
 pub const RELEASE_OUT: &str = ".dcl-one/release";
 
-/// `"" / "s"`, so a count and its noun agree.
 pub fn plural(n: u64) -> &'static str {
     match n {
         1 => "",
@@ -34,7 +33,6 @@ pub fn plural(n: u64) -> &'static str {
     }
 }
 
-/// `<what> saved <path> (<elapsed>)`, the shape every emitted-chunk step uses.
 pub fn saved(what: &str, root: &Path, out: &Path, started: Instant) -> String {
     format!(
         "{what} saved {} ({})",
@@ -497,8 +495,6 @@ pub async fn type_check(project: &Project, reloaded: Reloaded) -> Result<Checked
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        // TypeScript uses inverse video for source gutters, which produces bright
-        // background blocks on dark terminals. Keep the gutter foreground-only.
         let body = body.replace("\x1b[7m", "\x1b[90m");
         let body = body.trim();
         let count = ts_error_count(body);

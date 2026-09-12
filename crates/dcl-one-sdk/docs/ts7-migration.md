@@ -5,7 +5,7 @@ Status: the scaffold half is done. Two options still have to be fixed in
 `src/vendor/node_modules.zip` but do not author.
 
 Everything below is a genuine option fix. `"ignoreDeprecations": "6.0"` is
-explicitly rejected as a solution — see "Why not ignoreDeprecations".
+explicitly rejected — see "Why not ignoreDeprecations".
 
 ## The four options
 
@@ -29,12 +29,12 @@ tsconfig to update:
 +    "moduleResolution": "bundler"
 ```
 
-* `baseUrl` deleted, not replaced. It only adds a "resolve this
-  non-relative specifier against the project root" step. No template and no
-  real scene uses root-relative imports, and we set no `paths`, so removing it
-  changes nothing: across the 60-scene `sdk7-test-scenes` corpus, `tsc
-  --listFiles` and every diagnostic were identical with and without it, and the
-  emitted `bin/*.js` / `main.crdt` were byte-identical.
+* `baseUrl` deleted, not replaced. It only adds a "resolve this non-relative
+  specifier against the project root" step. No template and no real scene uses
+  root-relative imports, and we set no `paths`, so removing it changes nothing:
+  across the 60-scene `sdk7-test-scenes` corpus, `tsc --listFiles` and every
+  diagnostic were identical with and without it, and the emitted `bin/*.js` /
+  `main.crdt` were byte-identical.
   `@dcl/asset-packs` needs no `paths` mapping here — unlike the upstream
   `sdk7-scene-template`, `inspector.zip` installs it at top-level
   `node_modules/@dcl/asset-packs`, so plain node resolution finds it (verified:
@@ -44,11 +44,10 @@ tsconfig to update:
   `extends`, so this replaces the inherited `node10` without touching the blob.
   `node16`/`nodenext` are not usable: TS5110 requires `module` to be
   `Node16`/`NodeNext`, and `module` is `esnext` from the SDK config. `bundler`
-  is also what the build actually does — rolldown/oxc resolves the bundle. The
-  only defaults that flip are `resolvePackageJsonExports`,
-  `resolvePackageJsonImports` and `resolveJsonModule`; none of the packages a
-  scene imports declares `exports`/`imports`, and the scaffold already sets
-  `resolveJsonModule: true`.
+  is also what the build does — rolldown/oxc resolves the bundle. The only
+  defaults that flip are `resolvePackageJsonExports`, `resolvePackageJsonImports`
+  and `resolveJsonModule`; no package a scene imports declares
+  `exports`/`imports`, and the scaffold already sets `resolveJsonModule: true`.
 * Keep this line even after the ecs7 fix below lands: it is what protects a
   scene that resolves `@dcl/sdk` from npm rather than from the blob.
 
@@ -83,15 +82,15 @@ File: `node_modules/@dcl/sdk/types/tsconfig.ecs7.json`, shipped inside
 
 Why each line is safe:
 
-* `downlevelIteration` is emit-only and only has an effect when
+* `downlevelIteration` is emit-only and only takes effect when
   `target < ES2015`. The same file sets `"target": "es2020"`, and
   `src/rolldown_backend.rs` transforms at a hardcoded `es2020` regardless of the
-  tsconfig, so the flag cannot reach a shipped byte. On top of that
-  `src/build.rs` runs `tsc -p tsconfig.json --noEmit`, so tsc never emits at
-  all. Removing it left every corpus bundle byte-identical and produced no new
-  diagnostic anywhere. It cannot be neutralised from a child tsconfig: TS
-  reports the deprecation on *presence*, so `"downlevelIteration": false` still
-  errors (it just moves the error to our line).
+  tsconfig, so the flag cannot reach a shipped byte; and `src/build.rs` runs
+  `tsc -p tsconfig.json --noEmit`, so tsc never emits at all. Removing it left
+  every corpus bundle byte-identical and produced no new diagnostic anywhere. It
+  cannot be neutralised from a child tsconfig: TS reports the deprecation on
+  *presence*, so `"downlevelIteration": false` still errors (it just moves the
+  error to our line).
 * `suppressExcessPropertyErrors` is set to the compiler's own default
   (`false`) and has been inert in the checker since TS 5.5 — the only code in
   tsc 6.0.3 that reads it is the deprecation check. Excess-property checking is
@@ -112,12 +111,11 @@ only setting under which `bundler` is legal), or if any other compiler option
 shifted. Each edit (`ECS7_EDITS`) must also match exactly once: one that finds
 nothing on a file already reading the way it would leave it is that part of the
 upstream fix having shipped, and the build fails naming the edit to drop; once
-all three find nothing it fails with the instruction to delete the overlay,
-so it cannot idle unnoticed, not even partially. Any other match count is
-upstream having changed the option's shape, and fails asking for the edit to
-be re-derived. The blob is therefore no longer "a pure
-registry install - no overlays"; the README's table is the complete list of
-what the build rewrites.
+all three find nothing it fails with the instruction to delete the overlay, so
+it cannot idle unnoticed, not even partially. Any other match count is upstream
+having changed the option's shape, and fails asking for the edit to be
+re-derived. The blob is therefore no longer "a pure registry install - no
+overlays"; the README's table is the complete list of what the build rewrites.
 
 ## Why not `ignoreDeprecations`
 
@@ -138,8 +136,8 @@ that resolves a per-platform native package (`@typescript/typescript-darwin-arm6
 and friends, ~23 MB each) which also carries all `lib.*.d.ts`. Vendoring it
 would end the one-zip-serves-every-OS property of `node_modules.zip`
 (`scripts/build-base-blob.py` says as much: 6.x is the ceiling until that is
-addressed). So the pin stays at 6.0.3; this document is about being *correct*
-for 7.0, not about shipping it.
+addressed). The pin stays at 6.0.3; this document is about being *correct* for
+7.0, not about shipping it.
 
 Two further gaps, for whoever picks up TS 7 later:
 
@@ -148,9 +146,9 @@ Two further gaps, for whoever picks up TS 7 later:
   `suppressExcessPropertyErrors`. Only the upstream change closes that.
 * Scenes already scaffolded by an older `dcl-one-sdk` keep the `baseUrl` on
   disk — `init` only writes `tsconfig.json` once and nothing rewrites it. Under
-  TS 7 they get `TS5102 ... Use '"paths": {"*": ["./*"]}' instead.` If we ever
-  move the pin to 7, they need a migration step (delete `baseUrl`, and relativise
-  any `paths` targets).
+  TS 7 they get `TS5102 ... Use '"paths": {"*": ["./*"]}' instead.` Moving the
+  pin to 7 needs a migration step: delete `baseUrl`, relativise any `paths`
+  targets.
 
 ## Verification
 
@@ -170,6 +168,5 @@ anywhere.
 
 Wider evidence behind the two scaffold changes: the 60-scene
 `decentraland/sdk7-test-scenes` corpus under both 5.9.3 and 6.0.3, comparing
-`--listFiles` resolution graphs, full diagnostic text, and sha256 of every
-emitted artifact — no scene gained or lost a diagnostic and no bundle byte
-changed.
+`--listFiles` resolution graphs, full diagnostic text and sha256 of every
+emitted artifact — no scene gained or lost a diagnostic, no bundle byte changed.

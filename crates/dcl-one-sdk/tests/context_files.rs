@@ -133,7 +133,6 @@ fn non_project_directory_exits_zero_with_guidance() {
     assert!(stdout.contains("not a Decentraland project"), "{stdout}");
     assert!(stdout.contains("dcl-one-sdk init"), "{stdout}");
     assert!(!f.path().join("dclcontext").exists());
-    // The command is scene-scoped; a .claude/skills/ in a random cwd is litter.
     assert!(!f.path().join(".claude").exists());
 }
 
@@ -178,7 +177,6 @@ async fn fetches_recursively_flat_and_replaces_old_context() {
     );
     assert!(!f.path().join("dclcontext/stale.md").exists());
     assert!(!f.path().join("dclcontext/sub").exists());
-    // Both halves in one run: the embedded skill lands even on the happy path.
     assert!(skill_md(&f).is_file());
 }
 
@@ -211,10 +209,8 @@ async fn partial_download_failure_is_reported_not_fatal() {
     assert!(!f.path().join("dclcontext/b.md").exists());
 }
 
-/// An unreachable GitHub used to be a hard error, which made the offline half
-/// of this command unreachable exactly when it was most useful. It is now a
-/// note: the bundled skill is installed, `dclcontext/` is left as it was, and
-/// the process exits 0.
+/// An unreachable GitHub is a note, not an error: the bundled skill is still
+/// installed, `dclcontext/` is left as it was, and the process exits 0.
 #[test]
 fn unreachable_listing_still_installs_the_skill_and_exits_zero() {
     let f = Fixture::new("down");
@@ -227,8 +223,6 @@ fn unreachable_listing_still_installs_the_skill_and_exits_zero() {
     );
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
     let stdout = stdout_of(&out);
-    // Count-independent: the number comes from the build.rs-generated skills
-    // table, so pinning it is what made this assertion go stale in cfa0f5a15.
     assert!(stdout.contains("skills into .claude/skills/"), "{stdout}");
     assert!(
         stdout.contains("Could not reach the ai-sdk-context corpus"),
@@ -247,8 +241,7 @@ fn skill_md(f: &Fixture) -> PathBuf {
         .join(".claude/skills/migrate-smart-items-to-code/SKILL.md")
 }
 
-/// The skill comes out of the binary, so it is byte-identical to the crate's
-/// `skills/` source with no checkout, no npm and no network in the picture.
+/// Byte-identical to the crate's `skills/` source: no checkout, npm or network.
 #[test]
 fn offline_installs_the_skill_from_the_binary() {
     let f = Fixture::new("offline");
@@ -256,7 +249,6 @@ fn offline_installs_the_skill_from_the_binary() {
     let dir = f.dir_arg();
     let out = run(
         &["get-context-files", "--dir", &dir, "--offline"],
-        // Unroutable: if --offline dialled out, this would hang, not return.
         &[("DCL_ONE_SDK_CONTEXT_API", "http://198.51.100.1/api/root")],
     );
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
@@ -279,7 +271,6 @@ fn offline_installs_the_skill_from_the_binary() {
             "{rel} differs from the crate source"
         );
     }
-    // Frontmatter is what Claude Code matches a request against.
     let head = std::fs::read_to_string(skill_md(&f)).unwrap();
     assert!(
         head.starts_with("---\nname: migrate-smart-items-to-code\n"),

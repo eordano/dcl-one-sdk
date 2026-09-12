@@ -348,7 +348,6 @@ async fn world_delete_falls_back_to_the_per_scene_route() {
     .await;
     let fix = Fixture::scene("worldfb", SCENE_WORLD);
     let mut args = deploy_args(&fix, &base);
-    // The destructive replace-all path is opt-in; additive is the default.
     args.push("--replace-world-scenes".into());
     args.push("--yes".into());
     let out = run_bin(args).await;

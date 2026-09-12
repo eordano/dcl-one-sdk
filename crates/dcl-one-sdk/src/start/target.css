@@ -1,4 +1,3 @@
-/* Target Page.dc.html, 2026-09-09. Only loaded on /target. */
 :root {
   color-scheme: dark; --page: #161518; --panel: #222124; --text: #fcfcfc;
   --ink-85: #cfcdd4; --ink-7: #cfcdd4; --ink-6: #a09ba8; --ink-45: #a09ba8;
@@ -148,7 +147,6 @@ body::before { display: none; }
 
 .tgt .lay__swatch--in { background: rgba(255,45,85,.32); border: 1px solid rgba(255,45,85,.7); }
 
-/* Multiscene and History are views of the chosen destination, not destinations: no select form. */
 .tgt__selection-note { max-width: 90ch; }
 .tgt__advanced-body { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .tgt__advanced-body > a { align-self: flex-start; font-size: 13px; }
@@ -156,7 +154,6 @@ body::before { display: none; }
   .tgt .jn2__tabs { grid-template-columns: minmax(0,1fr); }
 }
 
-/* LAND picker: the wallet's parcels as areas, ranked; folded once the scene sits published on held land. */
 .tgt__picker > summary { cursor: pointer; padding: 12px 0 4px; color: var(--ink-6); font-size: 13px; font-weight: 600; }
 .tgt__picker[open] > summary { margin-bottom: 12px; }
 .tgt__picker-cols { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 20px; align-items: start; }

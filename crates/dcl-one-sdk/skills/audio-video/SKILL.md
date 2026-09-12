@@ -13,15 +13,9 @@ description: Add sound effects, music, audio streaming, and video players to Dec
 | Background music or radio stream                      | `AudioStream`                            | External URL, non-spatial, continuous    |
 | Video on a surface (screen, billboard)                | `VideoPlayer` + `Material.Texture.Video` | Requires a mesh to display on            |
 
-**Decision flow:**
-
-1. Is it a local audio file? → `AudioSource`
-2. Is it a streaming URL (radio, live audio)? → `AudioStream`
-3. Is it video content? → `VideoPlayer` on a plane/mesh
-
 ## Audio Sourcing
 
-Before referencing any audio file path in code, check `{baseDir}/references/audio-catalog.md`. It lists 50 free Decentraland audio clips with direct downloadable URLs that cover most needs (UI clicks, ambients, music, game mechanics, sound effects).
+Before referencing any audio file path in code, check `{baseDir}/references/audio-catalog.md` — 50 free Decentraland clips (UI clicks, ambients, music, game mechanics, sound effects) with `curl`-ready URLs.
 
 The expected workflow when a user asks for sound:
 
@@ -97,7 +91,7 @@ audioEventsSystem.registerAudioEventsEntity(radioEntity, (event) => {
 ```
 
 **API** (verified against `@dcl/ecs`, commit `f858f905`):
-- `audioEventsSystem.registerAudioEventsEntity(entity, callback)` -- registers a callback for audio state changes. The callback receives a `PBAudioEvent` with `state` (a `MediaState` enum) and `timestamp`. Fires only when state changes.
+- `audioEventsSystem.registerAudioEventsEntity(entity, callback)` -- registers a callback for audio state changes. The callback receives a `PBAudioEvent` with `state` (a `MediaState` enum) and `timestamp`.
 - `audioEventsSystem.removeAudioEventsEntity(entity)` -- unregisters the callback.
 - `audioEventsSystem.hasAudioEventsEntity(entity)` -- returns `boolean`.
 - `audioEventsSystem.getAudioState(entity)` -- returns `PBAudioEvent | undefined` (the latest state).
@@ -130,9 +124,7 @@ To play video on a non-primitive shape (curved screens), use `GltfNodeModifiers`
 
 ## Free Audio Files
 
-The audio catalog is the first place to look — see the **Audio Sourcing** section at the top of this skill. It lists 50 free Decentraland clips across music, ambient, interaction sounds, sound effects, and game mechanics, each with a `curl`-ready URL.
-
-Read `{baseDir}/references/audio-catalog.md` before recommending audio so suggestions are concrete, then check with the user whether they want those clips downloaded or prefer placeholders.
+Read `{baseDir}/references/audio-catalog.md` before recommending audio so suggestions are concrete, then follow the **Audio Sourcing** workflow at the top of this skill.
 
 > **Important**: `AudioSource` only works with **local files**. Never use external URLs for `audioClipUrl`. Always download into `assets/Audio/` first.
 

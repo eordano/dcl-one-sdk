@@ -1,6 +1,5 @@
-//! The four `catalyrst-testgate` primitives dcl-one-sdk's suites gate on,
-//! copied verbatim so the standalone workspace does not carry that crate.
-//! Behaviour and messages match the monorepo crate; keep them in step.
+//! The four `catalyrst-testgate` primitives, copied verbatim so the standalone
+//! workspace does not carry that crate; keep behaviour and messages in step.
 
 pub const OPT_OUT: &str = "ALLOW_SKIPPED_INTEGRATION";
 pub const SKIP_LOG: &str = "CATALYRST_TESTGATE_SKIPLOG";
@@ -51,9 +50,8 @@ pub fn require_env(var: &str) -> Option<String> {
     }
 }
 
-/// The one line an operator gets in place of an assertion. It has to name the
-/// test, because the harness line right after it says `ok` and that is the only
-/// other thing on screen.
+/// Has to name the test: the harness line right after it says `ok`, and that
+/// is the only other thing on screen.
 fn skip_notice(test: &str, requirement: &str, detail: &str) -> String {
     format!(
         "SKIPPED {test}: {requirement} unavailable ({detail}); \
@@ -61,21 +59,15 @@ fn skip_notice(test: &str, requirement: &str, detail: &str) -> String {
     )
 }
 
-/// Writes straight to the stderr *file descriptor*, bypassing the thread-local
-/// sink libtest installs.
-///
-/// `eprintln!` goes through `std::io::_eprint`, which libtest redirects into a
-/// per-test capture buffer and then DISCARDS for any test that passes. A skip
-/// passes by construction, so a skip notice printed with `eprintln!` is never
-/// seen: the operator gets `test x ... ok` and nothing else, which is exactly
-/// the "skip masquerading as a pass" this module exists to prevent. Writing to
-/// fd 2 is not captured, so the notice survives the default `cargo test`.
+/// Writes straight to the stderr *file descriptor*: `eprintln!` goes through
+/// libtest's per-test capture buffer, which is DISCARDED for every passing
+/// test — and a skip passes by construction, so the notice would reach nobody.
+/// fd 2 is not captured.
 fn emit_uncaptured(msg: &str) {
     #[cfg(unix)]
     {
         use std::io::Write;
         use std::os::fd::FromRawFd;
-        // ManuallyDrop: this borrows fd 2, it must never close it.
         let mut fd2 = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(2) });
         if fd2.write_all(msg.as_bytes()).is_ok() {
             return;
@@ -96,13 +88,6 @@ fn record_skip(requirement: &str, detail: &str) {
         .append(true)
         .open(path)
     {
-        // One `write_all` of one buffer, not `writeln!`. `Write for File` turns a
-        // format string into one syscall per fragment, so two tests skipping at the
-        // same time interleave mid-record and both records are lost. libtest runs
-        // tests in parallel by default, so that is the normal case, not the rare
-        // one -- and the skiplog is the artifact that is supposed to be read
-        // *instead of* the pass tally. A record that corrupts under load is worse
-        // than no record, because the tally still says "ok".
         let line = format!("{test}\t{requirement}\t{detail}\n");
         let _ = f.write_all(line.as_bytes());
     }

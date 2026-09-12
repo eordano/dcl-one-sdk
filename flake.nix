@@ -12,12 +12,6 @@
         (system: f (import nixpkgs { inherit system; }));
       lib = nixpkgs.lib;
 
-      # crates/dcl-one-sdk/abgen-release.lock is the one source of truth for the
-      # abgen every build embeds. build.rs reads it and downloads; this reads the
-      # same file and fetches the same archive, so a nix-built binary and a
-      # `cargo build` one carry identical bytes. Parsing it here (rather than
-      # taking abgen as a flake input and building it from source) is also what
-      # keeps `nix build` from compiling the whole asset-bundle converter.
       abgenLock =
         let
           text = builtins.readFile ./crates/dcl-one-sdk/abgen-release.lock;
@@ -30,8 +24,6 @@
         in
         builtins.listToAttrs (map entry (builtins.filter isEntry (lib.splitString "\n" text)));
 
-      # nix system -> abgen release target. The embed is a standalone
-      # executable, so only os/arch matter.
       abgenTargets = {
         aarch64-darwin = "aarch64-apple-darwin";
         x86_64-darwin = "x86_64-apple-darwin";
@@ -43,14 +35,9 @@
       packages = forAllSystems (pkgs:
         let
           system = pkgs.stdenv.hostPlatform.system;
-          # rolldown's oxc generation needs a rustc newer than nixpkgs ships;
-          # rust-toolchain.toml pins the one CI builds with.
           toolchain = (pkgs.extend (import rust-overlay)).rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
-          # A release abgen is a relocatable bundle — launcher script, bin/, and
-          # a bundled lib/ loader, with the Unity templates and shader bundles
-          # compiled into the executable — so unpack the whole tree.
           abgen-dist =
             let
               target = abgenTargets.${system};
@@ -66,13 +53,9 @@
               test -x $out/abgen
             '';
 
-          # Args shared by the deps-only layer and the package build, kept
-          # byte-identical so crane's cargoArtifacts actually hits. pname/version
-          # are set explicitly because the root Cargo.toml is a virtual workspace
-          # manifest (no [package]), so crane cannot derive them from it.
           sdkCraneArgs = {
             pname = "dcl-one-sdk";
-            version = "0.24.0";
+            version = "0.24.1";
             src = ./.;
             strictDeps = true;
             cargoExtraArgs = "--locked -p dcl-one-sdk --bin dcl-one-sdk";
@@ -84,8 +67,6 @@
             ABGEN_EMBED_BIN = "${abgen-dist}/abgen";
           };
 
-          # third-party dep graph compiled once into its own derivation, reused
-          # by the package build.
           dcl-one-sdk-deps = craneLib.buildDepsOnly sdkCraneArgs;
 
           dcl-one-sdk = craneLib.buildPackage (sdkCraneArgs // {

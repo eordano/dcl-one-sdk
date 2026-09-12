@@ -207,9 +207,6 @@ mod tests {
         );
     }
 
-    // The market encoder hashes `Checks` WITHOUT the referenced `ExternalCheck`
-    // type appended, so it does not agree with the mainnet-anchored vector
-    // above; this vector pins its bytes as they are today.
     #[test]
     fn market_fixture_trade_digest() {
         let sent = hash_array_of_structs(&[struct_hash(

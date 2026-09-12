@@ -77,7 +77,7 @@ Verified via `30,20-pointer-events-feedback`:
 
 Calling `onPointerDown` / `removeOnPointerDown` (or the on/remove variants for Up / Hover) for an entity **from within that entity's own pointer callback** makes the same click fire the handler multiple times (observed: 3 fires from one click, as a state machine re-registered on each fire).
 
-**Why** (verified — `@dcl/ecs/dist/systems/events.js`): the `EventSystem` iterates a per-entity `Map` of handlers each frame. `onPointerDown` does `removeEvent(entity, EventType.Down)` then `getEvent(entity).set(EventType.Down, …)`, which re-inserts the `Down` key into that same `Map`. Re-inserting a key during the `Map`'s own `for…of` iteration causes it to be visited again in the same pass, and `inputSystem.getInputCommand(...)` still returns the same buffered down command → the callback re-fires.
+**Why** (verified — `@dcl/ecs/dist/systems/events.js`): the `EventSystem` iterates a per-entity `Map` of handlers each frame; re-registering re-inserts the same key into that `Map` mid-iteration, so it is visited again in the same pass while `inputSystem.getInputCommand(...)` still returns the same buffered down command → the callback re-fires.
 
 **Fix — to change hover text dynamically, mutate the existing `PointerEvents` component in place instead of re-registering:**
 
@@ -136,22 +136,7 @@ The `GltfContainer` itself can keep `visibleMeshesCollisionMask: 0`. For an Avat
 
 ### All Input Actions
 
-```typescript
-InputAction.IA_POINTER; // Left mouse button
-InputAction.IA_PRIMARY; // E key
-InputAction.IA_SECONDARY; // F key
-InputAction.IA_ACTION_3; // 1 key
-InputAction.IA_ACTION_4; // 2 key
-InputAction.IA_ACTION_5; // 3 key
-InputAction.IA_ACTION_6; // 4 key
-InputAction.IA_JUMP; // Space key
-InputAction.IA_FORWARD; // W key
-InputAction.IA_BACKWARD; // S key
-InputAction.IA_LEFT; // A key
-InputAction.IA_RIGHT; // D key
-InputAction.IA_WALK; // Control key
-InputAction.IA_MODIFIER; // Shift key
-```
+Full table of `InputAction.IA_*` constants and their key bindings (plus the `IA_ANY` wildcard): `{baseDir}/references/input-reference.md#all-input-actions`.
 
 ### All Event Types
 
@@ -180,13 +165,7 @@ Use the `priority` option (higher number wins) when multiple entities overlap. C
 
 ### Proximity Options
 
-- `button`: Which button to listen for (same as pointer events)
-- `maxDistance`: Max distance from the player's **camera** to the entity
-- `maxPlayerDistance`: Max distance from the player's **avatar** to the entity (most relevant for proximity)
-- `hoverText`: Text shown when player is near
-- `showHighlight`: Edge highlight when in range (default: `true`)
-- `showFeedback`: Hover feedback around entity center (default: `true`)
-- `priority`: Resolves conflicts — higher values take precedence, closest wins on ties
+`button`, `hoverText`, `showHighlight`, `showFeedback` and `priority` behave as for pointer events. The two ranges differ: `maxPlayerDistance` measures from the player's **avatar** (the relevant one for proximity), `maxDistance` from the player's **camera**. Table: `{baseDir}/references/input-reference.md#options`.
 
 For the system-based approach (combining pointer + proximity on the same entity), use `InteractionType.PROXIMITY` with the `PointerEvents` component and `inputSystem.isTriggered()`.
 
@@ -274,9 +253,7 @@ Read pointer lock with `PointerLock.get(engine.CameraEntity).isPointerLocked`. G
 
 ## Toggle Pattern
 
-Common pattern: track state in a module-level boolean, flip it in the click handler, and update the entity accordingly.
-
-For complex interactions (multi-step sequences, cooldowns, several entities reacting to shared state), move beyond a single boolean: track state in a module-level object or custom component and drive updates from a system.
+Track state in a module-level boolean, flip it in the click handler, and update the entity accordingly. For multi-step sequences, cooldowns, or several entities reacting to shared state, use a module-level object or a custom component and drive updates from a system instead.
 
 ## Example scenes
 

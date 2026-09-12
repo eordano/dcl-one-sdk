@@ -69,20 +69,7 @@ GltfContainer.create(model, {
 
 ## File Organization
 
-```
-project/
-├── assets/
-│   └── scene/
-│       └── Models/
-│           ├── building.glb
-│           ├── tree.glb
-│           └── furniture/
-│               ├── chair.glb
-│               └── table.glb
-├── src/
-│   └── index.ts
-└── scene.json
-```
+`.glb` files live under `assets/Models/` (legacy scenes: `assets/scene/Models/`), optionally in subfolders such as `furniture/`; code lives in `src/index.ts`, next to `scene.json` at the project root.
 
 ## Animator (for models with animations)
 
@@ -132,21 +119,7 @@ GltfContainer.create(model, {
 
 ## Common Operations
 
-### Scaling
-```typescript
-Transform.create(model, {
-  position: Vector3.create(8, 0, 8),
-  scale: Vector3.create(2, 2, 2),
-})
-```
-
-### Rotation
-```typescript
-Transform.create(model, {
-  position: Vector3.create(8, 0, 8),
-  rotation: Quaternion.fromEulerDegrees(0, 90, 0),
-})
-```
+Scaling and rotation are just the `scale` / `rotation` fields of `Transform.create` shown above.
 
 ### Parenting
 ```typescript

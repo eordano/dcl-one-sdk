@@ -157,7 +157,6 @@ impl WorldAction {
         }
     }
 
-    /// What signing this authorizes, in one line.
     pub fn summary(&self) -> String {
         match self {
             WorldAction::SettingsSet(update) => {
@@ -195,7 +194,6 @@ impl WorldAction {
         }
     }
 
-    /// Send the request with headers someone else has already signed.
     pub async fn send(
         &self,
         base: &str,
@@ -216,7 +214,6 @@ impl WorldAction {
             .map_err(|e| unreachable(&url, e))
     }
 
-    /// Echo whatever the server returned that is worth seeing.
     pub fn print_body(&self, body: &str) {
         if let WorldAction::SettingsSet(_) = self {
             if let Ok(v) = serde_json::from_str::<Value>(body) {
@@ -230,7 +227,6 @@ impl WorldAction {
     }
 }
 
-/// How the browser signing page is presented when no local key exists.
 pub struct BrowserOptions {
     pub port: Option<u16>,
     pub no_browser: bool,

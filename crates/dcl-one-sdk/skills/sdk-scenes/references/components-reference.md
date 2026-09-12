@@ -83,7 +83,7 @@ All components are imported from `@dcl/sdk/ecs`.
 
 ## UI Components (React-ECS)
 
-These are the underlying ECS UI components (from `@dcl/sdk/ecs`). You normally don't set them directly — build screen-space UI with the React-ECS **JSX widgets** `UiEntity`, `Label`, `Button`, `Input`, `Dropdown` (imported from `@dcl/sdk/react-ecs`), whose props map onto these components. See the `build-ui` skill. The `onSubmit` / `onChange` below are JSX handler props on those widgets, not data fields of the underlying component.
+The underlying ECS UI components (from `@dcl/sdk/ecs`), normally not set directly — build screen-space UI with the React-ECS **JSX widgets** `UiEntity`, `Label`, `Button`, `Input`, `Dropdown` (from `@dcl/sdk/react-ecs`), whose props map onto these components; see the `build-ui` skill. The `onSubmit` / `onChange` below are JSX handler props on those widgets, not data fields of the underlying component.
 
 | Component | Key Fields | Description |
 |-----------|-----------|-------------|

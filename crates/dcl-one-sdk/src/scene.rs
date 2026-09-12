@@ -294,9 +294,8 @@ pub fn b64_hash_in_root(root_tag: &str, rel: &str) -> String {
     )
 }
 
-/// [`b64_content_hash`] for a caller that already knows the root — see
-/// [`b64_hash_in_root`]. `abs` is only read for the digest; the identity half
-/// comes from `root_tag` and `rel`.
+/// `abs` is only read for the digest; the identity half comes from `root_tag`
+/// and `rel`.
 pub fn b64_content_hash_in_root(root_tag: &str, rel: &str, abs: &Path) -> String {
     with_content_tag(b64_hash_in_root(root_tag, rel), abs)
 }
@@ -453,7 +452,6 @@ pub fn b64_unhash(hash: &str) -> Option<(String, String)> {
     Some((tag.to_string(), rel.to_string()))
 }
 
-/// A scratch directory for tests, removed on drop.
 #[cfg(test)]
 pub(crate) struct Tmp(pub PathBuf);
 

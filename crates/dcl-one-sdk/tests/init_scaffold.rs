@@ -217,10 +217,6 @@ fn init_scene_is_immediately_buildable_with_provisioned_node_modules() {
     let dir = f.dir_arg();
     let out = run(&["init", "--dir", &dir]);
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    // `init` provisions its own node_modules from the vendored blob, so the
-    // symlink below lands on an existing directory and fails with EEXIST unless
-    // that one is cleared first. The point of this test is to build against the
-    // EXTERNAL tree in DCL_ONE_SDK_TEST_SCENE, so the provisioned one goes.
     std::fs::remove_dir_all(f.path().join("node_modules")).unwrap();
     std::os::unix::fs::symlink(src.join("node_modules"), f.path().join("node_modules")).unwrap();
     let out = run(&["build", "--dir", &dir]);
@@ -230,18 +226,6 @@ fn init_scene_is_immediately_buildable_with_provisioned_node_modules() {
         "build failed\nstdout: {stdout}\nstderr: {}",
         stderr_of(&out)
     );
-    // The prebuilt-chunk split replaced the single "Bundle saved" bundle with
-    // three artifacts, and this test kept asserting on the old wording and the
-    // old size. It only runs when DCL_ONE_SDK_TEST_SCENE is set, which is why it
-    // went unnoticed: bin/index.js is now a ~6 KB loader stub, so the >10_000
-    // check below used to be what actually caught the drift.
-    // Either wording passes. The SDK chunk is COPIED from the embedded prebuilt
-    // when the binary ships one ("SDK chunk installed … (prebuilt)") and BUNDLED
-    // from source otherwise ("SDK chunk saved …") — build.rs emits both. A
-    // `cargo test` binary embeds no prebuilt chunks, so it always takes the
-    // source path, and asserting only on "installed" made this test pass on a
-    // release build and fail everywhere else. What is worth checking is that a
-    // chunk was produced; the size assertions below pin the artifact itself.
     assert!(
         stdout.contains("SDK chunk installed") || stdout.contains("SDK chunk saved"),
         "{stdout}"
@@ -249,9 +233,9 @@ fn init_scene_is_immediately_buildable_with_provisioned_node_modules() {
     assert!(stdout.contains("Scene chunk saved"), "{stdout}");
     assert!(stdout.contains("Type check passed"), "{stdout}");
     for (rel, min) in [
-        ("bin/sdk-runtime.js", 100_000usize), // the prebuilt SDK runtime
-        ("bin/index.js", 1_000),              // loader stub
-        ("bin/scene.js", 100),                // the scene's own code
+        ("bin/sdk-runtime.js", 100_000usize),
+        ("bin/index.js", 1_000),
+        ("bin/scene.js", 100),
     ] {
         let bytes = std::fs::read(f.path().join(rel)).unwrap();
         assert!(

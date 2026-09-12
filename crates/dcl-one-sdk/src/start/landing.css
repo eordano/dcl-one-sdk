@@ -40,8 +40,6 @@
 }
 *, *::before, *::after { box-sizing: border-box; }
 * { margin: 0; padding: 0; scrollbar-width: thin; scrollbar-color: var(--fill-5) transparent; }
-/* The script toggles `hidden` on elements whose classes set a display, and an
-   author display beats the UA's [hidden] rule without this. */
 [hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
@@ -73,9 +71,6 @@ img, svg { display: block; max-width: 100%; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb { background: var(--fill-5); border-radius: var(--r-pill); }
 
-/* Shared shapes: each recurring pattern once, components add only what differs.
-   Same-specificity state rules (disabled, --off, hover) sit after their base
-   rule, so groups that must lose those ties live here, ahead of everything. */
 .dash, .panel, .sec, .sec__head, .scene__body, .datum, .jn, .jn2__title, .jn2__col, .knob,
 .flags, .flag, .lay__map, .lay__left, .lay__rail, .lay__pane, .lay__kvs, .lay__srows,
 .lay__srow-t, .lay__ed, .lay__perms, .lay__perm-t, .kvs, .drawer__body, .reqs,
@@ -214,7 +209,6 @@ body.editing .scene__desc:empty::before { content: attr(data-hint); color: var(-
 .datum__v { display: flex; align-items: baseline; }
 .datum__num { font-size: var(--fs-24); line-height: var(--lh-flat); letter-spacing: -.02em; color: var(--text); }
 
-
 .jn { color: var(--text); overflow: hidden; }
 .jn2__head {
   display: flex; align-items: flex-start; justify-content: space-between;
@@ -231,8 +225,6 @@ body.editing .scene__desc:empty::before { content: attr(data-hint); color: var(-
 .jn2__col { padding: var(--s-5) var(--s-6) var(--s-6); }
 .jn2__col + .jn2__col { border-left: 1px solid var(--line); }
 .jn2__foot { padding: var(--s-5) var(--s-6); border-top: 1px solid var(--line); background: var(--fill-1); }
-/* The CTA's flex-start is for column layouts (it stops the stretch); in the
-   footer row the QR makes the line tall and the button must ride its middle. */
 .jn2__foot .jn__cta { align-self: center; }
 .jn2__link { flex: 1 1 240px; background: var(--fill-2); }
 .jn2__link .jn__url { flex: 1 1 auto; padding: 0; border: 0; background: transparent; overflow-wrap: anywhere; }
@@ -404,7 +396,6 @@ body.editing .lay__hint { display: block; }
 #sign-panel .jn__cta { margin-top: var(--s-3); }
 .sign-status { white-space: pre-wrap; }
 .dep__cid { display: block; font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink-6); overflow-wrap: anywhere; margin-bottom: var(--s-3); }
-/* The upload, drawn large: the number is the thing being waited on. */
 .sign-progress { margin-top: var(--s-4); display: grid; gap: var(--s-2); max-width: var(--measure); }
 .sign-progress__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-3); }
 .sign-progress__big { font-size: var(--fs-24); font-weight: var(--fw-bold); line-height: var(--lh-tight); color: var(--text); font-variant-numeric: tabular-nums; text-wrap: balance; }
@@ -439,7 +430,6 @@ body.editing .tag--add { display: inline-flex; }
 .toast--err { border-color: var(--err-line); color: var(--error); }
 .u-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); }
 
-/* Shared text traits, after the components so membership wins the cascade. */
 code, pre, .chk__k, .jn__url, .lay__ruler span, .lay__nums span, .reqs, .kv .k--file,
 .lay__ed input[type="number"] { font-family: var(--font-mono); }
 .pos, .datum__num, .lay__size, .lay__ruler span, .lay__nums span, .lay__kv code,
@@ -474,8 +464,6 @@ body.editing .cover-edit:hover .cover { border-color: var(--ink-45); }
 .reqs .st--ok, .sign-status--ok { color: var(--success); }
 .panel--warn > h2, .sign-warn, .reqs .st--warn { color: var(--warning); }
 .reqs .st--err, .sign-status--err { color: var(--error); }
-/* After the trait groups on purpose: same specificity, so order is the win.
-   The button tabs share the label tabs' chrome but read at body size/weight. */
 .kv .k--file { font-weight: var(--fw-regular); color: var(--ink-7); }
 .lay__tab { font: inherit; }
 
@@ -520,8 +508,6 @@ body.editing .cover-edit:hover .cover { border-color: var(--ink-45); }
   .scene, .jn, .panel { break-inside: avoid; }
 }
 
-
-/* Colour a build's own output kept (tsc, esbuild): the failure panel's spans. */
 .ansi-b { font-weight: var(--fw-semibold); }
 .ansi-d { opacity: .72; }
 .ansi-30, .ansi-90 { color: var(--ink-6); }

@@ -9,15 +9,11 @@ mod common;
 
 const BIN: &str = env!("CARGO_BIN_EXE_dcl-one-sdk");
 
-/// Every child this file spawns is bounded by this.
-///
-/// Not a nicety: the product's own waits are user-scale, not test-scale.
-/// `deploy` without a key hands off to the browser linker and waits
-/// `DCL_ONE_SDK_LINKER_TIMEOUT_SECS`, which defaults to **600 seconds** — so one
-/// test that reaches that path by mistake turns this file into a twelve-minute
-/// CI outage that still ends green. `Command::output()` has no timeout at all,
-/// so nothing used to stop that. Now it fails in a minute, naming the argv that
-/// hung, which is a bug report instead of an outage.
+/// Bounds every child this file spawns; `Command::output()` has no timeout of
+/// its own. The product's waits are user-scale: `deploy` without a key hands
+/// off to the browser linker and waits `DCL_ONE_SDK_LINKER_TIMEOUT_SECS`,
+/// default **600 seconds**, so one test that reaches that path by mistake turns
+/// this file into a twelve-minute CI outage that still ends green.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(60);
 
 const SCENE_OK: &str =
@@ -148,14 +144,11 @@ fn wait_bounded(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     }
 }
 
-/// SIGTERM first, SIGKILL only as a backstop.
-///
-/// `start` tears its abgen sidecar down on SIGTERM
-/// (`asset_bundles::kill_sidecar_group`). A SIGKILLed preview server runs no
-/// such handler, and because the sidecar is spawned into its own process group
-/// it does not die with the parent either — so it is orphaned onto the
-/// developer's machine, holding a port and three quarters of the CPUs' worth of
-/// worker threads, once for every run of this file.
+/// SIGTERM first, SIGKILL only as a backstop: `start` tears its abgen sidecar
+/// down on SIGTERM (`asset_bundles::kill_sidecar_group`), and a SIGKILLed
+/// preview server runs no such handler. The sidecar sits in its own process
+/// group, so it would be orphaned onto the developer's machine holding a port
+/// and a pile of worker threads, once per run of this file.
 fn terminate(child: &mut Child) -> ExitStatus {
     #[cfg(unix)]
     unsafe {
@@ -201,10 +194,8 @@ fn stderr_of(out: &Output) -> String {
 }
 
 /// The bound on [`run`], exercised on the one CLI path that really does wait on
-/// a human: `deploy` with no key hands off to the browser linker and sits there
-/// for `DCL_ONE_SDK_LINKER_TIMEOUT_SECS`, default 600. A test that lands on that
-/// path by accident used to take the ten minutes and then pass, which is how a
-/// six-second file turns into a twelve-minute CI outage nobody can attribute.
+/// a human: `deploy` with no key falls through to the browser linker and its
+/// `DCL_ONE_SDK_LINKER_TIMEOUT_SECS`, default 600.
 #[test]
 fn a_cli_run_that_waits_on_a_human_fails_the_test_instead_of_waiting_with_it() {
     let f = Fixture::new("bound");
@@ -220,8 +211,6 @@ fn a_cli_run_that_waits_on_a_human_fails_the_test_instead_of_waiting_with_it() {
         "http://127.0.0.1:9",
         "--no-browser",
     ];
-    // Long enough that a `run` with no bound would sit here, short enough that
-    // this test still finishes if the bound is ever removed again.
     let envs = [("DCL_ONE_SDK_LINKER_TIMEOUT_SECS", "25")];
 
     let began = Instant::now();
@@ -674,11 +663,6 @@ fn sidecars_under(root: &Path) -> Vec<i32> {
 fn g24_tunnel_unreachable_warns_and_keeps_serving() {
     let f = Fixture::new("g24");
     f.write("scene.json", SCENE_OK);
-    // Its own TMPDIR. Two reasons: the preview server inflates its embedded
-    // abgen there, so the copy is guaranteed cold and this test exercises the
-    // slow start rather than depending on a warm machine; and the sidecar is
-    // then identifiable by path, which is what lets the orphan assertion below
-    // tell this run's sidecar from every other one on the box.
     let tmpdir = f.path().join("tmp");
     std::fs::create_dir_all(&tmpdir).unwrap();
     let dir = f.dir_arg();
@@ -701,14 +685,6 @@ fn g24_tunnel_unreachable_warns_and_keeps_serving() {
     let mut out = Tail::spawn(child.stdout.take().unwrap());
     let mut err = Tail::spawn(child.stderr.take().unwrap());
 
-    // Poll for the warning; do not sleep a fixed interval and hope.
-    //
-    // The tunnel warning is printed after the join block, which is printed
-    // after the abgen sidecar reports ready, which on a cold machine is behind
-    // a 36 MB inflate out of the binary — 6.9s when this was written. The
-    // fixed 6s sleep this replaces therefore failed outright on any machine
-    // that had not already unpacked this exact build's sidecar, and passed only
-    // because CI happened to be warm.
     let deadline = Instant::now() + CHILD_TIMEOUT;
     while !err.text().contains("warning: tunnel connection failed") {
         assert!(
@@ -749,10 +725,6 @@ fn g24_tunnel_unreachable_warns_and_keeps_serving() {
     let err = String::from_utf8_lossy(&err.finish()).into_owned();
     let _ = out.finish();
 
-    // The sidecar must die with the server it belongs to. It is spawned into
-    // its own process group, so nothing in the OS does this for us: `start`
-    // has to do it on the way out, and if it stops, every preview a developer
-    // or a CI job ever ran stays resident.
     #[cfg(unix)]
     {
         let gone = Instant::now() + Duration::from_secs(20);
@@ -942,8 +914,8 @@ fn g30_rolldown_backend_needs_the_feature() {
 }
 
 /// A world scene with no target resolves to the public worlds server instead
-/// of refusing. The additive default keeps the run hermetic (no overwrite
-/// probe of the real server) and the 1s linker timeout is what ends it.
+/// of refusing. The additive default keeps the run hermetic (no overwrite probe
+/// of the real server) and the 1s linker timeout is what ends it.
 #[test]
 fn g31_world_deploy_defaults_to_the_public_worlds_server() {
     let f = Fixture::new("g31");
@@ -978,7 +950,7 @@ fn g32_dir_does_not_exist() {
 
 /// The scene checkout t2/t6 borrow a real `node_modules` from. Goes through the
 /// testgate rather than `expect`, so `--include-ignored` without the variable
-/// fails naming the variable and pointing at the opt-out, instead of unwrapping.
+/// fails naming it and the opt-out instead of unwrapping.
 fn provisioned_scene() -> Option<PathBuf> {
     common::testgate::require_env("DCL_ONE_SDK_TEST_SCENE").map(PathBuf::from)
 }

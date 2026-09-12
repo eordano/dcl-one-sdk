@@ -147,11 +147,6 @@ const DEVELOPER_DCL_IGNORE: [&str; 22] = [
     "Dockerfile",
     "dist",
     "README.md",
-    // Non-asset developer files. `*.html` earns its place twice: a DCL scene
-    // is ECS/JS rendered in the 3D client, never HTML, AND a Cloudflare-
-    // fronted content server's WAF reads raw HTML in the upload body as an
-    // injection attack and 403-challenges the whole deploy. `*.sh`/`*.cjs`/
-    // `*.md`/`*.mdc` are scripts and docs that ride along the same way.
     "*.html",
     "*.sh",
     "*.cjs",
@@ -164,15 +159,7 @@ const DEVELOPER_DCL_IGNORE: [&str; 22] = [
 /// content: source art, archives, and the project's own Creator Hub asset
 /// previews. A bundle naming one of these has lost an asset, and preview and
 /// deploy warn about it.
-const SOURCE_ASSET_DCL_IGNORE: [&str; 5] = [
-    // Root-anchored: the project's own thumbnails/ holds Creator Hub asset
-    // previews; a thumbnails/ nested anywhere else is scene content.
-    "/thumbnails",
-    "*.blend",
-    "*.fbx",
-    "*.zip",
-    "*.rar",
-];
+const SOURCE_ASSET_DCL_IGNORE: [&str; 5] = ["/thumbnails", "*.blend", "*.fbx", "*.zip", "*.rar"];
 
 const EXTRA_DCL_IGNORE: [&str; 6] = [
     ".*",
@@ -517,7 +504,6 @@ pub struct DeployPreview {
     pub nameless_world: bool,
 }
 
-/// The one file a scene cannot be published without.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MainBundle {
     Present(String),
@@ -1296,25 +1282,25 @@ mod tests {
             entity_id,
             "bafkreigndax3hlj5fa4alog7573u5jvoo2lqxwdlsvfths2pdcvrg2veae"
         );
-        let listing: Vec<(String, String)> = prepared
+        let listing: Vec<(&str, &str)> = prepared
             .files
             .iter()
-            .map(|(f, h, _)| (f.clone(), h.clone()))
+            .map(|(f, h, _)| (f.as_str(), h.as_str()))
             .collect();
         assert_eq!(
             listing,
-            vec![
+            [
                 (
-                    "scene.json".to_string(),
-                    "bafkreifhurehzptgrhsjgb3ey6ugoohxf7xcok4jiy2sxlsgkasubry2ya".to_string()
+                    "scene.json",
+                    "bafkreifhurehzptgrhsjgb3ey6ugoohxf7xcok4jiy2sxlsgkasubry2ya"
                 ),
                 (
-                    "bin/index.js".to_string(),
-                    "bafkreiabpuwsr4w2yzatq6gygbtpx7coohgpsg7tve3msd55odi6b2r5om".to_string()
+                    "bin/index.js",
+                    "bafkreiabpuwsr4w2yzatq6gygbtpx7coohgpsg7tve3msd55odi6b2r5om"
                 ),
                 (
-                    "assets/Model.glb".to_string(),
-                    "bafkreiczplgxt7awmu3kwydlegs266nsooijxjc7svtgy6rkrgia65fft4".to_string()
+                    "assets/Model.glb",
+                    "bafkreiczplgxt7awmu3kwydlegs266nsooijxjc7svtgy6rkrgia65fft4"
                 ),
             ]
         );
@@ -1539,8 +1525,6 @@ mod tests {
                 .any(|(r, _, _)| r.contains(".dcl-one")),
             "artifact paths never leak into the payload listing"
         );
-        // The preview sizes the same files the deploy signs: the release
-        // copy's bytes, and the release-only chunk in the list.
         let preview = preview(&project).unwrap();
         let len = |rel: &str| {
             preview

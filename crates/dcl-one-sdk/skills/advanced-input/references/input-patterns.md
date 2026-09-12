@@ -1,12 +1,10 @@
 # Advanced Input — Branch-Specific Patterns
 
-Long worked patterns extracted from the `advanced-input` SKILL.md. Read this file when a task needs one of these specific flows. Basic capability usage (isTriggered/isPressed teaching, InputModifier basics + desktop-client warning, PointerLock detection, PrimaryPointerInfo basics, the InputAction/event-type tables, rules, and troubleshooting) stays in SKILL.md.
+Worked flows for the `advanced-input` skill. Basics (isTriggered/isPressed, InputModifier, PointerLock, PrimaryPointerInfo, the InputAction/event-type tables, troubleshooting) stay in SKILL.md.
 
 ## Per-Entity Input Command Cookbook (Tag-based)
 
-(For the single-entity `getInputCommand` and `IA_ANY` global basics, see SKILL.md.)
-
-Best practice: use the Tag component to mark all entities that share a same interaction, then iterate over them in a system.
+Use the Tag component to mark all entities that share a same interaction, then iterate over them in a system. (Single-entity `getInputCommand` and `IA_ANY` basics: SKILL.md.)
 
 ```typescript
 import { engine, inputSystem, InputAction, PointerEventType, Tags } from '@dcl/sdk/ecs'
@@ -37,8 +35,6 @@ engine.addSystem(myInputSystem)
 
 ## Cutscene Pattern (freeze player during a cinematic)
 
-Freeze the player during a cinematic sequence:
-
 ```typescript
 function startCutscene() {
   // Freeze player
@@ -54,8 +50,6 @@ function startCutscene() {
 ```
 
 ## WASD Movement Pattern (drive a custom entity)
-
-Poll movement keys to control custom entities:
 
 ```typescript
 import { engine, inputSystem, InputAction, PointerEventType, Transform } from '@dcl/sdk/ecs'

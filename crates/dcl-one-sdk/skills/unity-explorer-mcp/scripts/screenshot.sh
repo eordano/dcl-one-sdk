@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# Capture Explorer screenshots to disk via the embedded MCP server, without spending agent context.
-# Frames are saved as files; only the caption (resolution + parcel) is printed. Read a frame file
-# only when you actually need to inspect it.
-#
-# Usage: screenshot.sh [options]
-#   -o, --out FILE        output file (single capture; extension follows quality; relative to cwd)
-#   -d, --dir DIR         output dir (default: $TMPDIR/mcp-shots, outside the scene folder; used for bursts and when -o is omitted)
-#   -n, --count N         number of frames to capture (default: 1)
-#   -i, --interval SEC    seconds between frames in a burst (default: 0.5; keep >= 0.2, captures are serialized)
-#   -w, --max-width PX    maxWidth passed to the tool (default: 1280; use 640 for cheap sanity checks)
-#       --png             capture PNG instead of JPG
-#       --world-only      exclude UI overlays (worldOnly: true)
-#   -p, --port PORT       MCP server port (default: 8123)
-#
-# Requires: curl, python3. The Explorer must be running with --mcp.
 
 set -euo pipefail
 
@@ -49,8 +34,6 @@ capture_one() {
     payload=$(printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"screenshot","arguments":{"maxWidth":%s,"quality":"%s","worldOnly":%s}}}' \
         "$MAX_WIDTH" "$QUALITY" "$WORLD_ONLY")
 
-    # NOTE: response must land in a file, not a pipe into `python3 - <<heredoc`:
-    # the heredoc IS python's stdin (the program), so piped data would be lost.
     local response_file
     response_file=$(mktemp)
 

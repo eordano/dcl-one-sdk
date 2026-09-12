@@ -33,7 +33,6 @@ pub struct LinkerOptions {
     pub host: Option<HostSigner>,
 }
 
-/// How a hosting caller receives the signing state, and the URL people see.
 #[derive(Clone)]
 pub struct HostSigner {
     pub register: Arc<dyn Fn(Arc<LinkerState>) + Send + Sync>,
@@ -86,7 +85,6 @@ pub struct LinkerState {
     dep: LinkerDeploy,
     pending: Mutex<HashMap<String, PendingEntity>>,
     minted: Mutex<Option<Minted>>,
-    /// How far the signed upload has got, for the panel's bar.
     progress: deploy::UploadProgress,
     done: Mutex<Option<DoneSender>>,
     /// The address that signed, kept past the upload: the preview pages
@@ -151,8 +149,6 @@ fn mint(st: &Arc<LinkerState>) -> Result<(String, Option<String>)> {
     }
     let ts = match d.timestamp_override {
         Some(t) => t,
-        // Never the entity a still-signable id names: a rebuild landing in
-        // the same millisecond would otherwise re-mint the id it replaces.
         None => {
             let floor = st
                 .pending
@@ -218,10 +214,6 @@ pub(crate) fn sign_section(st: &Arc<LinkerState>, api: &str) -> String {
             )
         }
     };
-    // The deep link is what actually reaches the realm this deploy lands in.
-    // decentraland.org forwards `realm` only for realms it whitelists, so for
-    // anything self-hosted its play URL silently drops the realm and boots
-    // Genesis instead.
     let realm_url = match &d.world {
         Some(w) => catalyrst_auth_chain::world_realm_url(&d.target_content, w),
         None => d
@@ -316,7 +308,6 @@ fn retry(error: &str) -> Json<Value> {
     Json(json!({ "ok": false, "fatal": false, "error": error }))
 }
 
-/// Resolve the CLI with the error and tell the page it is over.
 fn fatal(st: &Arc<LinkerState>, e: anyhow::Error) -> Json<Value> {
     let msg = crate::ux::render(&e, false, false);
     finish(&st.done, Err(e));
@@ -331,11 +322,6 @@ pub(crate) async fn sign(
         let mut pending = st.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(entry) = pending.get(&req.entity_id) else {
             drop(pending);
-            // The page holds an id this process never minted (the preview
-            // restarted, or the run was rebuilt under it). Forget the
-            // current mint too, so the page's next render carries an id
-            // that is certainly fresh, and tell the page to rebuild rather
-            // than the person to reload.
             *st.minted.lock().unwrap_or_else(PoisonError::into_inner) = None;
             return Json(json!({
                 "ok": false,
@@ -603,9 +589,6 @@ mod tests {
             "{section}"
         );
 
-        // The page re-renders the panel every poll: the same id comes back
-        // and the pending map does not grow, so the id a browser holds
-        // stays signable for as long as the wallet takes.
         for _ in 0..40 {
             assert_eq!(minted_entity_id(&sign_section(&state, "/deploy/sign")), id);
         }
@@ -626,8 +609,6 @@ mod tests {
                 .contains("no longer on the server"),
             "{stale}"
         );
-        // A stale answer drops the current mint: the page's rebuild draws a
-        // fresh id, and both stay signable.
         let fresh = minted_entity_id(&sign_section(&state, "/deploy/sign"));
         assert_ne!(fresh, id);
         assert_eq!(state.pending.lock().unwrap().len(), 2);

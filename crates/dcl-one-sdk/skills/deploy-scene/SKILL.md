@@ -7,7 +7,7 @@ description: Deploy a Decentraland scene to Genesis City (LAND-based). Use when 
 
 Deploy to specific parcels you own or have permission to deploy to.
 
-**Use the `/deploy` command** to deploy. It runs `npx @dcl/sdk-commands deploy` and handles the full process:
+**Use the `/deploy` command.** It runs `npx @dcl/sdk-commands deploy` and handles the full process:
 1. Build the scene
 2. Upload assets to IPFS
 3. Deploy to the specified parcels
@@ -83,7 +83,7 @@ npx @dcl/sdk-commands deploy
 
 ### Spawn Points
 
-Configure where players appear when entering the scene:
+Where players appear when entering the scene:
 
 ```json
 {
@@ -189,8 +189,6 @@ You can also catch conversion issues **before** publishing by enabling local ass
 | **Visibility** | Shown on the Genesis City map | Listed on Places page (opt-out available) |
 | **Deploy target** | Default Catalyst network | `--target-content https://worlds-content-server.decentraland.org` |
 | **Best for** | Permanent installations, high-traffic scenes | Testing, personal spaces, events |
-
-> **Deploying to a World instead?** See the **deploy-worlds** skill.
 
 ## Scene Tipping
 

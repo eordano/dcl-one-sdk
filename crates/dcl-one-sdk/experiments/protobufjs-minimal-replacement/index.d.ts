@@ -1,4 +1,3 @@
-// Type surface compatible with `protobufjs/minimal` as consumed by ts-proto output.
 
 export interface Long { low: number; high: number; unsigned: boolean }
 

@@ -1,7 +1,4 @@
 "use strict";
-// Phase 3: hostile-input fuzzing. Random / truncated / corrupted byte strings are fed to
-// both Readers (raw op scripts) and to every corpus message decoder. The implementations
-// must agree on the value returned AND on which inputs throw (with the same message).
 
 const H = require("./harness");
 const REF = H.loadImpl("ref");
@@ -47,7 +44,6 @@ let rawChecks = 0, rawFails = 0;
 const failures = [];
 function fail(s) { rawFails++; if (failures.length < 25) failures.push(s); }
 
-// A pool of "real" encodings we can truncate/corrupt.
 const seeds = [];
 {
     const w = () => MY.Writer.create();
@@ -69,16 +65,16 @@ const seeds = [];
 for (let i = 0; i < N_RAW; i++) {
     let bytes;
     const mode = rng.int(5);
-    if (mode === 0) bytes = rng.bytes(rng.int(24));                       // pure random
-    else if (mode === 1) bytes = Buffer.alloc(rng.int(12), rng.int(256)); // repeated byte
-    else if (mode === 2) {                                               // truncated real encoding
+    if (mode === 0) bytes = rng.bytes(rng.int(24));
+    else if (mode === 1) bytes = Buffer.alloc(rng.int(12), rng.int(256));
+    else if (mode === 2) {
         const s = rng.pick(seeds);
         bytes = s.subarray(0, rng.int(s.length + 1));
-    } else if (mode === 3) {                                             // corrupted real encoding
+    } else if (mode === 3) {
         const s = Buffer.from(rng.pick(seeds));
         for (let k = rng.int(3) + 1; k > 0; k--) if (s.length) s[rng.int(s.length)] = rng.int(256);
         bytes = s;
-    } else {                                                             // long varint runs
+    } else {
         const n = rng.int(14);
         bytes = Buffer.from(Array.from({ length: n }, () => (rng.bool(0.8) ? 0x80 : 0) | rng.int(128)));
     }
@@ -102,8 +98,6 @@ for (let i = 0; i < N_RAW; i++) {
     }
 }
 
-/* --------------------------------------------------- message-level hostile decode */
-
 const ref = H.loadCorpus("protobufjs/minimal");
 const mine = H.loadCorpus(H.MINE_ID);
 const refMsgs = H.collectMessages(ref.mods);
@@ -126,11 +120,11 @@ for (const rm of refMsgs) {
         if (mode === 0) bytes = rng.bytes(rng.int(40));
         else if (mode === 1) {
             const good = Buffer.from(H.genMessageBytes(rng, 2, tags));
-            bytes = good.subarray(0, rng.int(good.length + 1)); // truncated
+            bytes = good.subarray(0, rng.int(good.length + 1));
         } else {
             const good = Buffer.from(H.genMessageBytes(rng, 2, tags));
             if (good.length) for (let k = rng.int(3) + 1; k > 0; k--) good[rng.int(good.length)] = rng.int(256);
-            bytes = good; // corrupted
+            bytes = good;
         }
         for (const container of ["buffer", "u8array"]) {
             msgChecks++;

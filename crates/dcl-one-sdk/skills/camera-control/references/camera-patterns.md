@@ -1,6 +1,6 @@
 # Camera Control — Worked Patterns
 
-Branch-specific, full worked patterns for camera-control. Read when a task needs a complete implementation. Basic camera reading, CameraMode detection + onChange, CameraModeArea basics, VirtualCamera basics (transitions, lookAt), MainCamera activation, collider rules, and all guardrails remain in `camera-control/SKILL.md`.
+Full worked implementations. Basic camera reading, CameraMode detection + onChange, CameraModeArea basics, VirtualCamera basics (transitions, lookAt), MainCamera activation, collider rules and all guardrails stay in `camera-control/SKILL.md`.
 
 ## Tracking Camera Position (camera zone system)
 
@@ -212,13 +212,7 @@ Height formula for N parcels per side: `~log2(N+1) × 20` metres. A 4×4 parcel 
 
 ### Camera architecture
 
-A **two-entity rig** so yaw and pitch can be controlled independently:
-
-```
-rigRoot (root entity)       ← world position + yaw rotation
-└── rigCamera (child)       ← pitch rotation + local offset (orbit distance from root)
-    └── VirtualCamera
-```
+A **two-entity rig** so yaw and pitch can be controlled independently: `rigRoot` holds world position + yaw rotation, and its child `rigCamera` holds pitch rotation + the local offset (orbit distance from the root) and carries the `VirtualCamera`.
 
 - `rigRoot.position` is lerped toward the pivot point (free cam) or current follow target.
 - `rigRoot.rotation` holds yaw (left/right). Pitch is applied on `rigCamera`.

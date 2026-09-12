@@ -44,7 +44,7 @@ fn leaf_node(chunk: &[u8]) -> TreeNode {
     }
 }
 
-/// [`hash_bytes_v1`] over content that arrives in pieces, for callers that cannot hold it all.
+/// [`hash_bytes_v1`] over content that arrives in pieces.
 ///
 /// The CID depends only on the byte string, never on how it was fed: leaf boundaries are fixed at
 /// `CHUNK_SIZE` and this buffers across `update` calls to honour them. So a verifier streaming a
@@ -66,8 +66,6 @@ impl HashV1Writer {
         self.total += data.len() as u64;
 
         while !data.is_empty() {
-            // Flushed only once more data is known to follow, so a file that is exactly one chunk
-            // long still finishes as the single raw block `hash_bytes_v1` would produce.
             if self.pending.len() == CHUNK_SIZE {
                 self.leaves.push(leaf_node(&self.pending));
                 self.pending.clear();

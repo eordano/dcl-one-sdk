@@ -5,15 +5,13 @@ description: Peer-to-peer multiplayer in Decentraland using CRDT networking with
 
 # Multiplayer Synchronization in Decentraland
 
-Decentraland runs scenes locally in a player's instance of the explorer. By default, players are able to see each other and interact directly, but each player interacts with the environment independently. Changes in the environment aren't shared between players by default.
+Decentraland runs scenes locally in each player's explorer: players see each other, but each interacts with the environment independently — changes in the environment aren't shared between players by default.
 
 To sync any changes in the scene state, SDK7 uses CRDT-based synchronization.
 
 > **Runtime constraint:** Decentraland runs in a QuickJS sandbox. No Node.js APIs (`fs`, `http`, `path`, `process`). Use `fetch()` and `WebSocket` for network communication. See the **scene-runtime** skill for async patterns.
 
 ## Sync Strategy Decision Tree
-
-Choose the right networking approach based on what you need:
 
 | Strategy           | Use When                                                             | Persistence                                                                                                                                          | Example                                         |
 | ------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
@@ -23,13 +21,7 @@ Choose the right networking approach based on what you need:
 | `signedFetch`      | Authenticated requests that prove player identity                    | Server-dependent                                                                                                                                     | Claiming rewards, submitting verified scores    |
 | `WebSocket`        | Real-time bidirectional communication with a server                  | Connection-dependent                                                                                                                                 | Live game servers, real-time chat.              |
 
-**Decision flow:**
-
-1. Does every player need to see the same state, including late joiners? --> `syncEntity`
-2. Is it a fire-and-forget event only for players currently in the scene? --> `MessageBus`
-3. Do you need the information to be persisted even after all players leave, or to run secure validations on that information? --> `fetch` or `signedFetch`
-4. Do you need continuous real-time server communication? --> `WebSocket`
-5. Combine approaches freely: use `syncEntity` for world state, `MessageBus` for effects, and `fetch` for persistence.
+Combine approaches freely: `syncEntity` for world state, `MessageBus` for effects, `fetch` for persistence.
 
 ---
 
@@ -135,8 +127,6 @@ engine.addSystem(() => {
 ```
 
 ## Schema Types
-
-Available schema types for custom components:
 
 | Type                          | Usage                       |
 | ----------------------------- | --------------------------- |
@@ -245,13 +235,7 @@ bus.emit('hit', { damage: 10 })
 
 The regular `MessageBus` JSON-encodes every payload before sending. For high-frequency messages or large payloads, there's a lower-level binary alternative that sends raw `Uint8Array` data directly — faster to process because it skips JSON serialization on both ends. This is the same transport `syncEntity` uses internally.
 
-Use it when:
-
-- You are emitting many messages per second (e.g., continuous movement streams, particle triggers in tight loops)
-- Payload size matters (binary encoding is more compact than JSON)
-- You already have binary data (e.g., pre-encoded buffers, CRDT deltas)
-
-Stick with the regular `MessageBus` for low-frequency events where ergonomics beat performance.
+Use it when you emit many messages per second (continuous movement streams, particle triggers in tight loops), when payload size matters, or when you already have binary data (pre-encoded buffers, CRDT deltas). Stick with the regular `MessageBus` for low-frequency events where ergonomics beat performance.
 
 ```typescript
 import { sendBinary } from '~system/CommunicationsController'
@@ -341,7 +325,7 @@ The SDK also exposes lower-level observables (`onPlayerClickedObservable`, `onEn
 
 ## Multiplayer Testing
 
-Open multiple browser windows to test multiplayer locally. Each window is a separate player.
+Open multiple browser windows — each window is a separate player.
 
 ### Offline Mode
 

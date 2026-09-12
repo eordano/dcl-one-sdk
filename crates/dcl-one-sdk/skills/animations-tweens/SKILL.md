@@ -14,12 +14,6 @@ description: Animate objects in Decentraland scenes. Play GLTF model animations 
 | Chain multiple animations in sequence  | `TweenSequence`      | Patrol paths, multi-step doors, complex choreography                          |
 | Continuous per-frame control           | `engine.addSystem()` | Physics-like motion, following a target, custom easing, input-driven user control |
 
-**Decision flow:**
-
-1. Does the .glb already have the animation? → `Animator`
-2. Simple move/rotate/scale between two values? → `Tween`
-3. Need frame-by-frame control or custom math? → System with `dt`
-
 ## GLTF Animations (Animator)
 
 Play animations embedded in .glb models. Supports **skeletal animations**, **object animations**, and **shape key (morph target) animations**. Shape keys are useful for facial expressions, lip sync, or deformations.
@@ -28,11 +22,9 @@ Set up with `Animator.create(entity, { states: [{ clip: 'idle', playing: true, l
 
 ### PITFALL: `playSingleAnimation` silently no-ops on clips not in `states` (programmatic Animator only)
 
-**Scope:** this applies _only_ when you author the `Animator` entirely in code and call `Animator.playSingleAnimation(entity, clipName)` programmatically. In many practical workflows the clip list is already populated for you — see "When you don't need to register clips manually" below.
+**Scope:** only when you author the `Animator` entirely in code and call `Animator.playSingleAnimation(entity, clipName)` programmatically — see "When you don't need to register clips manually" below.
 
-The narrow fact (verified — `@dcl/ecs/dist-cjs/components/extended/Animator.js` lines 35-46): `playSingleAnimation(entity, clipName)` returns `false` and does nothing when `clipName` is not present in the entity's `Animator.states` array. The internal `getClipAndAnimator` helper returns a null state, and `playSingleAnimation` exits with `if (!animator || !state) return false`. There is no console warning.
-
-So **when you're building the Animator yourself in TypeScript and you intend to call `playSingleAnimation` with a clip name**, that clip must already be in `states[]`:
+Verified (`@dcl/ecs/dist-cjs/components/extended/Animator.js` lines 35-46): `playSingleAnimation(entity, clipName)` returns `false` and does nothing when `clipName` is not present in the entity's `Animator.states` array — the internal `getClipAndAnimator` returns a null state and it exits with `if (!animator || !state) return false`. There is no console warning. So the clip must already be in `states[]`:
 
 ```ts
 Animator.create(ghost, {
@@ -69,15 +61,13 @@ function playAnim(entity: Entity, clip: string, loop = false) {
 
 ### When you don't need to register clips manually
 
-Several common workflows populate the clip list for you — the rule above does **not** apply in these cases:
+These workflows populate the clip list for you — the rule above does **not** apply:
 
-- **`GltfContainer` with no `Animator` attached.** The renderer autoplays one of the GLB's clips on its own (observed: the first/default clip baked into the file). Confirmed first-hand in a Halloween scene where small ghosts had no `Animator` and the renderer autoplayed `die` straight from the GLB. Use this when the model should just spawn already animating and you don't need to switch clips at runtime.
-- **Creator Hub Inspector placement.** When you drop an asset into the Inspector, the composite is written with an `Animator` whose `states` array already includes _every_ clip from the GLB. Creators using the Inspector never see the registration step because the editor does it.
+- **`GltfContainer` with no `Animator` attached.** The renderer autoplays one of the GLB's clips on its own (observed: the first/default clip baked into the file). Use this when the model should spawn already animating and you don't need to switch clips at runtime.
+- **Creator Hub Inspector placement.** Dropping an asset into the Inspector writes a composite whose `Animator.states` already includes _every_ clip from the GLB.
 - **Asset packs / smart items.** These ship with `states` already populated by whoever authored the pack.
 
-The "you have to pre-register" issue only bites the **author-in-code + `playSingleAnimation`** path. If a model is animating without any code-side `Animator.create` call, you're on the autoplay path described above — that's expected.
-
-Related: if a `GltfContainer` model spawns playing the _wrong_ clip (e.g. a death pose on what should be an idling NPC), the entity has no `Animator` and the renderer picked a clip you didn't intend. Add an `Animator.create` with the desired default clip set to `playing: true` to take control.
+If a `GltfContainer` model spawns playing the _wrong_ clip (e.g. a death pose on what should be an idling NPC), the entity has no `Animator` and the renderer picked a clip you didn't intend. Add an `Animator.create` with the desired default clip set to `playing: true` to take control.
 
 ### Resting an animated model at its FIRST frame (start-closed doors / graves / lids)
 
@@ -101,9 +91,9 @@ Then, to open, set the same clip to `speed: 1, playing: true` (a normal `playSin
 
 ### BEST PRACTICE: Short-circuit clip-switch helpers called from per-frame callers
 
-**Scope:** this applies when you write your own clip-switch helper that mutates `Animator.states` directly (`s.playing`, `s.loop`, `s.shouldReset`) and that helper is invoked from a per-frame caller (an `engine.addSystem` update, an `inputSystem`/raycast callback that fires every tick, or any code path that runs each frame). The most common reason to write such a helper is porting an SDK6 scene that used lazy clip registration or `noLoop + revertToIdle` semantics ([[migrate-sdk6-to-sdk7]]).
+**Scope:** you wrote your own clip-switch helper that mutates `Animator.states` directly (`s.playing`, `s.loop`, `s.shouldReset`) and it runs from a per-frame caller (an `engine.addSystem` update, an `inputSystem`/raycast callback that fires every tick). The usual reason to have one is porting an SDK6 scene that used lazy clip registration or `noLoop + revertToIdle` semantics ([[migrate-sdk6-to-sdk7]]).
 
-**Why it matters.** A naive helper looks like this:
+A naive helper:
 
 ```ts
 function playClip(entity: Entity, name: string, loop: boolean) {
@@ -121,7 +111,7 @@ function playClip(entity: Entity, name: string, loop: boolean) {
 }
 ```
 
-Called every frame, this calls `Animator.getMutableOrNull()` each tick, which marks the entity dirty in the CRDT layer. The ECS then serializes the component to bytes and compares against the last-sent snapshot (`lww-element-set-component-definition.ts`). Since the values are identical frame-to-frame, the CRDT suppression layer silently drops the update — the animation will NOT freeze. However, the per-frame serialization and byte comparison is unnecessary overhead that should be avoided.
+Called every frame, `Animator.getMutableOrNull()` marks the entity dirty each tick; the ECS serializes the component to bytes and compares against the last-sent snapshot (`lww-element-set-component-definition.ts`). The values are identical frame-to-frame, so the CRDT suppression layer silently drops the update — the animation will NOT freeze — but the per-frame serialization and byte comparison is wasted work.
 
 **Note on `Animator.playSingleAnimation`.** Verified against `@dcl/ecs/src/components/extended/Animator.ts`: `playSingleAnimation` is NOT idempotent — it writes `playing=false, shouldReset=true` on every state in a loop, then `playing=true, shouldReset=<arg>` on the target. Calling it per-frame triggers the same unnecessary serialization overhead. Prefer to call `playSingleAnimation` from one-shot transitions (`onPointerDown`, state-machine edges) rather than from a system tick.
 
@@ -147,14 +137,14 @@ function playClip(a: Anim, name: string, loop: boolean) {
 }
 ```
 
-The short-circuit avoids calling `getMutableOrNull()` on unchanged frames, eliminating the per-frame serialization overhead. The CRDT delta is only sent on actual clip transitions.
+The short-circuit skips `getMutableOrNull()` on unchanged frames, so the CRDT delta is only sent on actual clip transitions.
 
 **SDK6-port subtlety — `noLoop + revertToIdle`.** An SDK6-style helper that takes `(clipName, noLoop, durationSec)` and schedules a `timers.setTimeout` (from `@dcl/sdk/ecs` — never the native JS `setTimeout`) to revert to an idle clip must:
 
 - On a same-clip re-call (e.g. the player holds the beam and "Hit" keeps being requested every frame), **only refresh the timer** (clear + reschedule) so the clip keeps replaying for as long as input is held. Do not re-mutate `Animator.states`.
 - When the revert-to-idle timer fires, **clear `lastClip` before re-calling the helper with the idle clip** — otherwise the short-circuit prevents the idle from being applied if `lastClip` already equals the idle name from a prior tick.
 
-**When to prefer `Animator.playSingleAnimation`.** It's the canonical write: pauses all other states in one pass and accepts a `resetCursor` argument (defaults to `true`). It's not idempotent — but it's the right call site when the trigger is a one-shot event. The custom-helper pattern only exists when porting SDK6 code that needs lazy clip registration (see the previous PITFALL) or `noLoop + revertToIdle` semantics.
+**When to prefer `Animator.playSingleAnimation`.** It's the canonical write: pauses all other states in one pass and accepts a `resetCursor` argument (defaults to `true`). Use it whenever the trigger is a one-shot event; the custom-helper pattern only exists for SDK6 ports that need lazy clip registration (see the previous PITFALL) or `noLoop + revertToIdle` semantics.
 
 ## Detecting Animation Completion
 

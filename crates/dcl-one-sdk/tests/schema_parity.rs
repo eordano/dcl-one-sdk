@@ -1,25 +1,18 @@
 //! Differential test: the Rust ISchema encoder against @dcl/ecs itself.
 //!
-//! The three scene goldens pin the constructs those scenes happen to use. This
-//! covers the rest — and, more importantly, the classes of bug that are silent
-//! rather than loud: property order (a wrong order is the same length and still
-//! parses), optional truthiness, numeric coercions, and the one-of index base.
-//! Schemas are emitted as raw text with a deliberately non-alphabetical
-//! property order, because that is exactly what an ordering regression would
+//! The scene goldens pin only the constructs those scenes use; this covers the
+//! bugs that are silent rather than loud: property order (a wrong order is the
+//! same length and still parses), optional truthiness, numeric coercions, the
+//! one-of index base. Schemas are emitted as raw text with a deliberately
+//! non-alphabetical property order, which is what an ordering regression would
 //! hide behind.
 //!
-//! Half of each run is well-typed — the shapes the editor writes — and half is
-//! ill-typed: strings on numeric leaves, one-element arrays, numbers on string
-//! leaves, `null`, objects. That half is not an afterthought. @dcl/ecs coerces
-//! rather than rejects almost all of it, so a disagreement there produces a
-//! scene that loads with the wrong value and no error anywhere, and every
-//! silently-wrong-byte bug this encoder has had lived exactly there. A
-//! generator that only emits type-matching values cannot reach any of them,
-//! which is why the run ends by asserting which coercions it actually landed
-//! on cases whose bytes were compared.
-//!
-//! The oracle is @dcl/ecs itself, including where it throws: a value node
-//! refuses must make us refuse too, never encode something.
+//! Half of each run is ill-typed, because @dcl/ecs coerces rather than rejects
+//! almost all of it: a disagreement there loads the wrong value with no error
+//! anywhere, and every silently-wrong-byte bug this encoder has had lived
+//! exactly there — so the run ends by asserting which coercions it reached on
+//! cases whose bytes were compared. The oracle includes where @dcl/ecs throws:
+//! a value it refuses must make us refuse too, never encode something.
 //!
 //! Skipped when node is unavailable; @dcl/ecs comes from the crate's own
 //! vendored node_modules, so the test does not need a scene installed.
@@ -62,9 +55,8 @@ enum Gen {
 }
 
 impl Gen {
-    /// Render as JSON text. Not via serde_json: its map is a BTreeMap, and
-    /// alphabetising the properties would erase the property order this test
-    /// exists to check.
+    /// Not via serde_json: its BTreeMap would alphabetise the properties and
+    /// erase the property order this test exists to check.
     fn json(&self) -> String {
         match self {
             Gen::Map(props) => format!(
@@ -97,8 +89,6 @@ impl Gen {
             Gen::Color3 => primitive("object", "color3"),
             Gen::Color4 => primitive("object", "color4"),
             Gen::EnumInt(default) => {
-                // A TS numeric enum is reverse-mapped, and IntEnum validates
-                // that it is (`totalCount !== valueCount * 2` throws).
                 let head = r#"{"type":"integer","serializationType":"enum-int","enumObject":{"A":0,"B":1,"C":7,"0":"A","1":"B","7":"C"},"enum":[0,1,7]"#;
                 match default {
                     Some(d) => format!(r#"{head},"default":{d}}}"#),
@@ -188,7 +178,6 @@ fn gen_schema(rng: &mut Rng, depth: usize) -> Gen {
         1 => Gen::Array(Box::new(gen_schema(rng, depth - 1))),
         2 => Gen::Optional(Box::new(gen_schema(rng, depth - 1))),
         _ => {
-            // one-of needs at least two variants for the index to mean anything
             let mut props = gen_props(rng, depth);
             for name in FIELD_NAMES {
                 if props.len() >= 2 {
@@ -206,7 +195,6 @@ fn gen_schema(rng: &mut Rng, depth: usize) -> Gen {
 fn gen_props(rng: &mut Rng, depth: usize) -> Vec<(String, Gen)> {
     let count = 1 + rng.below(4);
     let mut names: Vec<&str> = FIELD_NAMES.to_vec();
-    // Fisher-Yates, so the declaration order is not the constant order above
     for i in (1..names.len()).rev() {
         names.swap(i, rng.below(i + 1));
     }
@@ -217,34 +205,24 @@ fn gen_props(rng: &mut Rng, depth: usize) -> Vec<(String, Gen)> {
         .collect()
 }
 
-/// Which shapes a case's values are drawn from.
-///
-/// `WellTyped` is what the editor writes. `IllTyped` is everything else a
-/// composite can hold once it has been hand-edited, produced by an older tool
-/// or round-tripped through something lossy: a string on a numeric leaf, a
-/// one-element array, a number where a string belongs, `null`. @dcl/ecs
-/// *coerces* most of those rather than rejecting them, which is what makes a
-/// wrong byte there silent — nothing errors, the scene just loads a different
-/// value. Every silently-wrong-byte bug this encoder has had lived in exactly
-/// that region, so a generator that only emits well-typed values cannot guard
-/// the code it is pointed at.
+/// `WellTyped` is what the editor writes; `IllTyped` is what a composite holds
+/// once hand-edited, written by an older tool or round-tripped through
+/// something lossy. @dcl/ecs *coerces* most of the latter rather than rejecting
+/// it, which is what makes a wrong byte there silent.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     WellTyped,
     IllTyped,
 }
 
-/// How often an ill-typed case swaps a well-typed value for a wrong-typed one.
 /// High enough that the awkward coercions are reached in every run, low enough
 /// that a case is rarely killed near its root by a shape @dcl/ecs throws on —
 /// an error at the top of a case hides every leaf below it.
 const ILL_PERCENT: u64 = 30;
 
 /// The coercions a run actually reached, counted only over cases whose bytes
-/// were compared byte for byte. A generator that never lands a radix string on
-/// a numeric leaf cannot catch a bug in the string-to-number path, and would
-/// keep passing while that path rotted; the counters are asserted at the end so
-/// that "the fuzz is green" means "the fuzz went there".
+/// were compared. Asserted at the end, so "the fuzz is green" means "the fuzz
+/// went there".
 const REACH: [&str; 8] = [
     "a radix-prefixed string on a numeric leaf",
     "a string JS reads as NaN (inf/nan/1_0/Infinity) on a numeric leaf",
@@ -279,9 +257,9 @@ impl Reach {
     }
 }
 
-/// A value for `schema`. In [`Mode::WellTyped`] every leaf gets a value of its
-/// own type (or no key at all, which is `undefined` below the top level); in
-/// [`Mode::IllTyped`] any node may instead get [`ill_value`].
+/// In [`Mode::WellTyped`] every leaf gets a value of its own type, or no key at
+/// all (`undefined` below the top level); in [`Mode::IllTyped`] any node may
+/// instead get [`ill_value`].
 fn gen_value(rng: &mut Rng, schema: &Gen, mode: Mode, reach: &mut Reach) -> serde_json::Value {
     use serde_json::{json, Value};
     if mode == Mode::IllTyped && rng.chance(ILL_PERCENT) {
@@ -295,7 +273,6 @@ fn gen_value(rng: &mut Rng, schema: &Gen, mode: Mode, reach: &mut Reach) -> serd
         }
         Gen::Optional(inner) => {
             if rng.chance(35) {
-                // every JS falsy value, which must all encode as one 0x00 byte
                 rng.pick(&[json!(null), json!(0), json!(-0.0), json!(""), json!(false)])
                     .clone()
             } else {
@@ -363,8 +340,6 @@ fn gen_object(
 ) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     for (k, sub) in props {
-        // an omitted key is undefined below the top level, which is a real
-        // shape: node throws for some types and coerces for others
         if rng.chance(20) {
             continue;
         }
@@ -373,10 +348,9 @@ fn gen_object(
     serde_json::Value::Object(obj)
 }
 
-/// Strings a numeric leaf can carry. Every one of these is a coercion @dcl/ecs
-/// performs silently, and the spellings disagree between the two runtimes in
-/// both directions: `f64::from_str` takes "inf", "nan" and "1_0" where JS reads
-/// NaN, and drops the radix prefixes JS honours.
+/// Every one is a coercion @dcl/ecs performs silently, and the spellings
+/// disagree both ways: `f64::from_str` takes "inf", "nan" and "1_0" where JS
+/// reads NaN, and drops the radix prefixes JS honours.
 fn numeric_strings() -> Vec<serde_json::Value> {
     [
         "0",
@@ -409,9 +383,9 @@ fn numeric_strings() -> Vec<serde_json::Value> {
     .collect()
 }
 
-/// Containers on a leaf that wants a scalar. A one-element array is the sharp
-/// one: `Array.prototype.join` renders it and the *text* is coerced, so `[5]`
-/// is 5 but `[true]` is NaN, not 1.
+/// Containers on a leaf that wants a scalar. `Array.prototype.join` renders a
+/// one-element array and the *text* is coerced, so `[5]` is 5 but `[true]` is
+/// NaN, not 1.
 fn odd_containers() -> Vec<serde_json::Value> {
     use serde_json::json;
     vec![
@@ -457,11 +431,10 @@ fn pool(rng: &mut Rng, parts: &[Vec<serde_json::Value>]) -> serde_json::Value {
     unreachable!()
 }
 
-/// A value of the wrong type for `schema`, and the bookkeeping that proves the
-/// run reached it. What counts as "wrong" is per node: a numeric leaf takes
-/// anything ToNumber (or `BigInt`) will chew on, a string leaf takes the values
-/// `@protobufjs/utf8` walks with no type check, an array node takes the other
-/// iterable, and a one-of takes the malformed tags.
+/// What counts as "wrong" is per node: a numeric leaf takes anything ToNumber
+/// (or `BigInt`) will chew on, a string leaf the values `@protobufjs/utf8`
+/// walks with no type check, an array node the other iterable, a one-of the
+/// malformed tags.
 fn ill_value(rng: &mut Rng, schema: &Gen, reach: &mut Reach) -> serde_json::Value {
     use serde_json::{json, Value};
     match schema {
@@ -499,8 +472,6 @@ fn ill_value(rng: &mut Rng, schema: &Gen, reach: &mut Reach) -> serde_json::Valu
             }
             value
         }
-        // every value is truthy or falsy, so a boolean leaf coerces silently
-        // whatever it is handed
         Gen::Bool => pool(rng, &[odd_scalars(), odd_containers()]),
         Gen::Vector3 | Gen::Quaternion | Gen::Color3 | Gen::Color4 => pool(
             rng,
@@ -538,8 +509,6 @@ fn ill_value(rng: &mut Rng, schema: &Gen, reach: &mut Reach) -> serde_json::Valu
             }
             value
         }
-        // reading a property off a non-object yields undefined for every key,
-        // and off null or undefined it throws
         Gen::Map(_) | Gen::Optional(_) => pool(rng, &[odd_scalars()]),
         Gen::OneOf(props) => {
             let first = props[0].0.clone();
@@ -671,21 +640,14 @@ fn the_rust_encoder_agrees_with_dcl_ecs_on_generated_schemas() {
     let mut cases = Vec::with_capacity(CASES);
     let mut input = std::fs::File::create(tmp.0.join("cases.ndjson")).unwrap();
     for i in 0..CASES {
-        // A component's top level is always a map, the one place `extend` runs.
         let props = gen_props(&mut rng, 3);
         let schema = Gen::Map(props.clone());
-        // Half the run is what the editor writes and half is what a composite
-        // can hold after anything else has touched it. The split is by index,
-        // not by chance, so neither half can shrink away under a new seed.
         let mode = if i % 2 == 0 {
             Mode::WellTyped
         } else {
             Mode::IllTyped
         };
         let mut reach = Reach::default();
-        // The root value is built from the properties rather than through
-        // `gen_value`, because an ill-typed *root* would replace the whole
-        // component with a scalar and take every leaf below it out of the run.
         let value = gen_object(&mut rng, &props, mode, &mut reach);
         let schema_text = schema.json();
         writeln!(
@@ -737,20 +699,14 @@ fn the_rust_encoder_agrees_with_dcl_ecs_on_generated_schemas() {
                     theirs,
                     "case {i}\nschema: {schema_text}\nvalue: {value}\n{replay}"
                 );
-                // only a case whose bytes were compared proves anything about
-                // the coercions it carried
                 compared.merge(reach);
             }
         }
     }
-    // A run where everything throws would pass vacuously.
     assert!(
         agreed_errors * 2 < CASES,
         "{agreed_errors}/{CASES} cases threw on both sides; the generator is producing junk"
     );
-    // And so would a run that never reached the coercions this exists to guard:
-    // the bugs it is pointed at are all silent, so "no failure" means nothing
-    // unless the wrong-typed values actually landed on the leaves that coerce.
     for (kind, name) in REACH.iter().enumerate() {
         eprintln!("reached {:4} cases with {name}", compared.0[kind]);
     }
@@ -788,10 +744,9 @@ fn word(bytes: &[u8], at: usize) -> u32 {
 }
 
 /// The rule the bevy engine applies to a tick's batch: a record's declared
-/// length covers its own header and exactly the body that follows, and the
-/// next record starts where that length ends. A record that declares less
-/// than it wrote puts the reader four bytes inside its body, and the engine
-/// discards the rest of the batch rather than parse the misaligned remainder.
+/// length covers its own header and exactly the body that follows. A record
+/// that declares less than it wrote puts the reader inside its body, and the
+/// engine discards the rest of the batch rather than parse the remainder.
 fn strict_frames(bytes: &[u8]) -> Vec<(u32, &[u8])> {
     let mut out = Vec::new();
     let mut at = 0usize;
@@ -822,9 +777,8 @@ fn strict_frames(bytes: &[u8]) -> Vec<(u32, &[u8])> {
 }
 
 /// Upstream 7.27.0 declares a network entity delete as 12 bytes and writes 16;
-/// the blob carries the #1595 fix as an overlay. This runs the vendored
-/// `dist-cjs` for real and frames its output the way the engine does, so the
-/// overlay is proven on bytes the runtime produced, not on a source grep.
+/// the blob carries the #1595 fix as an overlay. Runs the vendored `dist-cjs`
+/// for real, so the overlay is proven on bytes the runtime produced.
 #[test]
 fn the_vendored_ecs_frames_a_network_entity_delete_by_its_declared_length() {
     if Command::new("node").arg("--version").output().is_err() {

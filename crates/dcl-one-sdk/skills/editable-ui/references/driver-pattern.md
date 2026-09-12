@@ -4,7 +4,7 @@ The editor parses **only** `.tsx` files directly under `src/ui/`. A component's 
 
 > **The editor owns structure, style, and every bound value's rest state. The driver owns the clock, the easing math, and every derived value.**
 
-Everything that used to be impossible in an editable UI — timers, tweens, auto-hide, live progress, UV-rotation spinners, slide-in transitions, one-shot click animations — works through this, at zero editability cost. What the editor has no representation for is the motion itself: it sees a bound key and its rest value; the curve, duration and target live in driver code it never reads.
+Timers, tweens, auto-hide, live progress, UV-rotation spinners, slide-in transitions and one-shot click animations all work through this at zero editability cost. What the editor has no representation for is the motion itself: it sees a bound key and its rest value; the curve, duration and target live in driver code it never reads.
 
 Put the driver in `src/ui-behaviors.ts` (or any `.ts` file **outside** `src/ui/`) and register it from `main()`.
 

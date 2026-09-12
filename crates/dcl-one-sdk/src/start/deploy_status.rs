@@ -1,6 +1,4 @@
-//! What is at the deploy destination and what of the payload it already
-//! holds: destination resolution (mirroring `deploy::net::resolve_target_from`),
-//! the remote entity lookups, the CID/reuse split, and their caches.
+//! Destination resolution mirrors `deploy::net::resolve_target_from`.
 
 use super::landing::parse_parcels;
 pub(super) use crate::deploy::Reuse;
@@ -185,7 +183,6 @@ pub(super) struct RemoteScene {
 }
 
 pub(super) struct RemoteState {
-    /// The scene on the parcels this deploy writes to, if any.
     pub(super) current: Option<CurrentScene>,
     /// Scenes this deploy does not touch (worlds: kept by `multi_scene: true`;
     /// Genesis: other entities under the same pointers, which it replaces).
@@ -423,7 +420,6 @@ impl LiveStatus {
     }
 }
 
-/// The two remote-knowledge caches, one field on `DeployState`.
 #[derive(Default)]
 pub(super) struct StatusCaches {
     hashes: Mutex<Option<(PathBuf, String, HashResult)>>,

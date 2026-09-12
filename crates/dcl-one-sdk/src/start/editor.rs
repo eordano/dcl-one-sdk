@@ -61,7 +61,6 @@ fn editor_ui_missing() -> Response {
         .into_response()
 }
 
-/// The inspector's browser bundle, or the response saying why there is none.
 fn ui_dir(st: &AppState) -> Result<&Path, Response> {
     let dl = st.data_layer.as_ref().ok_or_else(editor_disabled)?;
     dl.public_dir.as_deref().ok_or_else(editor_ui_missing)

@@ -1,11 +1,11 @@
 # Multiplayer server support in dcl-one-sdk -- design sketch
 
-Decided 2026-08-30 (user interview, hexabricks session): dcl-one-sdk should
-grow the `@dcl/sdk@auth-server` surface so scenes written against the
-official multiplayer server APIs run under this toolchain -- today they
-feature-detect and fall back to single-player. The concrete consumer is
+Decided 2026-08-30 (user interview, hexabricks session): dcl-one-sdk should grow
+the `@dcl/sdk@auth-server` surface so scenes written against the official
+multiplayer server APIs run under this toolchain -- today they feature-detect
+and fall back to single-player. The concrete consumer is
 `hexabricks/src/persistence.ts`, which exercises every API below and is the
-acceptance test for this work.
+acceptance test.
 
 ## Surface a scene needs
 
@@ -28,8 +28,7 @@ server's view of the room.
 
 ## Shape
 
-Two halves, mirroring how the rest of this crate splits toolchain from
-runtime:
+Two halves, mirroring how the rest of this crate splits toolchain from runtime:
 
 1. **Vendored SDK half.** The prebuilt sdk-runtime chunk gains the
    `network` + `server` entry points, compiled from the same pinned
@@ -51,9 +50,9 @@ runtime:
      trivially backed up).
 
 The preview server already runs a comms websocket island per scene
-(`src/comms.rs`); the host rides the same listener so `start` +
-multiplayer is one process and one port. `dcl-one-sdk start --host` runs
-both roles for local testing; a bare `host` serves headless.
+(`src/comms.rs`); the host rides the same listener, so `start` + multiplayer is
+one process and one port. `dcl-one-sdk start --host` runs both roles for local
+testing; a bare `host` serves headless.
 
 ## Milestones
 
@@ -76,13 +75,12 @@ Exploration collapsed the estimate considerably:
   `~system/CommunicationsController.sendBinary`, which the explorer relays
   through the preview's existing mini-comms room (signed-challenge
   handshake, verified addresses).
-- Augmentation point: scene chunks treat `@dcl/sdk/*` as externals wired by
-  the split loader, and the generated entrypoint already injects
-  before-scene modules (`sdk-boot.js` precedent). The MP runtime is one
-  more injected module that patches the loaded network namespace and
-  registers a synthetic `@dcl/sdk/server` in the loader table. It must
-  activate only when a host is present, or every preview flips scenes into
-  MP mode with nobody serving.
+- Augmentation point: scene chunks treat `@dcl/sdk/*` as externals wired by the
+  split loader, and the generated entrypoint already injects before-scene
+  modules (`sdk-boot.js` precedent). The MP runtime is one more injected module
+  that patches the loaded network namespace and registers a synthetic
+  `@dcl/sdk/server` in the loader table. It must activate only when a host is
+  present, or every preview flips scenes into MP mode with nobody serving.
 - The host-side scene sandbox exists: `scripts/golden-runtime.mjs` runs
   scene bundles under node behind a `~system/*` mock table. The host
   harness is that table with real implementations (live frame loop,
@@ -91,10 +89,10 @@ Exploration collapsed the estimate considerably:
 
 **Landed:** the room's host side-door, `GET /mini-comms/{room}/host`
 (`src/comms.rs`). The host joins as a real peer through a JSON websocket --
-loopback-gated, occupying the zero-address slot no wallet can mint -- and
-the relay transcodes protobuf<->JSON both ways, stamping every inbound
-update with the sender address the signed handshake verified. Targeted
-sends (`to: [addresses]`) come for free for `room.send(..., { to })`.
+loopback-gated, occupying the zero-address slot no wallet can mint -- and the
+relay transcodes protobuf<->JSON both ways, stamping every inbound update with
+the sender address the signed handshake verified. Targeted sends
+(`to: [addresses]`) come for free for `room.send(..., { to })`.
 
 **Next in M1:** the host harness (`host-runtime.mjs` from the golden
 table), the injected mp-runtime module + loader entry, the host-presence
@@ -161,11 +159,11 @@ The loop is closed end to end, verified headlessly:
 - The acceptance scene pauses building with a notice when the host goes
   silent (heartbeat grace covers joining) instead of dropping lays.
 
-Remaining: in-world verification with a real explorer client (the one
-step a headless harness cannot take), M3 restart-survival exercises, and
-the hardening list below. Client-side inbound sender identity is not
-verifiable (the platform hands scenes bytes, not senders) -- state
-authority lives server-side where the relay stamps addresses.
+Remaining: in-world verification with a real explorer client (the one step a
+headless harness cannot take), M3 restart-survival exercises, and the hardening
+list below. Client-side inbound sender identity is not verifiable (the platform
+hands scenes bytes, not senders) -- state authority lives server-side where the
+relay stamps addresses.
 
 ## Non-goals for now
 

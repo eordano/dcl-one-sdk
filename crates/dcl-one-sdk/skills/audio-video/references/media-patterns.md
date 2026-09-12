@@ -64,18 +64,8 @@ pointerEventsSystem.onPointerDown(
 ```
 
 ### File Organization
-```
-project/
-├── assets/
-│   └── scene/
-│       └── Audio/
-│           ├── click.mp3
-│           ├── background-music.mp3
-│           └── explosion.ogg
-├── src/
-│   └── index.ts
-└── scene.json
-```
+
+Audio files live under `assets/Audio/` (legacy scenes: `assets/scene/Audio/`); code lives in `src/index.ts`, next to `scene.json` at the project root.
 
 ---
 
@@ -160,22 +150,7 @@ VideoPlayer.getMutable(screen).src = 'https://example.com/other.mp4'  // Change 
 
 ### Enhanced Video Material (PBR)
 
-For a brighter, emissive video screen:
-
-```typescript
-import { Color3 } from '@dcl/sdk/math'
-
-const videoTexture = Material.Texture.Video({ videoPlayerEntity: screen })
-Material.setPbrMaterial(screen, {
-  texture: videoTexture,
-  roughness: 1.0,
-  specularIntensity: 0,
-  metallic: 0,
-  emissiveTexture: videoTexture,
-  emissiveIntensity: 0.6,
-  emissiveColor: Color3.White(),
-})
-```
+For a brighter, emissive video screen, use `Material.setPbrMaterial` with the video texture as both `texture` and `emissiveTexture` — see `media-reference.md` → Video Texture Setup.
 
 ### Video Events
 ```typescript
@@ -212,16 +187,7 @@ engine.addSystem(() => {
 
 ### Multiple Video Surfaces
 
-Share one VideoPlayer across multiple screens:
-
-```typescript
-Material.setPbrMaterial(screen1, {
-  texture: Material.Texture.Video({ videoPlayerEntity: videoEntity }),
-})
-Material.setPbrMaterial(screen2, {
-  texture: Material.Texture.Video({ videoPlayerEntity: videoEntity }),
-})
-```
+Share one VideoPlayer across screens by passing the same `videoPlayerEntity` to each `Material.Texture.Video()` — see `media-reference.md` → Multiple Screens, One Video.
 
 ### Video on glTF Model
 
@@ -326,11 +292,4 @@ engine.addSystem(() => {
 
 ## Permission for External Media
 
-`[LEGACY]` Not required — no current client enforces `ALLOW_MEDIA_HOSTNAMES`. For legacy scenes that still declare it:
-
-```json
-{
-  "requiredPermissions": ["ALLOW_MEDIA_HOSTNAMES"],
-  "allowedMediaHostnames": ["stream.example.com", "cdn.example.com"]
-}
-```
+`[LEGACY]` Not required — no current client enforces `ALLOW_MEDIA_HOSTNAMES`. The `scene.json` syntax for legacy scenes that still declare it is in `media-reference.md` → Media Permissions in scene.json.

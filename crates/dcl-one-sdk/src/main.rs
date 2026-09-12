@@ -11,7 +11,6 @@ const MIN_MCP_PORT: u16 = 1024;
 
 const NO_INSTALL_NOTE: &str = "--skip-install has no effect (dcl-one-sdk never installs packages)";
 
-/// The port both ends use when `--mcp-port` is absent.
 fn resolved_mcp_port(mcp_port: Option<u16>) -> u16 {
     mcp_port.unwrap_or(joinblock::DEFAULT_EXPLORER_MCP_PORT)
 }
@@ -547,10 +546,6 @@ async fn main() {
         ux::report(&e, verbose);
         std::process::exit(1);
     }
-    // Success leaves the same abrupt way the error path always has. Falling
-    // off the end instead would drop the tokio runtime, and that drop waits
-    // for whatever blocking walk or stubborn child is still out there — which
-    // reads as a ctrl-c that does not stop. A CLI has nothing to flush.
     std::process::exit(0);
 }
 

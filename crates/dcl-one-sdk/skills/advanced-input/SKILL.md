@@ -5,7 +5,7 @@ description: System-level input polling, player movement control, and mobile on-
 
 # Advanced Input Handling in Decentraland
 
-For basic click/hover events, see the `add-interactivity` skill. This skill covers advanced input patterns. Prefer `pointerEventsSystem.onPointerDown()` (add-interactivity) for simple entity clicks; use `inputSystem` for complex multi-key or polling patterns.
+For basic click/hover events, see the `add-interactivity` skill. Prefer `pointerEventsSystem.onPointerDown()` (add-interactivity) for simple entity clicks; use `inputSystem` for complex multi-key or polling patterns.
 
 ## Pointer Lock State
 
@@ -108,9 +108,7 @@ The returned command carries `hit` data (position and entity) — use `getInputC
 
 Omit the entity argument to check globally (any entity / no target). Pass `InputAction.IA_ANY` to match any action — `getInputCommand(InputAction.IA_ANY, PointerEventType.PET_DOWN)` returns the command for whatever key was pressed, and `cmd.button` tells you which one (verified: `0,1-input-modifier`).
 
-For the Tag-based per-entity cookbook (mark entities with a Tag, fetch them with `engine.getEntitiesByTag`, and poll each with `getInputCommand` inside a system), see `{baseDir}/references/input-patterns.md` → "Per-Entity Input Command Cookbook (Tag-based)".
-
-
+Tag-based cookbook (mark entities with a Tag, fetch with `engine.getEntitiesByTag`, poll each with `getInputCommand` in a system): `{baseDir}/references/input-patterns.md` → "Per-Entity Input Command Cookbook (Tag-based)".
 
 ### Global Input Checks
 
@@ -198,15 +196,15 @@ InputModifier.deleteFrom(engine.PlayerEntity)
 
 ### Cutscene Pattern
 
-For the worked cutscene flow (freeze the player with `disableAll` during a cinematic, then restore movement with `InputModifier.deleteFrom`), see `{baseDir}/references/input-patterns.md` → "Cutscene Pattern (freeze player during a cinematic)".
+Freeze the player with `disableAll` during a cinematic, then restore with `InputModifier.deleteFrom`: `{baseDir}/references/input-patterns.md` → "Cutscene Pattern (freeze player during a cinematic)".
 
 ## WASD Movement Pattern
 
-For the WASD-driven custom-entity pattern (poll `IA_FORWARD`/`IA_BACKWARD`/`IA_LEFT`/`IA_RIGHT` with `isPressed` to move a `Transform`, plus the note on freezing the avatar with `InputModifier` and how polling WASD relates to player movement), see `{baseDir}/references/input-patterns.md` → "WASD Movement Pattern (drive a custom entity)".
+Poll `IA_FORWARD`/`IA_BACKWARD`/`IA_LEFT`/`IA_RIGHT` with `isPressed` to move a `Transform`, and freeze the avatar with `InputModifier`: `{baseDir}/references/input-patterns.md` → "WASD Movement Pattern (drive a custom entity)".
 
 ## Combining Input Patterns
 
-For the action-bar / number-key pattern (map `IA_ACTION_3`–`IA_ACTION_6` to ability slots via `isTriggered`), see `{baseDir}/references/input-patterns.md` → "Action Bar with Number Keys".
+Action bar — map `IA_ACTION_3`–`IA_ACTION_6` to ability slots via `isTriggered`: `{baseDir}/references/input-patterns.md` → "Action Bar with Number Keys".
 
 ## Platform detection
 
@@ -228,7 +226,7 @@ function platformCheckSystem() {
 engine.addSystem(platformCheckSystem)
 ```
 
-Import from `@dcl/sdk/platform`. Verified against docs commit `17ca7be`.
+Verified against docs commit `17ca7be`.
 
 ## On-screen touch controls (`TouchScreenControls`)
 
@@ -308,5 +306,3 @@ Engine-team test scenes exercising these APIs (ground truth):
 
 - `{baseDir}/references/input-patterns.md` — branch-specific worked patterns: Tag-based per-entity input cookbook, cutscene freeze/restore flow, WASD-driven custom entity, action-bar number-key mapping.
 - `{baseDir}/references/touch-screen-controls.md` — `TouchScreenControls`: button priority stack and "+" overflow rules, custom button icons, declutter/full-custom-HUD examples, helper semantics.
-
-For basic pointer events and click handlers, see the `add-interactivity` skill.

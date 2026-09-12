@@ -546,23 +546,7 @@ Instance props take literals (`label="Download"`, `percent={42}`) or bare state 
 
 ## 8. The aggregator
 
-Generated; reproduce it exactly and never hand-edit it (it is rewritten when the editor opens the scene and on every root add/rename/remove).
-
-```tsx
-/** @jsx ReactEcs.createElement */
-import ReactEcs, { UiEntity, ReactEcsRenderer, ScreenInsetArea } from '@dcl/sdk/react-ecs'
-import { MyHud } from './MyHud'
-
-export function setupUi() {
-  ReactEcsRenderer.setUiRenderer(() => (
-    <UiEntity uiTransform={{ width: '100%', height: '100%' }}>
-      <ScreenInsetArea>
-        <MyHud />
-      </ScreenInsetArea>
-    </UiEntity>
-  ))
-}
-```
+Generated; reproduce the shape in `SKILL.md` → **The aggregator** exactly and never hand-edit it (it is rewritten when the editor opens the scene and on every root add/rename/remove).
 
 Mixed insets in one scene — the HUD inside the safe area, a letterbox root at full canvas:
 

@@ -1,10 +1,3 @@
-/* The wallet hand-off. Every deployment fact — scene, target, parcels, entity
-   id, payload, the delete payload and the jump-in link — is server-rendered
-   into #sign-panel's rows and data attributes, so the only work left here is
-   the one thing a server cannot do: ask the wallet. While the signed upload
-   travels, the panel draws the send from GET …/progress; a panel whose entity
-   id the server no longer knows is rebuilt in place from a fresh render, never
-   handed back to the person as "reload the page". */
 const signInit = () => {
   const panel = document.getElementById('sign-panel');
   if (!panel || panel.dataset.armed || !panel.dataset.entityId) return;
@@ -27,7 +20,6 @@ const signInit = () => {
     }
   })();
 
-  /* Sizes the way the payload row states them: decimal, one decimal place. */
   const size = (n) =>
     n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? (n / 1e3).toFixed(1) + ' KB' : n + ' bytes';
   const secs = (ms) => {
@@ -35,10 +27,6 @@ const signInit = () => {
     return s < 60 ? s + ' s' : Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
   };
 
-  /* The upload, drawn large: bytes and files out of the total, the rate and
-     what is left while it sends; the wait on the server once the last byte
-     is gone; what stopped where when it fails. curl carries no counts, so
-     with it the clock and the size stand in for the bar. */
   const draw = (p) => {
     const box = $('sign-progress');
     if (!box) return;
@@ -49,7 +37,6 @@ const signInit = () => {
     const counted = p.total > 0 && p.carrier !== 'curl';
     const pct = counted ? Math.min(100, Math.floor((p.sent / p.total) * 100)) : 0;
     const files = p.files ? `${p.files_sent} of ${p.files} files` : '';
-    /* What never travelled, in the words every other surface uses. */
     const home = p.reuse || '';
     let big = '';
     let pctText = '';
@@ -151,9 +138,6 @@ const signInit = () => {
     tick();
   };
 
-  /* The server no longer knows the id this panel carries (the preview was
-     rebuilt or restarted under it): pull a fresh render, swap the panel for
-     the one in it, and leave the button one press from a new signature. */
   const rebuild = async () => {
     status('info', 'That signing request expired on the server. Rebuilding it…');
     let doc = null;
@@ -171,8 +155,6 @@ const signInit = () => {
       again.focus();
       return;
     }
-    /* No panel to rebuild into: the run itself is gone. Redraw the page from
-       the server, which puts the publish button back, and say so. */
     window.__signBusy = false;
     if (window.__signSettled) await window.__signSettled();
     if (typeof pageToast === 'function') {
@@ -191,12 +173,6 @@ const signInit = () => {
       status('info', 'Requesting wallet…');
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       const address = accounts[0];
-      /* The moment between "which wallet" and "sign" is the last one where a
-         refusal costs nothing: ask the server whether this address may
-         publish to the declared target, and stop BEFORE the signature when
-         the answer is no — a catalyst saying it after is the incident this
-         exists to prevent. An unanswered check never blocks: the server
-         still enforces, this is the courtesy copy. */
       try {
         const pf = await (
           await fetch(panel.dataset.api.replace(/\/sign$/, '/preflight'), {

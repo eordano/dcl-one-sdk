@@ -37,15 +37,14 @@ jobs:
             target: aarch64-apple-darwin
             bin: dcl-one-sdk
           - name: x86_64-apple-darwin
-            # the last free Intel image; scheduled to live through August 2027
             runner: macos-15-intel
             target: x86_64-apple-darwin
             bin: dcl-one-sdk
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           toolchain: "1.97.0"
           targets: ${{ matrix.target }}
@@ -69,8 +68,6 @@ jobs:
             echo "AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar"
           } >> "$GITHUB_ENV"
 
-      # build.rs downloads the abgen bundle abgen-release.lock pins for the
-      # cargo target and verifies its sha256, so nothing is fetched by hand.
       - name: build
         run: cargo build --release --locked --target ${{ matrix.target }} -p dcl-one-sdk
 
@@ -105,7 +102,7 @@ jobs:
               --mtime="@$(git log -1 --format=%ct)" -czf "$dist.tar.gz" "$dist"
           shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ matrix.name }}
           path: |
@@ -118,10 +115,8 @@ jobs:
     runs-on: ubuntu-22.04
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      # The release notes name the embedded abgen release; abgen-release.lock
-      # is the only place that version lives, so the tree is needed here too.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
           merge-multiple: true

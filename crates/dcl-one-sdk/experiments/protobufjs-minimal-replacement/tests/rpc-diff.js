@@ -1,30 +1,10 @@
 "use strict";
-// Phase 1c: differential round-trip of the two catalogues that reach `protobufjs/minimal`
-// outside `@dcl/ecs`.
-//
-//   rpc/protocol/index.gen.js   = @dcl/rpc/dist/protocol/index.js
-//        the RPC framing itself: RpcMessageHeader, Request/Response,
-//        StreamMessage, CreatePort/Request-Module and their Response forms.
-//        `message-dispatcher.js`, `server.js`, `client.js` and
-//        `stream-protocol.js` all encode/decode through these, so every byte the
-//        data-layer socket carries passes through this file - including the
-//        `bytes payload` that wraps the CRDT stream.
-//
-//   rpc/datalayer/data-layer.gen.js = @dcl/inspector/data-layer.gen.js
-//        the 22-method DataService descriptor's message codecs, as vendored by
-//        `build_service_descriptor()` in scripts/blob_overlays.py.
-//
-// Neither had ever been round-tripped against pbmin: the corpus phase only ever loaded
-// `@dcl/ecs/dist-cjs`. Same loader, same alias hook, same assertions.
 
 const H = require("./harness");
 
 const SEED = Number(process.env.SEED || 0xC0FFEE);
 const ITERS = Number(process.env.ITERS || 200);
 
-// Same scene-runtime emulation switches as corpus-diff.js. They matter here too:
-// `data-layer.gen.js` runs `if (_m0.util.Long !== Long) { _m0.util.Long = Long; _m0.configure(); }`
-// at module-evaluation time, exactly like the ts-proto int64 modules in the ecs corpus.
 {
     const impls = [H.loadImpl("ref"), H.loadImpl("mine")];
     const notes = [];
@@ -48,7 +28,6 @@ if (ref.failures.length || mine.failures.length) {
     process.exitCode = 1;
 }
 if (ref.mods.size !== 2) {
-    // A silently-empty corpus is the one failure mode that would look like a pass.
     console.log(`FATAL: expected 2 catalogue modules, found ${ref.mods.size}`);
     process.exitCode = 1;
 }
@@ -66,9 +45,6 @@ if (refMsgs.length === 0) {
     process.exitCode = 1;
 }
 
-// The descriptor is only useful if every one of its 22 methods names a request and a
-// response type this phase actually covered - otherwise a method could be carrying an
-// untested codec. Checked against the same module objects the round-trip used.
 const dl = ref.mods.get("datalayer/data-layer.gen.js");
 if (dl && dl.DataServiceDefinition) {
     const covered = new Set(refMsgs.map((m) => m.ns));

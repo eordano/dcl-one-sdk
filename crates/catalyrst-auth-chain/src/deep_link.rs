@@ -1,5 +1,3 @@
-/// Launch links for the desktop explorer.
-///
 /// `https://decentraland.org/play/?realm=...` cannot reach a self-hosted node:
 /// the website forwards `realm` only for realms it trusts (the client's
 /// `deeplink-whitelisted-worlds` flag) and silently drops it otherwise, so the

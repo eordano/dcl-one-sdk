@@ -62,7 +62,6 @@ pub struct StartOptions {
     pub ignore_composite: bool,
     pub offline_comms: bool,
     pub mobile: bool,
-    /// Run the local abgen conversion sidecar.
     pub ab_sidecar: bool,
     /// Forward `local-ab=true` in the desktop deep link (tracks `ab_sidecar`):
     /// the client then fetches `{realm}/optimized-assets`, which this server
@@ -133,7 +132,7 @@ pub(crate) struct AppState {
     /// would fall through to a real deploy against a real content server.
     deploy_dry_run: bool,
     explorer_params: Vec<String>,
-    /// Ring buffer of the latest requests, shown on the landing page.
+    /// Shown on the landing page.
     recent_requests: Mutex<VecDeque<(String, u16, Instant)>>,
     deploy: deploy_page::DeployState,
 }
@@ -203,7 +202,6 @@ async fn scene_route(
     landing::scene_page(&st, &headers, peer.ip().is_loopback())
 }
 
-/// Shared fixtures for every test under `start`.
 #[cfg(test)]
 pub(crate) mod testkit {
     use super::*;
@@ -220,7 +218,6 @@ pub(crate) mod testkit {
         st
     }
 
-    /// A fresh temp dir, removed on drop.
     pub(crate) struct Tmp(pub(crate) PathBuf);
 
     impl Tmp {
@@ -372,10 +369,6 @@ pub async fn start(opts: StartOptions) -> Result<()> {
 
     let app = build_router(state.clone(), comms_state);
 
-    // upstream parity: authoritativeMultiplayer in scene.json auto-starts
-    // the server isolate beside the preview. Held here so its stdin
-    // lifeline closes with this process however it dies; failure to spawn
-    // degrades the preview, it does not kill it.
     let _host_isolate = if !opts.no_host && crate::entrypoint::authoritative_multiplayer(&first) {
         match crate::host::spawn_isolate(&first.root, &format!("http://127.0.0.1:{port}"), "room-1")
         {
@@ -421,10 +414,6 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         }
         let ifaces = netinfo::enumerate();
         let unreachable = probe_unreachable(&ifaces, port).await;
-        // The terminal link carries the same fresh-page defaults the
-        // join card starts with; they ride AFTER the user's own
-        // params, so an explicit `--multi-instance=false` still wins
-        // the dedup.
         let mut params = banner_state.explorer_params.clone();
         params.extend(
             landing::DEFAULT_ON
@@ -725,7 +714,6 @@ fn build_chunk(opts: &StartOptions) -> usize {
     }
 }
 
-/// Build once under --no-watch; otherwise start the watch loop for `project`.
 async fn build_or_watch(
     opts: &StartOptions,
     project: Project,

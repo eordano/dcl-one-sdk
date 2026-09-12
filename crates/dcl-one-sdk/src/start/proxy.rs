@@ -43,7 +43,6 @@ pub(super) fn configured_base(names: &[&str]) -> Option<String> {
     })
 }
 
-/// The one sentence every unconfigured-upstream route says.
 pub(super) fn unconfigured_host_hint(what: &str, env: &str, serves: &str) -> String {
     format!(
         "no {what} host configured — set {env} to the base URL that serves {serves}. This \

@@ -1,10 +1,8 @@
 # Runtime APIs Reference
 
-Long-tail extensions to `scene-runtime/SKILL.md`. Core teaching (executeTask basics, the restricted-actions list + player-interaction rule, canonical action examples, realm/scene metadata, portable experiences) lives in the SKILL. This file holds only additional variants and the two restricted actions the SKILL imports but does not detail.
+Long-tail extensions to `scene-runtime/SKILL.md`, which holds the core teaching (executeTask basics, the restricted-actions list + player-interaction rule, canonical action examples, realm/scene metadata, portable experiences). This file adds only extra variants and the two restricted actions the SKILL imports but does not detail.
 
 ## executeTask Variants
-
-Basic usage is in SKILL.md. Additional patterns:
 
 ```typescript
 import { executeTask } from '@dcl/sdk/ecs'
@@ -31,7 +29,7 @@ executeTask(async () => {
 
 ## Restricted Actions — extended
 
-The full list, the player-interaction rule, and canonical examples (`movePlayerTo`, `teleportTo`, `triggerEmote`, `openExternalUrl`, `openNftDialog`, `copyToClipboard`, `changeRealm`) are in SKILL.md. Details below extend those.
+The full list, the player-interaction rule, and canonical examples (`movePlayerTo`, `teleportTo`, `triggerEmote`, `openExternalUrl`, `openNftDialog`, `copyToClipboard`, `changeRealm`) are in SKILL.md.
 
 ### movePlayerTo — rotate avatar in place
 
@@ -43,7 +41,7 @@ Params are documented in SKILL.md. To rotate the avatar without moving it, pass 
 
 ### triggerSceneEmote — custom emote from .glb
 
-Play a custom emote from a `.glb` file (imported in SKILL.md but not detailed there):
+Play a custom emote from a `.glb` file:
 
 ```typescript
 import { triggerSceneEmote } from '~system/RestrictedActions'
@@ -57,7 +55,7 @@ Invalid: `wave.glb`, `emote_wave.glb`, `wave_emote_v2.glb`
 
 ### setCommunicationsAdapter — custom comms
 
-Change the scene's communication channel (imported in SKILL.md but not detailed there). Used for custom multiplayer infrastructure beyond the default CRDT sync:
+Change the scene's communication channel — for custom multiplayer infrastructure beyond the default CRDT sync:
 
 ```typescript
 import { setCommunicationsAdapter } from '~system/RestrictedActions'

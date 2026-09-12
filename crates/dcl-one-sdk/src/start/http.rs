@@ -103,7 +103,6 @@ pub(super) fn preview_origin(headers: &HeaderMap) -> String {
     )
 }
 
-/// [`preview_origin`] with the websocket scheme.
 pub(super) fn preview_ws_origin(headers: &HeaderMap) -> String {
     let ws_proto = if forwarded_proto(headers) == "https" {
         "wss"
@@ -288,12 +287,6 @@ fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) ->
             continue;
         };
         let tag = root_tag(&p.root, machine);
-        // Deliberately sequential where upstream parallelized (b7a44a20): this
-        // route is unauthenticated and uncached, a wearable's file set is
-        // small, and content_tag memoises the digests anyway. Also stronger
-        // than upstream on ids: we mint content-versioned hashes here where
-        // upstream keeps plain ones — the read side resolves on
-        // hash_path_part alone, so both shapes decode.
         let contents: Vec<Value> = collect_publishable_files(&p.root)
             .unwrap_or_default()
             .iter()

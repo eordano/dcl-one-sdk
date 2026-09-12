@@ -1,6 +1,6 @@
 # Performance & content-budget debugging reference
 
-Three read-only tools close a measurement loop: **what the scene contains** (`get_scene_content_stats`), **which assets that content comes from** (`get_scene_content_breakdown`), and **the frame rate a viewpoint actually produces** (`get_performance_stats`). Reach for them when the user asks whether a scene is within limits, why it runs slow, or what to optimize — not for gameplay verification (that's the main loop). All three are read-only and touch no shared profiler state.
+Three read-only tools close a measurement loop: **what the scene contains** (`get_scene_content_stats`), **which assets that content comes from** (`get_scene_content_breakdown`), and **the frame rate a viewpoint actually produces** (`get_performance_stats`). Reach for them when the user asks whether a scene is within limits, why it runs slow, or what to optimize — not for gameplay verification (that's the main loop). They touch no shared profiler state.
 
 Collection is **on demand**: each tool sets its own request flag and the scene world runs (or piggybacks) a counting pass, then the call waits for it to land. With every stats UI closed the scene does nothing until you ask, so the first call after a while pays for a pass — a counting cooldown is ~60 frames, which is up to a second and stretches to several at low FPS (10 s timeout). Nothing is cached across scenes; walking into a new scene resets the numbers.
 

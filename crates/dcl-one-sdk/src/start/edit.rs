@@ -30,7 +30,6 @@ const MAX_THUMBNAIL_BYTES: usize = 2 * 1024 * 1024;
 /// fields.
 static WRITE: Mutex<()> = Mutex::new(());
 
-/// Every answer here is a status and one line of text.
 fn reply(status: StatusCode, why: impl std::fmt::Display) -> Response {
     (status, format!("{why}\n")).into_response()
 }

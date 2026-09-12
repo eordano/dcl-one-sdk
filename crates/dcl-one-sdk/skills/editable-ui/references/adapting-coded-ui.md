@@ -1,8 +1,8 @@
 # Adapting an existing coded UI
 
-Recipes from porting a shipped production scene's UI (Genesis Plaza central plaza — ten HUD elements: skip hint, parkour timer, message banner, cinematic letterbox, confetti HUD, bookshelf popup, NPC dialog, error toast, position readout, show-debug panel). Eight of ten ported faithfully, one needed a mechanical redesign, one was out of reach. Every recipe below is what actually made the difference.
+Recipes from porting a shipped production scene's UI (Genesis Plaza central plaza — ten HUD elements: skip hint, parkour timer, message banner, cinematic letterbox, confetti HUD, bookshelf popup, NPC dialog, error toast, position readout, show-debug panel). Eight of ten ported faithfully, one needed a mechanical redesign, one was out of reach.
 
-Work through them in this order — each one removes a class of blocker, and later recipes assume the earlier ones are done.
+Work through them in order — each removes a class of blocker, and later recipes assume the earlier ones are done.
 
 ## 0. Split the files first
 
@@ -62,7 +62,7 @@ banner.textColor.a = t
 
 Two practical limits found in the port:
 
-- **Fading a whole subtree** needs one bound `Color4` per faded node. Fade the two or three load-bearing colors (card fill, border, body text) and let small accents pop in with the display gate instead of adding a variable per node.
+- **Fading a whole subtree** needs one bound `Color4` per faded node. Fade the two or three load-bearing colors (card fill, border, body text) and let small accents pop in with the display gate.
 - **Animated font size** is bindable in principle but rarely worth a state variable per text node. Drop it.
 
 ## 3. Hand-tracked hover → hover layers
@@ -163,13 +163,13 @@ uiTransform={{ position: { top: (pos.y + '%') as PositionUnit } }}
 uiTransform={{ positionType: 'absolute', position: { top: 0 }, width: '100%', height: state.topBarHeight }}
 ```
 
-Same look, still resolution-independent, and fully editable. Reach for this rethink whenever the original animated a percent: ask what edge the element is attached to, and animate the px dimension that grows from it.
+Same look, still resolution-independent, and fully editable. Whenever the original animated a percent, ask what edge the element is attached to and animate the px dimension that grows from it.
 
 Static percent **literals** in unbound keys (`width: '90%'`, `position: { left: '14%' }`) round-trip fine and remain the best tool for fluid layout.
 
 ## 9. Sizes become plain px numbers
 
-Write every size and position as a plain px number against the virtual canvas (desktop `1920x1080`, mobile `1600x720`) — any arithmetic in a style value freezes the node. If the source computed its sizes, evaluate the arithmetic once at the reference resolution and write the resulting number. The virtual canvas handles resolution scaling at runtime, so nothing needs to scale sizes in code.
+Write every size and position as a plain px number against the virtual canvas (desktop `1920x1080`, mobile `1600x720`) — any arithmetic in a style value freezes the node. If the source computed its sizes, evaluate the arithmetic once at the reference resolution and write the resulting number; the virtual canvas handles resolution scaling at runtime.
 
 **This includes every `Label`**: give each one an explicit `uiTransform` `width` **and** `height`, and an explicit height to any container that stacks labels — never auto-size a panel from its text children. Coded UI leans on text intrinsic sizing constantly, and that is engine-dependent: Bevy measures rendered text into the layout, Unity gives an unset text dimension ~0 while still drawing the glyphs, so ported labels overlap and panels collapse on Unity while looking correct on Bevy. Wrapped text needs a height for its line count. The `<Label value={…} />` fragments earlier in this file show only the attribute under discussion and omit the box for brevity — real code always carries it.
 

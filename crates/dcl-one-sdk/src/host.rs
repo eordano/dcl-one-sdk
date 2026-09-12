@@ -14,7 +14,6 @@ const HOST_TEMPLATE: &str = include_str!("templates/host-runtime.mjs");
 
 pub struct HostOptions {
     pub dir: PathBuf,
-    /// The preview server whose room this host joins.
     pub preview: String,
     pub room: String,
 }
@@ -69,8 +68,6 @@ async fn forward_output(stdout: tokio::process::ChildStdout) {
         } else if let Some(message) = line.strip_prefix("DCL_ONE_MULTIPLAYER:detail:") {
             crate::ux::note_arrow(message);
         } else {
-            // Scene code owns ordinary console output. Preserve it verbatim;
-            // only harness lifecycle events use the SDK's structured format.
             println!("{line}");
         }
     }

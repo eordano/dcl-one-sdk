@@ -1,6 +1,6 @@
 # Migration Example: 2048 Game (SDK6 → SDK7)
 
-This is a worked example of porting a real SDK6 scene to SDK7. Snippets are minimal and focus on the *essential* migration patterns. Skip stylistic differences and concentrate on the API conversions.
+A worked example of porting a real SDK6 scene to SDK7. Snippets are minimal and focus on the *essential* API conversions, not stylistic differences.
 
 ## File structure
 
@@ -123,7 +123,7 @@ GemData.create(ent, {
 })
 ```
 
-**Note** the keep-the-name pattern: the component string ID `'gemData'` is identical to the SDK6 `@Component('gemData')` name. Preserve these IDs so multiplayer-sync, composites, and any cross-scene tooling that referenced the component by name continue to work.
+Keep-the-name pattern: the component string ID `'gemData'` is identical to the SDK6 `@Component('gemData')` name. Preserve these IDs so multiplayer-sync, composites, and any cross-scene tooling that referenced the component by name continue to work.
 
 ## Systems
 
@@ -184,7 +184,7 @@ engine.addSystem(new MoveGems(gemModels))
 ```
 
 System constructor args don't carry across cleanly. Options:
-1. Use module-level state (simplest):
+1. Module-level state (simplest):
    ```typescript
    // SDK7
    import { gemValues } from './components'
@@ -192,7 +192,7 @@ System constructor args don't carry across cleanly. Options:
      // reference gemValues / models from module scope
    }
    ```
-2. Or store the data in a singleton component so systems read it from the ECS.
+2. A singleton component the systems read from the ECS.
 
 The 2048 SDK7 port took option 1 — `gemValues` is exported from `components.ts` and imported by `systems.ts`.
 
@@ -255,7 +255,7 @@ Transform.create(map, {
 GltfContainer.create(map, { src: 'assets/Models/Map.gltf' })
 ```
 
-The parent relationship is established by setting `parent` in the child's Transform.
+The parent relationship is the `parent` field of the child's Transform.
 
 ### Primitive plane with a colored material
 
@@ -437,7 +437,7 @@ Option A is generally preferred when the swipe must happen *on* a specific objec
 
 SDK6 used `entity.alive` to track which pool entries were free. SDK7 has no `alive` flag. Two options:
 
-1. **Drop the pool** (used in Migrated-2048) — just `engine.addEntity()` every time. Acceptable for low-volume spawning.
+1. **Drop the pool** (used in Migrated-2048) — `engine.addEntity()` every time. Acceptable for low-volume spawning.
 2. **Implement a real pool** with a custom `Pooled` component:
    ```typescript
    const Pooled = engine.defineComponent('pooled', { inUse: Schemas.Boolean }, { inUse: false })

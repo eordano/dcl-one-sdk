@@ -272,13 +272,11 @@ fn marked(mark: &str, sgr: &str, message: &str) {
     }
 }
 
-/// An indented `!` in the warning colour: for something that did not happen,
-/// where the arrow would claim it did.
+/// For something that did not happen, where the arrow would claim it did.
 pub fn note_absent(message: impl AsRef<str>) {
     marked("!", "33", message.as_ref());
 }
 
-/// Wall-clock `HH:MM:SS`, local.
 pub fn clock_now() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
@@ -305,7 +303,6 @@ const GUTTER: usize = 10;
 const FLOAT_EVERY_FALLBACK: usize = 100;
 const FLOAT_AFTER: Duration = Duration::from_secs(5 * 60);
 
-/// One terminal height, asked fresh each time so a resize changes the answer.
 fn float_every() -> usize {
     let rows = terminal_size::terminal_size()
         .map(|(_, h)| h.0 as usize)
@@ -337,8 +334,6 @@ static LAST_FLOAT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// to re-float once a screenful of lines has scrolled it away.
 pub fn set_session_note(note: impl Into<String>) {
     *SESSION_NOTE.lock().unwrap_or_else(PoisonError::into_inner) = note.into();
-    // The banner just printed the address, so the clock starts now: the first
-    // re-float is five minutes away, not one burst away.
     *LAST_FLOAT.lock().unwrap_or_else(PoisonError::into_inner) = Some(std::time::Instant::now());
     SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
 }
@@ -374,9 +369,6 @@ fn emit(line: String) {
     let mut last = LAST_FLOAT.lock().unwrap_or_else(PoisonError::into_inner);
     let since = last.map(|t| t.elapsed()).unwrap_or(FLOAT_AFTER);
     if !should_float(n, float_every(), since) {
-        // The line counter is NOT reset here. Once it is past the threshold it
-        // stays past, so the float happens the moment the quiet period is also
-        // satisfied rather than waiting for another hundred lines after it.
         return;
     }
     SINCE_FLOAT.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -387,7 +379,6 @@ fn emit(line: String) {
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
     if !note.is_empty() {
-        // println, not emit: emit would count the re-float itself.
         println!("{}", tint(stdout_color(), "2", &format!("\u{2302} {note}")));
     }
 }
@@ -398,7 +389,6 @@ pub fn note_good(message: impl AsRef<str>) {
     marked("\u{2192}", "32", message.as_ref());
 }
 
-/// [`note_good`]'s arrow in [`note`]'s dim register.
 pub fn note_arrow(message: impl AsRef<str>) {
     marked("\u{2192}", "2", message.as_ref());
 }
@@ -551,7 +541,6 @@ pub fn fmt_elapsed_tinted(d: Duration, restore: &str) -> String {
     tinted(d, restore, stdout_color())
 }
 
-/// Colour is a parameter so the tinted branch is testable under capture.
 fn tinted(d: Duration, restore: &str, color: bool) -> String {
     let text = fmt_elapsed(d);
     match (color, elapsed_sgr(d)) {
@@ -607,7 +596,6 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// The error for a file under the project tree that could not be written.
 pub(crate) fn write_error(path: &Path, e: std::io::Error) -> anyhow::Error {
     UserError::new(
         format!("cannot write to {}", path.display()),

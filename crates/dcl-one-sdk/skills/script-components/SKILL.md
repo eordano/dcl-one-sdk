@@ -5,7 +5,7 @@ description: "Writing .ts script files for the Creator Hub Script component — 
 
 # Writing Script Components for Creator Hub
 
-This document explains how to write `.tsx` files that are used inside a **Script component** on an entity in a Creator Hub scene. These scripts run as self-contained classes attached to individual entities.
+How to write the `.tsx` files used inside a **Script component** on an entity in a Creator Hub scene.
 
 ## Where script files must live
 
@@ -62,7 +62,7 @@ The Creator Hub Script component has a `priority` field (separate from construct
 
 ## Constructor parameters
 
-Parameters declared in the constructor are exposed in the Creator Hub UI and can be configured per-entity. Allowed types:
+Constructor parameters are exposed in the Creator Hub UI and configured per-entity. Allowed types:
 
 - `string`
 - `number`
@@ -145,9 +145,9 @@ This is relevant for agents/MCP tools setting Script params programmatically via
 
 ## Referencing assets with `this.src`
 
-If your script uses additional assets that are only loaded via code (sound files, textures, models, etc.), they won't be automatically included in the custom item folder. You must add those files manually.
+Assets loaded only via code (sounds, textures, models) are NOT included in the custom item folder automatically — add those files manually.
 
-Always use `this.src` to build the path to bundled asset files, because the actual file location may differ when the item is used in another scene:
+Always use `this.src` to build the path to bundled asset files: the actual file location differs when the item is used in another scene.
 
 ```ts
 import { AudioSource } from '@dcl/sdk/ecs'
@@ -171,7 +171,7 @@ Instead, find child entities at runtime by iterating over the entity hierarchy a
 - **Exact-name match** fails on every duplicate after the first, because their names are auto-suffixed.
 - **A constructor `string`/`Entity` parameter for the child name** forces the user to manually rename or rewire each copy, which defeats the purpose of a reusable scripted item.
 
-The example below uses `.startsWith('Needle')` — a substring-style match — for exactly this reason.
+The example below uses `.startsWith('Needle')` for exactly this reason.
 
 ```ts
 import { engine, Entity, Transform, Name } from '@dcl/sdk/ecs'
@@ -197,11 +197,9 @@ export class ClapMeter {
 }
 ```
 
-This pattern keeps the script portable: as long as the child entities have names containing the expected substring, it works in any scene and across any number of duplicated copies.
-
 ## Defining actions (`@action`)
 
-If your script has functions that could be useful to call from other items in the scene, mark them by adding a JSDoc comment block (`/** ... */`) with an `@action` tag directly before the method. Then add an **Action** component to the entity and define a corresponding action. This lets other smart items (e.g. a button) pick and trigger this action.
+To expose a method to other items in the scene, add a JSDoc comment block (`/** ... */`) with an `@action` tag directly before it. Then add an **Action** component to the entity and define a corresponding action, so other smart items (e.g. a button) can pick and trigger it.
 
 **CRITICAL: Use ONLY the `@action` JSDoc tag — NEVER decorator syntax (`@action()` above the method). The Creator Hub parser has no decorators plugin, so a decorator makes parsing fail and ALL params and actions silently disappear from the UI.**
 
@@ -240,7 +238,7 @@ export class TreasureChest {
 }
 ```
 
-With the `@action` JSDoc tag, `open` and `close` become available in the Actions component dropdown and can be triggered by other smart items or scripts.
+`open` and `close` now appear in the Actions component dropdown.
 
 ## ActionCallback parameters
 

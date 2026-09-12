@@ -1,43 +1,7 @@
 "use strict";
-/*
- * pbmin - dependency-free drop-in replacement for `protobufjs/minimal`.
- *
- * Exposes: Writer, BufferWriter, Reader, BufferReader, util, rpc, roots, configure, build.
- * Behaviour is a faithful re-implementation of protobufjs 6.x/7.x `minimal` including the
- * node-Buffer fast paths, the Uint8Array slab pool, LongBits and the `util.Long` /
- * `configure()` re-binding protocol used by ts-proto generated code.
- *
- * No runtime dependencies. `buffer` and `long` are *optionally* inquired and absence of
- * either is handled identically to protobufjs — but NOT by protobufjs's mechanism: see
- * `inquire()` below for why the direct eval is deliberately not reproduced.
- */
 
 var protobuf = exports;
 
-/* ------------------------------------------------------------------------------------------
- * inquire - optional require, hidden from bundlers
- * ---------------------------------------------------------------------------------------- */
-
-// Upstream (@protobufjs/inquire) hides the require with a DIRECT eval:
-//
-//     eval("quire".replace(/^/, "re"))(moduleName)
-//
-// Do not restore that here, however faithful it looks. This file is bundled
-// into `prebuilt/core.js`, and a direct eval is a barrier to identifier
-// mangling for every scope enclosing it — which, after rolldown concatenates
-// every module into one top-level scope, means the WHOLE chunk. Measured on the
-// same tree, changing only this function: 463,823 B -> 557,647 B, +20.2% on the
-// runtime every scene ships. Not from this file's size (46 KB); from `__create`,
-// `__defProp` and several thousand other top-level names surviving unmangled.
-// Without the eval the same chunk is +481 B (+0.1%).
-//
-// `module.require` gets the same resolution semantics with none of that: it is
-// node's per-module require, so the node consumers behave exactly as they did,
-// and it is opaque to static analysis, so nothing tries to bundle `buffer` or
-// `long`. Under a bundler `module` is the synthetic `__commonJS` wrapper object
-// with no `.require`, so this returns null — which is the correct answer inside
-// QuickJS, where neither optional module exists. Both call sites
-// (`util.Buffer`, `util.Long`) already handle null.
 function inquire(moduleName) {
     try {
         var mod = typeof module === "object" && module && typeof module.require === "function"
@@ -48,10 +12,6 @@ function inquire(moduleName) {
     } catch (e) {} // eslint-disable-line no-empty
     return null;
 }
-
-/* ------------------------------------------------------------------------------------------
- * utf8
- * ---------------------------------------------------------------------------------------- */
 
 var REPLACEMENT = 0xFFFD;
 
@@ -131,10 +91,6 @@ utf8.write = function utf8_write(string, buffer, offset) {
     return offset - start;
 };
 
-/* ------------------------------------------------------------------------------------------
- * base64
- * ---------------------------------------------------------------------------------------- */
-
 var base64 = {};
 
 base64.length = function b64_length(string) {
@@ -208,10 +164,6 @@ base64.test = function b64_test(string) {
     return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(string);
 };
 
-/* ------------------------------------------------------------------------------------------
- * float (32/64 bit IEEE754, LE + BE)
- * ---------------------------------------------------------------------------------------- */
-
 var float = (function buildFloat() {
     var f = {};
     if (typeof Float32Array !== "undefined") {
@@ -240,7 +192,6 @@ var float = (function buildFloat() {
         f.readFloatLE = le ? readFloat_f32_cpy : readFloat_f32_rev;
         f.readFloatBE = le ? readFloat_f32_rev : readFloat_f32_cpy;
     } else {
-        // Pure-JS fallback, byte-for-byte identical to @protobufjs/float
         function writeFloat_ieee754(writeUint, val, buf, pos) {
             var sign = val < 0 ? 1 : 0;
             if (sign) val = -val;
@@ -368,10 +319,6 @@ var float = (function buildFloat() {
     return f;
 })();
 
-/* ------------------------------------------------------------------------------------------
- * pool
- * ---------------------------------------------------------------------------------------- */
-
 function pool(alloc, slice, size) {
     var SIZE = size || 8192;
     var MAX = SIZE >>> 1;
@@ -390,10 +337,6 @@ function pool(alloc, slice, size) {
         return buf;
     };
 }
-
-/* ------------------------------------------------------------------------------------------
- * LongBits
- * ---------------------------------------------------------------------------------------- */
 
 function LongBits(lo, hi) {
     this.lo = lo >>> 0;
@@ -509,10 +452,6 @@ LongBits.prototype.length = function length() {
         : part2 < 128 ? 9 : 10;
 };
 
-/* ------------------------------------------------------------------------------------------
- * util (minimal)
- * ---------------------------------------------------------------------------------------- */
-
 var util = {};
 
 util.base64 = base64;
@@ -558,7 +497,6 @@ util.isset = util.isSet = function isSet(obj, prop) {
 util.Buffer = (function () {
     try {
         var Buffer = util.inquire("buffer").Buffer;
-        // refuse to use non-node buffers if not explicitly assigned (perf reasons):
         return Buffer.prototype.utf8Write ? Buffer : null;
     } catch (e) {
         return null;
@@ -739,10 +677,6 @@ util._configure = function () {
     util._Buffer_allocUnsafe = Buffer.allocUnsafe ||
         function Buffer_allocUnsafe(size) { return new Buffer(size); };
 };
-
-/* ------------------------------------------------------------------------------------------
- * Writer
- * ---------------------------------------------------------------------------------------- */
 
 function Op(fn, len, val) {
     this.fn = fn;
@@ -947,7 +881,7 @@ Writer.prototype.ldelim = function ldelim() {
         len = this.len;
     this.reset().uint32(len);
     if (len) {
-        this.tail.next = head.next; // skip noop
+        this.tail.next = head.next;
         this.tail = tail;
         this.len += len;
     }
@@ -955,7 +889,7 @@ Writer.prototype.ldelim = function ldelim() {
 };
 
 Writer.prototype.finish = function finish() {
-    var head = this.head.next, // skip noop
+    var head = this.head.next,
         buf = this.constructor.alloc(this.len),
         pos = 0;
     while (head) {
@@ -971,10 +905,6 @@ Writer._configure = function (BufferWriter_) {
     Writer.create = createWriter();
     BufferWriter._configure();
 };
-
-/* ------------------------------------------------------------------------------------------
- * BufferWriter
- * ---------------------------------------------------------------------------------------- */
 
 function BufferWriter() {
     Writer.call(this);
@@ -1006,7 +936,7 @@ BufferWriter.prototype.bytes = function write_bytes_buffer(value) {
 };
 
 function writeStringBuffer(val, buf, pos) {
-    if (val.length < 40) // plain js is faster for short strings
+    if (val.length < 40)
         util.utf8.write(val, buf, pos);
     else if (buf.utf8Write)
         buf.utf8Write(val, pos);
@@ -1021,10 +951,6 @@ BufferWriter.prototype.string = function write_string_buffer(value) {
         this._push(writeStringBuffer, len, value);
     return this;
 };
-
-/* ------------------------------------------------------------------------------------------
- * Reader
- * ---------------------------------------------------------------------------------------- */
 
 function indexOutOfRange(reader, writeLength) {
     return RangeError("index out of range: " + reader.pos + " + " + (writeLength || 1) + " > " + reader.len);
@@ -1065,7 +991,7 @@ Reader.create = createReader();
 Reader.prototype._slice = util.Array.prototype.subarray || util.Array.prototype.slice;
 
 Reader.prototype.uint32 = (function read_uint32_setup() {
-    var value = 4294967295; // optimizer type-hint
+    var value = 4294967295;
     return function read_uint32() {
         value = (this.buf[this.pos] & 127) >>> 0; if (this.buf[this.pos++] < 128) return value;
         value = (value | (this.buf[this.pos] & 127) << 7) >>> 0; if (this.buf[this.pos++] < 128) return value;
@@ -1093,7 +1019,7 @@ Reader.prototype.sint32 = function read_sint32() {
 function readLongVarint() {
     var bits = new LongBits(0, 0);
     var i = 0;
-    if (this.len - this.pos > 4) { // fast route (lo)
+    if (this.len - this.pos > 4) {
         for (; i < 4; ++i) {
             bits.lo = (bits.lo | (this.buf[this.pos] & 127) << i * 7) >>> 0;
             if (this.buf[this.pos++] < 128)
@@ -1115,7 +1041,7 @@ function readLongVarint() {
         bits.lo = (bits.lo | (this.buf[this.pos++] & 127) << i * 7) >>> 0;
         return bits;
     }
-    if (this.len - this.pos > 4) { // fast route (hi)
+    if (this.len - this.pos > 4) {
         for (; i < 5; ++i) {
             bits.hi = (bits.hi | (this.buf[this.pos] & 127) << i * 7 + 3) >>> 0;
             if (this.buf[this.pos++] < 128)
@@ -1137,7 +1063,7 @@ Reader.prototype.bool = function read_bool() {
     return this.uint32() !== 0;
 };
 
-function readFixed32_end(buf, end) { // note: uses `end`, not `pos`
+function readFixed32_end(buf, end) {
     return (buf[end - 4]
         | buf[end - 3] << 8
         | buf[end - 2] << 16
@@ -1172,7 +1098,7 @@ Reader.prototype.float = function read_float() {
 
 Reader.prototype.double = function read_double() {
     if (this.pos + 8 > this.len)
-        throw indexOutOfRange(this, 4); // NOTE: protobufjs reports 4 here, not 8. Kept for parity.
+        throw indexOutOfRange(this, 4);
     var value = util.float.readDoubleLE(this.buf, this.pos);
     this.pos += 8;
     return value;
@@ -1263,10 +1189,6 @@ Reader._configure = function (BufferReader_) {
     });
 };
 
-/* ------------------------------------------------------------------------------------------
- * BufferReader
- * ---------------------------------------------------------------------------------------- */
-
 function BufferReader(buffer) {
     Reader.call(this, buffer);
 }
@@ -1278,15 +1200,11 @@ BufferReader._configure = function () {
 };
 
 BufferReader.prototype.string = function read_string_buffer() {
-    var len = this.uint32(); // modifies pos
+    var len = this.uint32();
     return this.buf.utf8Slice
         ? this.buf.utf8Slice(this.pos, this.pos = Math.min(this.pos + len, this.len))
         : this.buf.toString("utf-8", this.pos, this.pos = Math.min(this.pos + len, this.len));
 };
-
-/* ------------------------------------------------------------------------------------------
- * rpc (minimal) + roots
- * ---------------------------------------------------------------------------------------- */
 
 function Service(rpcImpl, requestDelimited, responseDelimited) {
     if (typeof rpcImpl !== "function")
@@ -1350,17 +1268,8 @@ Service.prototype.end = function end(endedByRPC) {
     return this;
 };
 
-/* ------------------------------------------------------------------------------------------
- * exports
- * ---------------------------------------------------------------------------------------- */
-
 protobuf.build = "minimal";
 
-// Provenance. Upstream has no `impl`, and nothing else on this surface tells
-// the two apart: the error strings are deliberately identical and every
-// property name is reproduced. Once this codec is bundled and minified into
-// `prebuilt/core.js`, a string literal on the exported namespace is the only
-// thing that survives to answer "which protobuf is in this artifact?".
 protobuf.impl = "dcl-one-sdk-pbmin.1";
 
 protobuf.Writer = Writer;

@@ -5,9 +5,7 @@ description: Iterate on a local Decentraland SDK7 scene against a running Explor
 
 # Unity Explorer MCP Scene Iteration
 
-Drive a running Decentraland Explorer build through its MCP automation server to build and test SDK7 scenes autonomously: edit the scene, watch it hot-reload, move the camera and player, take screenshots, and verify against what the code should produce.
-
-The connected `mcp__explorer__*` tools are self-describing — each carries its name, arguments, and output shape. Treat that as the authoritative tool catalog; the names used below (`get_scene_state`, `get_scene_logs`, `screenshot`, `teleport`, `move_to`, `walk`, `look_at`, `set_camera_pose`, `set_camera_mode`, `list_scene_entities`, `get_entity_details`, `get_player_state`, `click_entity`, `send_chat`, `trigger_emote`, `reload_scene`, `get_scene_content_stats`, `get_scene_content_breakdown`, `get_performance_stats`) are the common ones.
+The connected `mcp__explorer__*` tools are self-describing — each carries its name, arguments, and output shape — and are the authoritative tool catalog; the common ones (`get_scene_state`, `get_scene_logs`, `screenshot`, `teleport`, `move_to`, `walk`, `look_at`, `set_camera_pose`, `set_camera_mode`, `list_scene_entities`, `get_entity_details`, `get_player_state`, `click_entity`, `send_chat`, `trigger_emote`, `reload_scene`, `get_scene_content_stats`, `get_scene_content_breakdown`, `get_performance_stats`).
 
 Deeper reference, loaded only when the task reaches it:
 
@@ -22,7 +20,7 @@ Certain points in this skill are **gates**: you ask, call no tool after asking, 
 
 ## Load the SDK skills (before anything, either way)
 
-This skill only covers driving the Explorer; the SDK7 API knowledge (composite-first rule, component reference) lives in the other topic skills of the same `decentraland/sdk-skills` package this skill ships from (entry point `sdk-scenes`, plus `create-scene`, `add-3d-models`, etc.), and parts of the API (e.g. native `TriggerArea`) are newer than training data. You need them whether or not the Explorer ends up in play, so do this before the pre-flight below.
+This skill only covers driving the Explorer; the SDK7 API knowledge (composite-first rule, component reference) lives in the other topic skills of the same `decentraland/sdk-skills` package (entry point `sdk-scenes`, plus `create-scene`, `add-3d-models`, etc.), and parts of the API (e.g. native `TriggerArea`) are newer than training data. You need them whether or not the Explorer ends up in play, so do this before the pre-flight below.
 
 Load them: session skills first, then the filesystem — scene-local (`.claude/skills/` in the scene folder) and global (`~/.claude/skills/`). This is done when you can **name the topic skills available to you** — not when you've noticed they exist. If they cannot be loaded — e.g. only `unity-explorer-mcp` itself was installed, not the whole package — **skills-install gate**: pull in the rest of the package's topic skills from that same source? Recommend it. On yes, ask at which level — scene-local or global — and run the matching command:
 
@@ -52,7 +50,7 @@ This skill fires on its own — the mere presence of an `mcp__explorer__*` tool 
      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
    ```
 
-   Two launch paths produce the same server, and you cannot tell them apart from the probe: `npm run start -- --mcp` from the CLI, and the **Creator Hub**'s scene **Preview** button with the **MCP** checkbox ticked (it passes `--mcp` to the same preview process). Same endpoint, same tools, same behaviour — a Creator Hub launch is never the reason a connection fails, so recognise it as a normal setup rather than an anomaly to relaunch out of.
+   Two launch paths produce the same server, and you cannot tell them apart from the probe: `npm run start -- --mcp` from the CLI, and the **Creator Hub**'s scene **Preview** button with the **MCP** checkbox ticked (it passes `--mcp` to the same preview process). Same endpoint, same tools — a Creator Hub launch is never the reason a connection fails, so recognise it as a normal setup rather than an anomaly to relaunch out of.
 
    **Server found** (tool answer or `serverInfo` result) — **launch/kill gate**: use the already-running Explorer, or start the scene from scratch with the MCP flag?
    - *Use it*: launch nothing. If port 8000 isn't serving the target scene folder (`lsof -nP -i :8000 -sTCP:LISTEN`, then check the PID's cwd), kill whatever holds it and run `npm run start -- --no-client`. Skip step 2 if the tools are already available.
@@ -66,7 +64,7 @@ This skill fires on its own — the mere presence of an `mcp__explorer__*` tool 
    npm install && npm run start -- --mcp
    ```
 
-   Alternatively the user can launch from the **Creator Hub**: enable the **"Enable MCP Server"** checkbox in the scene's preview settings (only shown when the scene's `@dcl/sdk-commands` version supports the `--mcp` flag), then hit **Preview**. Equivalent to the command above in every respect that matters here.
+   Alternatively the user can launch from the **Creator Hub**: enable the **"Enable MCP Server"** checkbox in the scene's preview settings (only shown when the scene's `@dcl/sdk-commands` version supports the `--mcp` flag), then hit **Preview**.
 
    This serves the scene at `http://127.0.0.1:8000`, auto-launches the installed Decentraland client connected to it with the MCP server enabled (port 8123; `--mcp-port <port>` picks another and implies `--mcp` — adjust the 8123 URLs in steps 1 and 2 to match), and hot-reloads the scene whenever a source file changes. Useful extra flags: `--port <port>` (dev-server port; the launched client follows it automatically), `--position x,y` (spawn parcel), `--skip-auth-screen`, `-n` (force a new client instance), `--multi-instance` (allow concurrent Explorer instances), `--no-client` (serve only, launch nothing). Anything after a second standalone `--` is forwarded verbatim into the Explorer launch as extra parameters, e.g. `npm run start -- --mcp -- --windowed-mode --resolution 1280x720` (npm consumes the first `--`). If the command rejects `--mcp` as an unknown option, the scene's `@dcl/sdk-commands` predates the flag — update `@dcl/sdk`, or launch a specific build by hand ("Launching a specific Explorer build manually" in [`reference/setup.md`](reference/setup.md)). If the CLI prints "Please download & install the Decentraland Desktop Client" the dev server is fine but no client is installed — install one, or point the launch at a specific build the same way.
 
@@ -138,7 +136,7 @@ Call it by absolute path — your cwd is the scene folder, not this skill's. `<s
 
 Frames default to `$TMPDIR/mcp-shots`, deliberately outside the scene folder: anything left in the project gets uploaded on deploy and counts against the per-parcel MB limits. Keep `-d`/`-o` targets out of the scene too — or add the directory to `.dclignore` if the user wants the frames kept beside their scene.
 
-Requires curl + python3; pass `-p <port>` when not on 8123. `Read` only the frames you actually need to inspect — capture many, look at few. For before/after comparisons, capture both to disk and read just those two. Use `maxWidth` 640 for quick checks and 1280 only for final verification. Captures are serialized server-side (concurrent requests are rejected), so keep burst intervals ≥ 0.2s.
+Requires curl + python3; pass `-p <port>` when not on 8123. `Read` only the frames you actually need to inspect — capture many, look at few (a before/after comparison reads exactly those two). Use `maxWidth` 640 for quick checks and 1280 only for final verification. Captures are serialized server-side (concurrent requests are rejected), so keep burst intervals ≥ 0.2s.
 
 ## Scene health & recovery
 
@@ -147,7 +145,7 @@ Requires curl + python3; pass `-p <port>` when not on 8123. `Read` only the fram
 - After `teleport` or `reload_scene`, always re-check `get_scene_state` before interacting; readiness can lag a few seconds.
 - One parcel is 16×16 m; parcel `(x, y)` spans world positions `(16x..16x+16, 16y..16y+16)`. `--position 0,0` spawns at parcel 0,0.
 - If the connection drops, the client probably crashed or was closed — relaunch it the same way it was started (`npm run start -- --mcp`, or the manual launch line in [`reference/setup.md`](reference/setup.md)); the MCP endpoint URL stays the same.
-- **Missing tools**: `mcp__explorer__*` tools absent in-session is the **bind gate** — go back to Setup step 2, ask the user to reconnect the server (`/mcp` menu in the terminal CLI, `/mcp reconnect explorer` in the VS Code extension) or open a fresh session/conversation tab with the Explorer left running, and end your turn there. The HTTP fallback is in [`reference/curl-fallback.md`](reference/curl-fallback.md), to be opened only after they have been warned of its costs and explicitly chosen it.
+- **Missing tools**: `mcp__explorer__*` tools absent in-session is the **bind gate** — go back to Setup step 2, ask the user to reconnect the server or open a fresh session/conversation tab with the Explorer left running, and end your turn there. The HTTP fallback ([`reference/curl-fallback.md`](reference/curl-fallback.md)) opens only after they have been warned of its costs and explicitly chosen it.
 - After a hot reload the player can end up off-parcel (e.g. parcel `0,-1`); `get_scene_state` then reports a null scene and `reload_scene` fails with "no scene at the current parcel". Check `get_player_state` → `parcel`, `move_to` back inside, and the scene loads again.
 - **One file write per change.** Each save triggers a rebuild, so a multi-part edit split across saves breaks the scene in between — mildly, when usage and import land in separate saves (a transient `SceneError: X is not defined`), or terminally: two saves seconds apart can make the Explorer load a mid-write bundle → `SyntaxError: Invalid or unexpected token` at scene start → the scene drops out and `get_scene_state` reports `scene: null` while you're standing on the parcel. From that state nothing recovers in-session: `reload_scene` errors ("no scene at the current parcel"), `/reload` hangs, the minimap RELOAD SCENE button no-ops, and moving off-parcel and back does not bring it back — only exiting/re-entering play mode (editor) or relaunching the standalone build. So batch multi-part changes into ONE write, write new modules before wiring them in, and after any save landing seconds after a previous one verify `get_scene_state` still shows a scene before saving again.
 - The `teleport` tool silently no-ops in local-scene-development mode: `/goto` teleports are disallowed there (chat shows "Teleport is not allowed in local scene development mode") but the tool still answers "Arrived at (x,y)". Use `move_to` for repositioning in local-scene sessions.

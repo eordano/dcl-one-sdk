@@ -4,30 +4,7 @@
 
 ### Basic Connection
 
-```typescript
-import { executeTask } from '@dcl/sdk/ecs'
-
-executeTask(async () => {
-	const ws = new WebSocket('wss://example.com/ws')
-
-	ws.onopen = () => {
-		console.log('Connected to WebSocket')
-		ws.send('Hello Server!')
-	}
-
-	ws.onmessage = (event) => {
-		console.log('Received:', event.data)
-	}
-
-	ws.onerror = (error) => {
-		console.error('WebSocket error:', error)
-	}
-
-	ws.onclose = () => {
-		console.log('Disconnected from WebSocket')
-	}
-})
-```
+`new WebSocket(url)` inside `executeTask`, with `onopen` / `onmessage` / `onerror` / `onclose` handlers — see the skill's **WebSocket Connections** section.
 
 ### Reconnection with Exponential Backoff
 
@@ -65,7 +42,7 @@ executeTask(async () => {
 
 ### Heartbeat Pattern
 
-Send periodic pings to keep the connection alive:
+Periodic pings keep the connection alive:
 
 ```typescript
 import { timers } from '@dcl/sdk/ecs'
@@ -177,7 +154,7 @@ executeTask(async () => {
 
 ## MessageBus Typed Payloads
 
-Define types for message data to keep code safe:
+Type the message data:
 
 ```typescript
 import { MessageBus } from '@dcl/sdk/message-bus'
@@ -215,7 +192,7 @@ bus.on('chat', (msg: ChatMessage) => {
 
 ### Optimistic Updates
 
-Apply changes locally immediately, then let sync propagate. With `syncEntity`, local mutations are shown instantly while the SDK handles replication:
+Apply changes locally immediately, then let sync propagate: with `syncEntity`, local mutations show instantly while the SDK handles replication.
 
 ```typescript
 // Player clicks a door — update locally, sync handles the rest
@@ -281,9 +258,9 @@ This keeps the acting player's feedback instant while the authoritative state st
 
 ### Multiplayer Testing
 
-Open multiple browser windows to test multiplayer locally:
+Open multiple browser windows — each is a separate player:
 
-1. Use the Creator Hub Preview button multiple times (each window is a separate player)
+1. Use the Creator Hub Preview button multiple times
 2. Or use the URL: `decentraland://realm=http://127.0.0.1:8000&local-scene=true&debug=true`
 
 ```typescript

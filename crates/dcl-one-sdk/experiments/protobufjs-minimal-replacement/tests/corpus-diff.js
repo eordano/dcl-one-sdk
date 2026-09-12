@@ -1,17 +1,10 @@
 "use strict";
-// Phase 1: differential round-trip of every message type in the @dcl/ecs corpus.
 
 const H = require("./harness");
 
 const SEED = Number(process.env.SEED || 0xC0FFEE);
 const ITERS = Number(process.env.ITERS || 200);
 
-// Environment emulation must happen BEFORE the corpus is loaded, because the two ts-proto
-// modules that use int64 run `if (_m0.util.Long !== Long) { _m0.util.Long = Long; _m0.configure(); }`
-// at module-evaluation time - the branch we most need to exercise.
-//   NO_BUFFER=1 : no node Buffer            (scene runtime: plain Writer/Reader + @protobufjs utf8)
-//   NO_LONG=1   : util.Long starts unset    (scene runtime: `inquire("long")` cannot resolve,
-//                 so the gen files must install Long themselves and call configure())
 {
     const impls = [H.loadImpl("ref"), H.loadImpl("mine")];
     const notes = [];

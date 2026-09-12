@@ -237,31 +237,7 @@ PointerEvents.create(myEntity, {
 
 ## Trigger Areas
 
-### Basic Setup
-```typescript
-import { engine, Transform, TriggerArea } from '@dcl/sdk/ecs'
-import { triggerAreaEventsSystem } from '@dcl/sdk/ecs'
-import { Vector3 } from '@dcl/sdk/math'
-
-const area = engine.addEntity()
-TriggerArea.setBox(area) // or TriggerArea.setSphere(area)
-Transform.create(area, {
-  position: Vector3.create(8, 0, 8),
-  scale: Vector3.create(4, 4, 4)
-})
-
-triggerAreaEventsSystem.onTriggerEnter(area, (event) => {
-  console.log('Entity entered trigger:', event.trigger.entity)
-})
-
-triggerAreaEventsSystem.onTriggerExit(area, () => {
-  console.log('Entity exited trigger')
-})
-
-triggerAreaEventsSystem.onTriggerStay(area, () => {
-  // Called every frame while an entity is inside
-})
-```
+Basic setup (`TriggerArea.setBox` / `setSphere` + `onTriggerEnter`/`Stay`/`Exit`) is in the skill's Trigger Areas section.
 
 ### ColliderLayer Filtering
 ```typescript

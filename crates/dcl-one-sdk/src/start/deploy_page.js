@@ -15,9 +15,6 @@
     pollTimer = setTimeout(refresh, 1800);
   };
 
-  /* The wallet panel lives inside the polled region, so swapping it would
-     wipe a prompt mid-answer. While a signer is live and the run shape is
-     unchanged, the fresh render is identical anyway and is dropped. */
   const morph = (html) => {
     const doc = parsePage(html);
     const live = shape(document);
@@ -27,13 +24,6 @@
       settle();
       return;
     }
-    /* Still waiting: update ONLY the feedback region, in place. Replacing the
-       whole page every poll reflowed the card and the payload list around it,
-       so the progress landed in a spot that jumped each tick. Swapping just
-       #run-status keeps everything else fixed and loads the real feedback
-       where it already sits. A genuine state change (idle<->running<->done)
-       still renders the whole card, so the publish button and the final
-       result arrive together. */
     const liveRegion = document.getElementById('run-status');
     const nextRegion = doc.getElementById('run-status');
     const bothRunning = live.startsWith('running|') && next.startsWith('running|');
@@ -46,8 +36,6 @@
     const nextMain = doc.querySelector('main.dash');
     const liveMain = document.querySelector('main.dash');
     if (nextMain && liveMain) liveMain.replaceWith(nextMain);
-    /* The nav's "signing…" / "live" badge sits outside main; a finished run
-       must not leave the header saying signing while the card says Published. */
     const nextBadge = doc.getElementById('deploy-badge');
     const liveBadge = document.getElementById('deploy-badge');
     if (nextBadge && liveBadge) liveBadge.textContent = nextBadge.textContent;

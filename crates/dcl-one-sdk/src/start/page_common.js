@@ -15,18 +15,11 @@ const pageToast = (() => {
     timer = setTimeout(() => el.remove(), holdMs || (isError ? 6000 : 2200));
   };
 })();
-/* DOMParser parses with scripting off, so noscript children come out as real
-   nodes — morphing one in would hand the live page a working meta refresh. */
 const parsePage = (html) => {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   for (const n of doc.querySelectorAll('noscript')) n.remove();
   return doc;
 };
-/* Every wallet button (the bar's half and the copies inside the target
-   page's empty columns): eth_requestAccounts, then the same gated POST the
-   pasted-address route takes — the token rides in from the sibling DCL form,
-   the prefix from its action. No signature: revealing an address is all a
-   direct wallet connect can honestly claim. */
 (() => {
   const wallets = document.querySelectorAll('[data-wallet]');
   if (!wallets.length) return;
@@ -57,10 +50,6 @@ const parsePage = (html) => {
   for (const wallet of wallets) wallet.addEventListener('click', () => connect(wallet));
 })();
 
-// A page rendered before its remote answers arrived marks itself with
-// #page-warming; the server is warming the caches in the background, so a
-// short-fuse reload lands on the full render. Failure sentences are cached
-// values too, so this always terminates.
 (() => {
   if (document.getElementById('page-warming')) setTimeout(() => location.reload(), 1200);
 })();

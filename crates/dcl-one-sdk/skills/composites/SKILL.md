@@ -5,9 +5,7 @@ description: "Reference for the Decentraland `.composite` JSON format that decla
 
 # Composites
 
-This skill carries the shared composite format reference used by other Decentraland skills (`create-scene`, `add-3d-models`, `sdk-scenes`).
-
-The mandatory workflow below applies to EVERY composite you author or edit: compute scene bounds first (Step 0), consult the format catalog in the reference while writing entities, then run the validation gate at the end before finishing.
+The shared composite format reference used by `create-scene`, `add-3d-models` and `sdk-scenes`. The workflow below is mandatory for EVERY composite you author or edit: compute scene bounds first (Step 0), consult the format catalog in the reference while writing entities, then run the validation gate before finishing.
 
 ## Step 0 — Read scene.json and Compute Bounds (MANDATORY)
 
@@ -61,7 +59,7 @@ console.log('World min:', minW.map(v=>v.toFixed(2)), 'max:', maxW.map(v=>v.toFix
 "
 ```
 
-**Measure per model — don't guess or hard-code.** Extents vary wildly: running the script above on a typical tree often reveals ~11 m of reach in one horizontal direction from the origin (safe minimum origin z≥12), while a column reaches under 1 m in every direction. Always compute the box for the specific GLB you're placing.
+**Measure per model — don't guess or hard-code.** Extents vary wildly: a typical tree often reaches ~11 m in one horizontal direction from the origin (safe minimum origin z≥12), while a column reaches under 1 m in every direction.
 
 **Rule:** For every GLB model, compute:
 
@@ -146,13 +144,13 @@ Missing entries here are the root cause of "entity renders but is invisible in t
 
 ## Post-Write Validation
 
-After writing the composite, **run the SDK build** to verify:
+After writing the composite, **run the SDK build**:
 
 ```bash
 npx sdk-commands build
 ```
 
-The build must pass with zero errors. If it fails, the composite is invalid. Common errors:
+It must pass with zero errors; if it fails, the composite is invalid. Common errors:
 
 - `Composite references undefined component "X". Ensure provider.schemas was registered pre-seal via setCompositeProvider().` (older/released SDKs word this as `"X is not defined and there is no schema to define it"`) → missing `jsonSchema` on non-core component, or `inspector::*` component that shouldn't be there
 - TypeScript errors → fix generated scripts

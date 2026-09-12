@@ -1,8 +1,6 @@
 # Drag sliders in editable UI
 
-Read this for any slider, scrub bar or drag handle in a UI that must stay editable in the Creator Hub. It is the worked port of build-ui's `screenDelta` drag pattern (`build-ui/references/ui-sliders.md`) onto this contract — **built and verified in-world** in an SDK 7.27.0 scene, zero opaque nodes, zero frozen nodes.
-
-The mechanic survives the port intact. Only two things change shape: the drag *start* becomes an ordinary action body, and the release catcher stops being conditionally rendered.
+Read this for any slider, scrub bar or drag handle in a UI that must stay editable in the Creator Hub. It is the worked port of build-ui's `screenDelta` drag pattern (`build-ui/references/ui-sliders.md`) onto this contract — **built and verified in-world** in an SDK 7.27.0 scene, zero opaque nodes, zero frozen nodes. The mechanic survives intact; only two things change shape: the drag *start* becomes an ordinary action body, and the release catcher stops being conditionally rendered.
 
 ## How the pattern maps onto the contract
 

@@ -16,13 +16,13 @@ and no upstream protobufjs file is shipped at all. This directory is therefore
 *source*, not an experiment — treat an edit to `index.js` as an edit to shipped
 code, and run the suite below before and after.
 
-**Why it was shelved, and what changed.** The size argument was that it removes
-`protobufjs` plus its `@protobufjs/*` micro-packages at the cost of ~50 KB of
-our own, for a net saving under 1% of the blob — which did not justify
-permanently owning a hand-written codec on the critical path of the scene
-protocol. Measured on the actual swap it is **-34 files, -51,649 B unpacked,
--25,873 B zipped** (447 -> 413 files). So the size argument has not improved,
-and it is not why this shipped.
+**Why it was shelved, and what changed.** The size argument: removing
+`protobufjs` plus its `@protobufjs/*` micro-packages costs ~50 KB of our own,
+a net saving under 1% of the blob — not enough to justify permanently owning a
+hand-written codec on the critical path of the scene protocol. Measured on the
+actual swap it is **-34 files, -51,649 B unpacked, -25,873 B zipped**
+(447 -> 413 files). So the size argument has not improved, and it is not why
+this shipped.
 
 What changed is the risk. One direction down, one direction up — and the second
 is a deliberate trade, not an oversight:
@@ -38,8 +38,8 @@ is a deliberate trade, not an oversight:
 * **The scene runtime is now a consumer, and that is a risk increase.**
   `swap_pbmin_into_tree()` redirects the install tree's `minimal.js` before
   `build_chunks()` resolves it, so `prebuilt/core.js` bundles this code and
-  every scene runs it inside QuickJS. Two things follow, and both are worse than
-  the node-only arrangement they replace: a defect here is visible in every
+  every scene runs it inside QuickJS. Two things follow, both worse than the
+  node-only arrangement they replace: a defect here is visible in every
   deployed scene rather than in one dev-machine process, and the suite runs
   under V8, so QuickJS remains an untested axis — a real one, since this code
   reaches for `Buffer`, `Uint8Array` fast paths and `Math.fround`.

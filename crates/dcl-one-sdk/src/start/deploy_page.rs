@@ -135,7 +135,6 @@ pub(super) struct DeployState {
     rights: deploy_rights::RightsCache,
     /// Publishes this preview has seen, newest first.
     history: Mutex<VecDeque<PastRun>>,
-    /// A Decentraland-account sign-in in flight, if any.
     connect: Mutex<Option<Connect>>,
     /// Cache keys a background warm-up is already fetching, so a warming
     /// page's reloads do not each start another fetch.
@@ -145,8 +144,23 @@ pub(super) struct DeployState {
     identity: Mutex<Option<deploy::DeployIdentity>>,
 }
 
-fn identity_slot(st: &AppState) -> MutexGuard<'_, Option<deploy::DeployIdentity>> {
-    lock(&st.deploy.identity)
+/// One accessor per [`DeployState`] slot, each holding its lock.
+macro_rules! slot {
+    ($($name:ident: $field:ident => $ty:ty;)*) => {$(
+        fn $name(st: &AppState) -> MutexGuard<'_, $ty> {
+            lock(&st.deploy.$field)
+        }
+    )*};
+}
+slot! {
+    identity_slot: identity => Option<deploy::DeployIdentity>;
+    connect_slot: connect => Option<Connect>;
+    warm_slot: warming => HashSet<String>;
+    address_slot: address => Option<String>;
+    history_slot: history => VecDeque<PastRun>;
+    cache: preview => Vec<(PathBuf, Instant, Arc<PreviewResult>)>;
+    signer_slot: signer => Option<Arc<crate::linker::LinkerState>>;
+    runs: run => Option<Run>;
 }
 
 /// The live delegated identity; an expired one is dropped here so the page
@@ -160,34 +174,6 @@ fn live_identity(st: &AppState) -> Option<deploy::DeployIdentity> {
         }
         other => other.cloned(),
     }
-}
-
-fn connect_slot(st: &AppState) -> MutexGuard<'_, Option<Connect>> {
-    lock(&st.deploy.connect)
-}
-
-fn warm_slot(st: &AppState) -> MutexGuard<'_, HashSet<String>> {
-    lock(&st.deploy.warming)
-}
-
-fn address_slot(st: &AppState) -> MutexGuard<'_, Option<String>> {
-    lock(&st.deploy.address)
-}
-
-fn history_slot(st: &AppState) -> MutexGuard<'_, VecDeque<PastRun>> {
-    lock(&st.deploy.history)
-}
-
-fn cache(st: &AppState) -> MutexGuard<'_, Vec<(PathBuf, Instant, Arc<PreviewResult>)>> {
-    lock(&st.deploy.preview)
-}
-
-fn signer_slot(st: &AppState) -> MutexGuard<'_, Option<Arc<crate::linker::LinkerState>>> {
-    lock(&st.deploy.signer)
-}
-
-fn runs(st: &AppState) -> MutexGuard<'_, Option<Run>> {
-    lock(&st.deploy.run)
 }
 
 /// A "connect a Decentraland account" hand-off: the authorize page and what
@@ -207,7 +193,6 @@ enum ConnectState {
 /// How long a sign-in may stay pending before the page stops waiting on it.
 const CONNECT_WINDOW: Duration = Duration::from_secs(300);
 
-/// One finished publish, as the History tab tells it.
 #[derive(Clone)]
 pub(super) struct PastRun {
     at_ms: i64,
@@ -304,9 +289,6 @@ fn history_rows(st: &AppState, root: &Path) -> Vec<PastRun> {
 /// per scene.
 async fn cached_preview(st: &AppState, project: &Project) -> Arc<PreviewResult> {
     let root = project.root.clone();
-    // While a publish is running the walk's answer is irrelevant (and the
-    // page polls every ~2s, faster than the TTL): serve whatever is held
-    // rather than re-walking the tree beside the deploy's own build.
     let ttl = match runs(st).as_ref().map(|r| &r.state) {
         Some(RunState::Running) => Duration::MAX,
         _ => PREVIEW_CACHE_TTL,
@@ -345,7 +327,6 @@ pub(super) fn pending_sign_panel(st: &AppState, prefix: &str) -> Option<String> 
     ))
 }
 
-/// The account every page's bar shows, when one is known.
 pub(super) fn known_account(st: &AppState) -> Option<String> {
     address_slot(st).clone()
 }
@@ -414,7 +395,6 @@ fn next_run_id() -> u64 {
 
 enum RunState {
     Running,
-    /// The upload's outcome line.
     Done(String),
     Failed(String),
     /// The payload moved under the page. Nothing was published.
@@ -608,44 +588,27 @@ fn reanchor_preview(st: &AppState) -> Option<String> {
 /// inner JoinHandle is awaited so a deploy panic still reaches a terminal
 /// state.
 fn launch(st: Arc<AppState>, root: PathBuf, id: u64) {
-    // An automatic run may prepare an interactive wallet request, but may
-    // never consume a delegated key if a sign-in completes during the GET.
     let automatic = runs(&st).as_ref().is_some_and(|r| r.id == id && r.auto);
     let identity = if automatic { None } else { live_identity(&st) };
-    let host_signer = match identity.is_some() {
-        true => None,
-        false => {
-            let register_st = st.clone();
-            Some(crate::linker::HostSigner {
-                register: Arc::new(move |state| {
-                    // The build just regenerated derived files (main.crdt and
-                    // the release twins take fresh mtimes with byte-identical
-                    // content); re-anchor the run's fingerprint to the tree as
-                    // the build left it, or the next poll reads that
-                    // regeneration as drift and re-mints forever, wiping this
-                    // wallet panel each cycle. Walked before the lock: a scene
-                    // walk must not run under runs().
-                    let rebuilt = reanchor_preview(&register_st);
-                    // Only the run that still owns the slot gets to install
-                    // its signer: a build that finished after its run was
-                    // re-minted must not hand the wallet panel a stale
-                    // entity. Lock order runs → signer, shared with
-                    // [`drift_reclaim`].
-                    let mut slot = runs(&register_st);
-                    if let Some(r) = slot.as_mut() {
-                        if r.id == id {
-                            r.signing = Some("/deploy".to_string());
-                            if let Some(print) = rebuilt {
-                                r.print = print;
-                            }
-                            *signer_slot(&register_st) = Some(state);
+    let host_signer = identity.is_none().then(|| {
+        let register_st = st.clone();
+        crate::linker::HostSigner {
+            register: Arc::new(move |state| {
+                let rebuilt = reanchor_preview(&register_st);
+                let mut slot = runs(&register_st);
+                if let Some(r) = slot.as_mut() {
+                    if r.id == id {
+                        r.signing = Some("/deploy".to_string());
+                        if let Some(print) = rebuilt {
+                            r.print = print;
                         }
+                        *signer_slot(&register_st) = Some(state);
                     }
-                }),
-                url: format!("http://127.0.0.1:{}/deploy", st.port),
-            })
+                }
+            }),
+            url: format!("http://127.0.0.1:{}/deploy", st.port),
         }
-    };
+    });
     let opts = deploy::DeployOptions {
         dir: root.clone(),
         target: None,
@@ -841,8 +804,6 @@ fn drift_reclaim(st: &AppState, target: String, print: &str) -> Option<u64> {
         return None;
     }
     {
-        // Lock order runs → signer, same as the register closure in
-        // [`launch`], so the two cannot deadlock.
         let mut signer = signer_slot(st);
         if signer
             .as_ref()
@@ -865,9 +826,6 @@ fn drift_reclaim(st: &AppState, target: String, print: &str) -> Option<u64> {
 /// its wallet — harvests the address and the history row before the signer
 /// slot empties.
 fn finish(st: &AppState, id: u64, state: RunState) {
-    // An auto-started run nobody signed is not news: the page was opened and
-    // left, that is all. The slot clears so the next visit builds afresh, and
-    // neither a failure panel nor a history row claims something happened.
     if let RunState::Failed(why) = &state {
         if why.contains("no signature arrived") {
             let mut slot = runs(st);
@@ -1011,8 +969,6 @@ pub(super) async fn target_connect(
         }
     };
     let id = hex(&rand::random::<[u8; 16]>());
-    // Millisecond ISO, because the page round-trips it through a JS Date and
-    // the signed text must come out byte-identical.
     let expiration = (chrono::Utc::now() + chrono::Duration::hours(1))
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
@@ -1065,8 +1021,6 @@ fn spawn_connect_poll(
                         Err(_) => Err("the relay sent an unreadable answer".to_string()),
                     };
                 }
-                // 204 is "nothing yet"; a 4xx would repeat forever, so it
-                // fails the wait once instead.
                 if (400..500).contains(&status) {
                     break Err(format!("the relay refused the wait (HTTP {status})"));
                 }
@@ -1486,19 +1440,13 @@ fn run_panel_for(run: Option<&Run>, sign_panel: Option<&str>) -> String {
             )
         }
         RunState::Done(message) => {
-            // Where it went and what it is — the head already names the
-            // scene, the footer carries Jump in, and the server's status
-            // code is the log's business.
             let detail = match deployed_parts(message) {
-                Some((entity, Some(server), _)) => format!(
-                    r#"<p class="note">{} on {}</p><span class="dep__cid">{}</span>"#,
+                Some((entity, server, _)) => format!(
+                    r#"<p class="note">{}{}</p><span class="dep__cid">{}</span>"#,
                     esc(&r.target),
-                    esc(server),
-                    esc(entity)
-                ),
-                Some((entity, None, _)) => format!(
-                    r#"<p class="note">{}</p><span class="dep__cid">{}</span>"#,
-                    esc(&r.target),
+                    server
+                        .map(|s| format!(" on {}", esc(s)))
+                        .unwrap_or_default(),
                     esc(entity)
                 ),
                 None => format!(r#"<p class="note">{}</p>"#, esc(message)),
@@ -1529,7 +1477,6 @@ fn run_panel_for(run: Option<&Run>, sign_panel: Option<&str>) -> String {
     format!(r#"{refresh}<div class="panel{tone}"><h2>{title}</h2>{body}</div>"#)
 }
 
-/// The chrome every /deploy and /target page variant shares.
 fn deploy_document(st: &AppState, title: &str, prefix: &str, active: &str, body: &str) -> Response {
     super::chrome::html(document(
         title,
@@ -1583,23 +1530,74 @@ fn cannot_package(section: &str, scene_title: &str, why: &str, root: &Path) -> S
     )
 }
 
-async fn page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response {
+/// What a scene page has in hand once the walk and the live checks are in.
+struct Drawn<'a> {
+    prefix: &'a str,
+    project: &'a Project,
+    scene_title: &'a str,
+    dest: &'a Dest,
+    p: &'a deploy::DeployPreview,
+    print: String,
+    status: Arc<LiveStatus>,
+    rights: Option<Arc<Rights>>,
+    warming: bool,
+}
+
+/// The frame `/deploy` and `/target` share: no scene says `nothing`, a scene
+/// that cannot package says why, and one that can is `render`ed.
+async fn scene_page(
+    st: &Arc<AppState>,
+    headers: &HeaderMap,
+    active: &str,
+    nothing: &str,
+    render: impl FnOnce(&Drawn<'_>) -> String,
+) -> Response {
     let prefix = forwarded_prefix(headers);
     let Some(project) = st.first_project() else {
         return deploy_document(
             st,
-            "deploy",
+            active,
             &prefix,
-            "deploy",
-            r#"<main class="dash"><section id="deploy" class="sec">
-              <div class="panel">
-              <span class="note">No scene is loaded, so there is nothing to publish.</span>
-            </div></section></main>"#,
+            active,
+            &format!(
+                r#"<main class="dash"><section id="{active}" class="sec"><div class="panel">
+              <span class="note">{nothing}</span>
+            </div></section></main>"#
+            ),
         );
     };
     let scene_title = crate::joinblock::scene_title(&project.scene_json);
     let dest = scene_dest(&project);
-    let jump = deploy::play_url(dest.world.as_deref(), &dest.base_pointer);
+    let preview = cached_preview(st, &project).await;
+    let body = match &*preview {
+        Ok(p) => {
+            let print = fingerprint(&project.root, p);
+            let (status, rights, warming) =
+                status_and_rights(st, &project, &dest, &preview, &print).await;
+            render(&Drawn {
+                prefix: &prefix,
+                project: &project,
+                scene_title: &scene_title,
+                dest: &dest,
+                p,
+                print,
+                status,
+                rights,
+                warming,
+            })
+        }
+        Err(e) => cannot_package(active, &scene_title, e, &project.root),
+    };
+    deploy_document(
+        st,
+        &format!("{active} {scene_title}"),
+        &prefix,
+        active,
+        &body,
+    )
+}
+
+async fn page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response {
     let may_publish = st.allow_remote_deploy || local;
     let blocked = match may_publish {
         true => None,
@@ -1608,12 +1606,14 @@ async fn page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response 
              Open this page there, or start the preview with --allow-remote-deploy.",
         ),
     };
-    let preview = cached_preview(st, &project).await;
-    let body = match &*preview {
-        Ok(p) => {
-            let print = fingerprint(&project.root, p);
-            let (status, rights, warming) =
-                status_and_rights(st, &project, &dest, &preview, &print).await;
+    scene_page(
+        st,
+        headers,
+        "deploy",
+        "No scene is loaded, so there is nothing to publish.",
+        |d| {
+            let p = d.p;
+            let jump = deploy::play_url(d.dest.world.as_deref(), &d.dest.base_pointer);
             let clean = matches!(p.main, MainBundle::Present(_))
                 && p.oversize.is_empty()
                 && p.unreadable.is_empty()
@@ -1625,54 +1625,40 @@ async fn page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response 
                 && std::env::var_os("DCL_PRIVATE_KEY").is_none()
                 && live_identity(st).is_none()
             {
-                // An empty slot claims afresh; a pending run whose payload
-                // moved re-mints, so the wallet only ever signs the tree as
-                // it is. Terminal states still hold the floor.
-                // The emptiness check is a `let`, NOT a match scrutinee: a
-                // scrutinee's MutexGuard lives to the end of the match, and
-                // claim/drift_reclaim retake the same lock -- as a match
-                // this self-deadlocked and starved the whole server.
                 let vacant = runs(st).is_none();
                 let id = match vacant {
-                    true => claim(st, dest.headline.clone(), true, print.clone()),
-                    false => drift_reclaim(st, dest.headline.clone(), &print),
+                    true => claim(st, d.dest.headline.clone(), true, d.print.clone()),
+                    false => drift_reclaim(st, d.dest.headline.clone(), &d.print),
                 };
                 if let Some(id) = id {
-                    launch(st.clone(), project.root.clone(), id);
+                    launch(st.clone(), d.project.root.clone(), id);
                 }
             }
             let phase = Phase::of(runs(st).as_ref(), Some(jump.as_str()));
             format!(
                 r#"<main class="dash"><section id="deploy" class="sec">{alarms}{verdict}{card}{drawer}{warm}</section></main><script>{script}</script>"#,
-                warm = warming_marker(warming),
+                warm = warming_marker(d.warming),
                 alarms = alarms(p),
-                verdict = verdict_warn(rights.as_deref()),
+                verdict = verdict_warn(d.rights.as_deref()),
                 card = card(
-                    &prefix,
+                    d.prefix,
                     token(st),
-                    &scene_title,
-                    &dest,
+                    d.scene_title,
+                    d.dest,
                     p,
-                    &status,
-                    &print,
+                    &d.status,
+                    &d.print,
                     blocked,
-                    rights.as_deref(),
+                    d.rights.as_deref(),
                     phase,
-                    &run_region(st, &prefix, may_publish),
+                    &run_region(st, d.prefix, may_publish),
                 ),
                 drawer = payload_drawer(p),
                 script = SCRIPT,
             )
-        }
-        Err(e) => cannot_package("deploy", &scene_title, e, &project.root),
-    };
-    deploy_document(
-        st,
-        &format!("deploy {scene_title}"),
-        &prefix,
-        "deploy",
-        &body,
+        },
     )
+    .await
 }
 
 /// The error text is served to anyone who can reach the port, and an anyhow
@@ -1702,25 +1688,11 @@ fn split_size(bytes: u64) -> (String, String) {
     }
 }
 
-/// A size the walk could not read is said so, in the size cell: `prepare`
-/// reads every file it uploads, so that file stops the deploy after signing.
-fn size_cell(len: Option<u64>) -> String {
-    let text = match len {
-        Some(n) => deploy::human_size(n),
-        None => "Size unreadable".to_string(),
-    };
-    format!(r#"<span class="sz">{text}</span>"#)
-}
-
 fn warn(title: &str, body: String) -> String {
     format!(
         r#"<div class="panel panel--warn"><h2>{}</h2><span class="note">{body}</span></div>"#,
         esc(title)
     )
-}
-
-fn hint_row(inner: &str) -> String {
-    format!(r#"<div class="jn2__noterow"><span class="jn__hint">{inner}</span></div>"#)
 }
 
 pub(super) fn note_span(text: &str) -> String {
@@ -1895,9 +1867,6 @@ fn foot(prefix: &str, tok: &str, print: &str, blocked: Option<&str>, phase: Phas
             esc(why)
         );
     }
-    // After a publish the panel above says what happened and the next thing
-    // to do is see it: Jump in takes the call to action, another run is the
-    // quiet button beside it, and the explainer is gone.
     let actions = match phase {
         Phase::Done(Some(jump)) => format!(
             r#"<a class="jn__cta" href="{}">Jump in</a>
@@ -2006,8 +1975,6 @@ fn card(
     run: &str,
 ) -> String {
     let (size_num, size_unit) = split_size(p.total_bytes);
-    // A finished run clears the status cache, so the probe would only say
-    // "unknown" here; the run itself is the freshest fact on the page.
     let state_word = match (phase, &status.remote) {
         (Phase::Done(_), _) => "just published",
         (_, Remote::Known(state)) if state.current.is_some() => "updates the live scene",
@@ -2015,8 +1982,6 @@ fn card(
         (_, Remote::Unreachable(_) | Remote::Unknown(_)) => "live state unknown",
     };
     let parcels = dest.pointers.len().max(1);
-    // The forecast's split, in the upload's own words, once the server has
-    // answered; the whole payload until then.
     let payload = match &status.reuse {
         Some(r) => esc(&r.sentence()),
         None => format!(
@@ -2049,7 +2014,6 @@ fn col(head: &str, body: &str) -> String {
     format!(r#"<div class="jn2__col"><span class="knob__k">{head}</span>{body}</div>"#)
 }
 
-/// The pane fragment every empty state shares.
 fn empty_col(head: &str, note: &str) -> String {
     col(head, &format!(r#"<span class="note">{note}</span>"#))
 }
@@ -2077,50 +2041,50 @@ pub(super) fn connect_buttons(prefix: &str, tok: &str) -> String {
     )
 }
 
-/// The publishing guide, opened beside the preview.
 const HELP_ACTION: &str = r#"<a class="jn__cta" href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene" target="_blank" rel="noopener">Publishing guide <span aria-hidden="true">↗</span></a>"#;
 
-/// The guide's sections this page's behaviour follows, one row each.
+/// Guides under [`DOCS`], shown as their path.
+const DOCS: &str = "https://docs.decentraland.org/";
 const HELP_GUIDES: &[(&str, &str)] = &[
     (
         "Publish your scene",
-        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#publish-your-scene",
+        "creator/scene-editor/publish/publish-scene#publish-your-scene",
     ),
     (
         "Kinds of projects",
-        "https://docs.decentraland.org/creator/scenes-sdk7/kinds-of-projects/kinds-of-project",
+        "creator/scenes-sdk7/kinds-of-projects/kinds-of-project",
     ),
     (
         "Multi-scene Worlds",
-        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#multi-scene-worlds",
+        "creator/scene-editor/publish/publish-scene#multi-scene-worlds",
     ),
     (
         "Collaborators",
-        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#adding-collaborators-to-a-multi-scene-world",
+        "creator/scene-editor/publish/publish-scene#adding-collaborators-to-a-multi-scene-world",
     ),
     (
         "Scene metadata",
-        "https://docs.decentraland.org/creator/scenes-sdk7/projects/scene-metadata",
+        "creator/scenes-sdk7/projects/scene-metadata",
     ),
     (
         "Scene overwriting",
-        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#scene-overwriting",
+        "creator/scene-editor/publish/publish-scene#scene-overwriting",
     ),
     (
         "Custom servers",
-        "https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#custom-servers",
+        "creator/scene-editor/publish/publish-scene#custom-servers",
     ),
 ];
 
 fn help_rows() -> String {
     let rows: String = HELP_GUIDES
         .iter()
-        .map(|(label, url)| {
+        .map(|(label, path)| {
             kv(
                 label,
                 format!(
-                    r#"<a href="{url}" target="_blank" rel="noopener">{}</a>"#,
-                    esc(url.trim_start_matches("https://docs.decentraland.org/"))
+                    r#"<a href="{DOCS}{path}" target="_blank" rel="noopener">{}</a>"#,
+                    esc(path)
                 ),
             )
         })
@@ -2556,8 +2520,6 @@ fn target_card(
         super::chrome::radio_tab("tgt", value, label, checked)
     };
     let blocked = matches!(rights.map(|r| &r.verdict), Some(Verdict::MayNot { .. }));
-    // Continue through the existing review/signing page; it owns the payload
-    // fingerprint, local-peer gate, and final publish approval.
     let deploy_action = if blocked {
         r#"<span class="tgt__blocked">Deploy blocked — resolve rights below</span>"#.to_string()
     } else {
@@ -2574,8 +2536,6 @@ fn target_card(
         ),
         None => format!("Selected destination: LAND · Base {}", dest.base_pointer),
     };
-    // The service is independent of the scene kind: a configured test or
-    // custom server must remain visible when switching between World and LAND.
     let server = dest
         .server_line
         .split(" — ")
@@ -2590,8 +2550,6 @@ fn target_card(
             esc(server)
         )
     };
-    // On land the denied parcels are listed one per row under a count, the
-    // design's shape; the verdict's own sentence carries the world case.
     let missing: Vec<&str> = match (world, rights) {
         (None, Some(r)) if blocked => r
             .parcel_rights
@@ -2670,8 +2628,6 @@ fn target_card(
     } else {
         note_span("Select a World below")
     };
-    // Multiscene and History are views of the selected destination, never
-    // destinations themselves: neither carries a select form.
     let record_action = if world.is_some() || !p.nameless_world {
         deploy_action.clone()
     } else {
@@ -2694,8 +2650,6 @@ fn target_card(
         header("Deployment history", &record_action),
         history_rows_pane(history)
     );
-    // The publishing guide is the Help tab's call to action, in the slot the
-    // other tabs give Deploy; the guide's own anchors fill the column.
     let help_pane = format!(
         "{}{}",
         header("Help", HELP_ACTION),
@@ -2941,35 +2895,27 @@ fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
             "World layout unavailable", &format!("Could not check this World's published scenes: {}. Review the layout before publishing.", esc(why))),
     };
     let (ours, base) = footprint(dest);
+    let was = |title: &str, parcels, size| {
+        scene_row(
+            "dep__cell--was",
+            title,
+            parcels,
+            size,
+            "replaced by this publish",
+        )
+    };
     let rows: String = state
         .others
         .iter()
-        .map(|s| {
-            if scene_overlaps(&s.coords, &ours) {
-                scene_row(
-                    "dep__cell--was",
-                    &s.title,
-                    s.parcels,
-                    s.size,
-                    "replaced by this publish",
-                )
-            } else {
-                scene_row("dep__cell--kept", &s.title, s.parcels, s.size, "kept")
-            }
+        .map(|s| match scene_overlaps(&s.coords, &ours) {
+            true => was(&s.title, s.parcels, s.size),
+            false => scene_row("dep__cell--kept", &s.title, s.parcels, s.size, "kept"),
         })
         .collect();
     let replaced_row = state
         .current
         .as_ref()
-        .map(|c| {
-            scene_row(
-                "dep__cell--was",
-                &c.title,
-                c.parcels,
-                c.size,
-                "replaced by this publish",
-            )
-        })
+        .map(|c| was(&c.title, c.parcels, c.size))
         .unwrap_or_default();
     let held: u64 = state
         .others
@@ -2997,11 +2943,8 @@ fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
         }
     };
     format!(
-        "{}\n        <div class=\"jn2__body\">{}\n        {}</div>",
-        hint_row(&format!(
-            "Publishing to {} replaces every scene that overlaps this footprint, including its parcels outside the footprint. Non-overlapping scenes stay published.",
-            esc(w)
-        )),
+        "<div class=\"jn2__noterow\"><span class=\"jn__hint\">Publishing to {} replaces every scene that overlaps this footprint, including its parcels outside the footprint. Non-overlapping scenes stay published.</span></div>\n        <div class=\"jn2__body\">{}\n        {}</div>",
+        esc(w),
         col("After this publish", &after_map(state, &ours, base)),
         col(
             "In this world now",
@@ -3012,27 +2955,13 @@ fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
 
 /// `/target` — the destination detail that used to crowd the publish card.
 async fn target_page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Response {
-    let prefix = forwarded_prefix(headers);
-    let Some(project) = st.first_project() else {
-        return deploy_document(
-            st,
-            "target",
-            &prefix,
-            "target",
-            r#"<main class="dash"><section id="target" class="sec"><div class="panel">
-              <span class="note">No scene is loaded, so there is nowhere to publish to.</span>
-            </div></section></main>"#,
-        );
-    };
-    let scene_title = crate::joinblock::scene_title(&project.scene_json);
-    let dest = scene_dest(&project);
-    let preview = cached_preview(st, &project).await;
-    let body = match &*preview {
-        Ok(p) => {
-            let print = fingerprint(&project.root, p);
-            let (status, rights, warming) =
-                status_and_rights(st, &project, &dest, &preview, &print).await;
-            let history = history_rows(st, &project.root);
+    scene_page(
+        st,
+        headers,
+        "target",
+        "No scene is loaded, so there is nowhere to publish to.",
+        |d| {
+            let history = history_rows(st, &d.project.root);
             let connect = connect_slot(st).clone();
             format!(
                 r#"<main class="dash"><section id="target" class="sec">{remote}{card}{warm}</section></main><script>{script}</script>"#,
@@ -3045,30 +2974,23 @@ async fn target_page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Re
                         "choosing a destination and connecting an account only work from there"
                     },
                 ),
-                warm = warming_marker(warming),
+                warm = warming_marker(d.warming),
                 card = target_card(
-                    &scene_title,
-                    &prefix,
+                    d.scene_title,
+                    d.prefix,
                     token(st),
-                    &dest,
-                    p,
-                    &status,
-                    rights.as_deref(),
+                    d.dest,
+                    d.p,
+                    &d.status,
+                    d.rights.as_deref(),
                     connect.as_ref(),
                     &history
                 ),
                 script = TARGET_SCRIPT,
             )
-        }
-        Err(e) => cannot_package("target", &scene_title, e, &project.root),
-    };
-    deploy_document(
-        st,
-        &format!("target {scene_title}"),
-        &prefix,
-        "target",
-        &body,
+        },
     )
+    .await
 }
 
 /// Rows past [`LISTED`] fold instead of vanishing — but a click is still a
@@ -3076,11 +2998,16 @@ async fn target_page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Re
 const LISTED_EXPANDED: usize = 400;
 
 fn payload_drawer(p: &deploy::DeployPreview) -> String {
+    // A size the walk could not read is said so, in the size cell: `prepare`
+    // reads every file it uploads, so that file stops the deploy after signing.
     let row = |(rel, len): &(String, Option<u64>)| {
         format!(
-            r#"<div class="kv"><span class="k k--file">{}</span>{}</div>"#,
+            r#"<div class="kv"><span class="k k--file">{}</span><span class="sz">{}</span></div>"#,
             esc(rel),
-            size_cell(*len)
+            match *len {
+                Some(n) => deploy::human_size(n),
+                None => "Size unreadable".to_string(),
+            }
         )
     };
     let listed: String = p.files.iter().take(LISTED).map(row).collect();
@@ -3088,20 +3015,9 @@ fn payload_drawer(p: &deploy::DeployPreview) -> String {
     let rest_fold = match rest {
         0 => String::new(),
         n => {
-            let rest_size = deploy::human_size(
-                p.files
-                    .iter()
-                    .skip(LISTED)
-                    .filter_map(|(_, len)| *len)
-                    .sum(),
-            );
-            let rows: String = p
-                .files
-                .iter()
-                .skip(LISTED)
-                .take(LISTED_EXPANDED)
-                .map(row)
-                .collect();
+            let beyond_listed = || p.files.iter().skip(LISTED);
+            let rest_size = deploy::human_size(beyond_listed().filter_map(|(_, len)| *len).sum());
+            let rows: String = beyond_listed().take(LISTED_EXPANDED).map(row).collect();
             let beyond = match n.saturating_sub(LISTED_EXPANDED) {
                 0 => String::new(),
                 m => format!(

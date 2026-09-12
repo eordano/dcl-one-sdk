@@ -9,8 +9,6 @@ description: Scaffold a new Decentraland SDK7 scene project. Use when the user w
 
 > **CRITICAL — read before generating any code:** All initial scene entities (everything present at scene load) go in `assets/scene/main.composite`, NEVER in `src/index.ts`. See "Composite vs TypeScript — where entities go" (Step 4) for the rule, decision table, and rationale.
 
-When the user wants to create a new scene, follow these steps:
-
 ## 1. Ask What They Want to Build
 
 If the user hasn't described their scene, ask them:
@@ -52,7 +50,7 @@ Before writing scene code, check the asset catalog for free models that match th
 
 ## 4. Customize the Generated Files
 
-After `/init` completes, customize the generated files based on what the user wants:
+After `/init` completes, customize the generated files:
 
 ### scene.json
 
@@ -73,8 +71,6 @@ Update the `display` fields and parcels:
 | Static and decorative objects                                                | Entities whose count or existence depends on runtime state                                      |
 | Entities that need behavior added later (fetch by name/tag in code)          | Entities whose identity/structure cannot be known at author time                                |
 | Anything the Creator Hub should be able to display and edit visually         | —                                                                                               |
-
-**Rationale:** Composite assets load faster, are visually editable in the Creator Hub, and keep TypeScript code focused on logic rather than scene construction.
 
 ### assets/scene/main.composite
 
@@ -182,9 +178,7 @@ Valid values for the `tags` array:
 
 ### Required Permissions
 
-Add to `requiredPermissions` when your scene uses these features:
-
-These are the exact 7 permission strings the runtime recognizes (the protocol enum names drop the `PI_` prefix):
+Add to `requiredPermissions` when your scene uses these features. These are the exact 7 permission strings the runtime recognizes (the protocol enum names drop the `PI_` prefix):
 
 | Permission                          | When needed                                          |
 | ----------------------------------- | ---------------------------------------------------- |
@@ -218,7 +212,7 @@ Valid values: `"enabled"`, `"disabled"`. For `portableExperiences` also: `"hideU
 
 ### Spawn Points
 
-Configure where and how players enter the scene:
+Where and how players enter the scene:
 
 ```json
 {
@@ -259,8 +253,6 @@ Configure where and how players enter the scene:
 
 ## 5. Post-Creation Steps
 
-After customizing the files:
-
 1. Use the `preview` tool to start the preview server (or run `npx @dcl/sdk-commands start --bevy-web` manually)
 2. The scene will open in a browser at http://localhost:8000
 
@@ -292,7 +284,7 @@ After customizing the files:
 
 ## Vibe Coding with AI
 
-AI assistants (Cursor, Claude Code, etc.) can build entire scenes from plain-language prompts. Install Decentraland SDK skills first so the AI knows SDK patterns:
+AI assistants (Cursor, Claude Code, etc.) can build entire scenes from plain-language prompts. Install the Decentraland SDK skills first so the AI knows SDK patterns:
 
 ```bash
 npx skills add decentraland/sdk-skills --all

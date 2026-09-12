@@ -6,11 +6,11 @@ SDK7 scenes; an alternative to `@dcl/sdk-commands`.
 Measured on the freshly scaffolded template scene (release build; absolute
 times vary with hardware):
 
-- one self-contained binary — 49 MB, the same from `cargo build`, `nix build`
-  or a release, all of which embed the abgen asset-bundle server — and 283
-  passing tests (`ALLOW_SKIPPED_INTEGRATION=1 cargo test`; three more need a
-  live tunnel, a scene, or a node_modules tree, and fail loudly rather than
-  skip silently when you point them at one). The upstream toolchain installs
+- one self-contained binary — 49 MB, identical from `cargo build`, `nix build`
+  or a release, all embedding the abgen asset-bundle server — and 283 passing
+  tests (`ALLOW_SKIPPED_INTEGRATION=1 cargo test`; three more need a live
+  tunnel, a scene, or a node_modules tree, and fail loudly rather than skip
+  silently when you point them at one). The upstream toolchain installs
   315 MB / 17,464 files of node_modules per scene and takes 31.5 s for an
   `npx` cold start
 - `init` scaffolds a working scene fully offline in about 0.2 s — the vendored
@@ -70,9 +70,9 @@ type check (the scene's own vendored `typescript` runs under node;
 `main.crdt` regeneration (`--data-layer` / composite scenes).
 
 The scaffolded `package.json` declares `engines.node ">=24"` (and `npm ">=11"`,
-which is what node 24 ships) — that is the version this toolchain is built and
-tested against. The hard floor the vendored packages impose is lower, 20.19,
-where node's `require(esm)` support became unflagged.
+what node 24 ships) — the version this toolchain is built and tested against.
+The hard floor the vendored packages impose is lower: 20.19, where node's
+`require(esm)` support became unflagged.
 
 ## Visual editor
 
@@ -89,7 +89,7 @@ most scenes never take was the wrong trade.
 `start` runs an [abgen](https://github.com/decentraland/abgen) asset-bundle
 sidecar that serves optimized preview assets, and forwards its URL to the
 Explorer as `optimized-assets-url`. There is nothing to install: **every**
-dcl-one-sdk binary embeds abgen, whatever it was built with. On first run it
+dcl-one-sdk binary embeds abgen, whatever it was built with; on first run it
 unpacks into a temp directory keyed by a content hash and is reused from then
 on.
 
@@ -101,7 +101,7 @@ behaviour, which has no sidecar at all.
 `AppArgsFlags.LOCAL_AB` in unity-explorer it "carries no URL or port", so the
 client appends `/optimized-assets` to the realm it already has and expects the
 PREVIEW SERVER to serve it. This server does, proxying that path to the
-sidecar — so the sidecar keeps running and only the addressing changes:
+sidecar — the sidecar keeps running and only the addressing changes:
 `local-ab=true` instead of `optimized-assets-url`. Everything then arrives over
 one origin, which on a LAN join means no second port and no second firewall
 approval.
@@ -141,7 +141,7 @@ deliberate differences, both about not baking in someone else's infrastructure:
 server (`http://127.0.0.1:5141`), not a public catalyst, so a preview never
 silently sources its realm from production. With nothing listening there,
 back-fill routes such as `/lambdas/profiles` return 502 until you name an
-upstream — that is the intended posture, not a failure.
+upstream — the intended posture, not a failure.
 
 `/preview-wearables` is implemented for older explorer builds even though
 upstream's own source marks it for removal in favour of

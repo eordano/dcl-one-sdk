@@ -235,7 +235,6 @@ impl Parser<'_> {
         }
     }
 
-    /// Consume a digit run; false when there was none.
     fn digits(&mut self) -> bool {
         let start = self.i;
         while matches!(self.peek(), Some(b'0'..=b'9')) {

@@ -16,8 +16,6 @@ Decentraland SDK7 uses a React-like JSX system for 2D UI overlays.
 | Open a web page                  | `openExternalUrl`      | See **scene-runtime** skill                        |
 | Clickable objects in 3D space    | Pointer events         | See **add-interactivity** skill                    |
 
-Use React-ECS for any 2D overlay: scoreboards, health bars, dialogs, inventories, settings menus. Use TextShape for labels above NPCs or objects in the 3D world.
-
 ## Setup
 
 Create `src/ui.tsx` with your UI component and call `ReactEcsRenderer.setUiRenderer(MyUI, { virtualWidth: 1920, virtualHeight: 1080 })` from `setupUi()`. Call `setupUi()` from `main()` in `src/index.ts`. The SDK template already includes the required JSX settings in tsconfig.json — do NOT modify it.
@@ -28,7 +26,7 @@ The SDK uses a virtual screen to scale UI consistently across display resolution
 
 **Whenever you generate UI code, you MUST pass `{ virtualWidth: 1920, virtualHeight: 1080 }` to `setUiRenderer` and `addUiRenderer` by default — without waiting for the user to ask.** Only deviate if the user explicitly requests a different reference resolution.
 
-Why: pixel values in a UI are only meaningful against a reference resolution. Stating it explicitly in the code keeps the scene's layout intent visible and pins it, instead of leaving it to a per-platform default that differs between mobile and desktop. 1920x1080 is the safe default — it matches the most common displays and the assumption made by most community examples.
+Why: pixel values are only meaningful against a reference resolution, and the per-platform default differs between mobile and desktop. 1920x1080 matches the most common displays and the assumption made by most community examples.
 
 The options argument is optional at the API level. **On SDK 7.26.0+, omitting it does not mean "no scaling"** — the SDK applies a platform default virtual screen instead:
 
@@ -45,11 +43,9 @@ The mobile 16:9 override exists because phone screens are much wider than 16:9 �
 
 So on 7.26.0+, `{ virtualWidth: 0, virtualHeight: 0 }` — not omitting the options — is how you opt into raw-pixel layout. Only do that if the user explicitly asks for it. **Below 7.26.0 there are no defaults: omitting the options is what disables scaling.** See the version gate below.
 
-Because the default rule above has you pass the size explicitly either way, generated code behaves identically on both sides of that boundary — which is a second reason to always pass it.
-
 The virtual size is scene-wide, resolved as: the size on `setUiRenderer` wins → else the first `addUiRenderer` that passed one → else the platform default. Options carrying only a `screenInset` don't count as a passed size.
 
-Note that `setUiRenderer` wins the arbitration if it mentions *either* dimension, even when the size is incomplete and therefore invalid. So `setUiRenderer(ui, { virtualWidth: 1920 })` disables the virtual screen for the whole scene and discards a valid size passed to any `addUiRenderer`. The SDK logs it once per size, but the scene still loses its virtual screen. Never emit a single dimension.
+`setUiRenderer` wins the arbitration if it mentions *either* dimension, even when the size is incomplete and therefore invalid. So `setUiRenderer(ui, { virtualWidth: 1920 })` disables the virtual screen for the whole scene and discards a valid size passed to any `addUiRenderer`. The SDK logs it once per size, but the scene still loses its virtual screen. Never emit a single dimension.
 
 API (verified against `@dcl/react-ecs`, file `dist/system.d.ts`):
 
@@ -124,9 +120,9 @@ export function setupUi() {
 
 **Dropdown** — Selection dropdown. Key props: `options` (string[]), `selectedIndex`, `onChange`, `fontSize`, `uiTransform`, `disabled`.
 
-**ScreenInsetArea** — Wrapper that keeps children inside the device's hardware-reserved margins (notch, status bar, home indicator, rounded corners). **Usually unnecessary now: `screenInset` defaults to `'device'`, which already does this for the whole renderer.** Reach for the component only when the renderer opted out with `screenInset: 'none'` and you want to protect just one subtree — wrapping on top of the default double-applies the inset. On mobile it positions itself absolutely using the insets the device reports; on desktop the insets are `(0,0,0,0)`, so it's a no-op. It owns its own `positionType` and `position`; any values you pass for those in `uiTransform` are ignored. All other `uiTransform` props (`padding`, `flexDirection`, `alignItems`, …) and components (`uiBackground`, `onMouseDown`, …) work as usual. A child sized `width: '100%', height: '100%'` fills the safe area exactly. It auto-compensates for the UI scale factor (pre-divides insets so the parser's scale multiplication cancels out), so insets are correct regardless of virtual screen size. Distinct from the *Decentraland system HUD* reserved zones (joystick, chat, profile, interaction button) — avoid those with `screenInset: 'interactable'` or by hand, or, for the mobile input controls specifically, hide them outright with `TouchScreenControls` (see **advanced-input**). Do **not** apply the old "scale sizes ~3× for mobile" rule of thumb on 7.26.0+: with `devicePixelRatio` out of the scale factor, pixel-sized UI is already ~2–3× larger on a phone than it used to be, and the `1600x720` mobile virtual screen adds ~1.2× on top. Start from the desktop sizes and only scale up what actually measures too small on a device.
+**ScreenInsetArea** — Wrapper that keeps children inside the device's hardware-reserved margins (notch, status bar, home indicator, rounded corners). **Usually unnecessary now: `screenInset` defaults to `'device'`, which already does this for the whole renderer.** Reach for the component only when the renderer opted out with `screenInset: 'none'` and you want to protect just one subtree — wrapping on top of the default double-applies the inset. It owns its own `positionType` and `position`; any values you pass for those in `uiTransform` are ignored. No-op on desktop, where the insets are `(0,0,0,0)`. Full behavior: `{baseDir}/references/ui-components.md` → ScreenInsetArea. Distinct from the *Decentraland system HUD* reserved zones (joystick, chat, profile, interaction button) — avoid those with `screenInset: 'interactable'` or by hand, or, for the mobile input controls specifically, hide them outright with `TouchScreenControls` (see **advanced-input**). Do **not** apply the old "scale sizes ~3× for mobile" rule of thumb on 7.26.0+: with `devicePixelRatio` out of the scale factor, pixel-sized UI is already ~2–3× larger on a phone than it used to be, and the `1600x720` mobile virtual screen adds ~1.2× on top. Start from the desktop sizes and only scale up what actually measures too small on a device.
 
-**InteractableArea** — Wrapper that keeps children inside the renderer-reported *interactable area* — the part of the screen NOT covered by the client's own UI (minimap, chat window, platform overlays). Reads `UiCanvasInformation.interactableArea` and constrains children via absolute positioning; on the Unity desktop client the left ~25% of the screen is reserved, so children fill the remaining ~75%. **Prefer `screenInset: 'interactable'` on the renderer for a whole-UI application**; use the component for a single subtree, or when the renderer uses a different inset. Either form needs an explorer that reports the area: it works on desktop, and on mobile from client `1.12.1` onwards — older mobile clients report no margins and the inset silently does nothing. Like `ScreenInsetArea`, it owns `positionType`/`position` (values you pass are ignored), auto-compensates for the UI scale factor, and falls back to zero insets (no-op) when unavailable. Import from `@dcl/sdk/react-ecs`; usage `<InteractableArea><MyHud /></InteractableArea>`. Distinct from `ScreenInsetArea` (which avoids *device* hardware margins, not client UI). See `{baseDir}/references/ui-components.md` → InteractableArea.
+**InteractableArea** — Wrapper that keeps children inside the renderer-reported *interactable area* — the part of the screen NOT covered by the client's own UI (minimap, chat window, platform overlays). **Prefer `screenInset: 'interactable'` on the renderer for a whole-UI application**; use the component for a single subtree, or when the renderer uses a different inset. Either form needs an explorer that reports the area: it works on desktop, and on mobile from client `1.12.1` onwards — older mobile clients report no margins and the inset silently does nothing. Like `ScreenInsetArea`, it owns `positionType`/`position` (values you pass are ignored) and falls back to zero insets (no-op) when unavailable. Distinct from `ScreenInsetArea` (which avoids *device* hardware margins, not client UI). See `{baseDir}/references/ui-components.md` → InteractableArea.
 
 ## UiInputBinding (bind InputActions to UI elements)
 
@@ -201,8 +197,8 @@ Use module-level variables for UI state — React hooks (`useState`, `useEffect`
 
 Build every widget from React-ECS primitives (`UiEntity`, `Label`, `Button`). There is no pre-built widget library to install.
 
-- **Prompt / dialog / confirmation?** → full-screen overlay + centered panel + `Button`s. See the **Modal Dialog** pattern in `references/ui-components.md`.
-- **Health bar, progress bar, score?** → nested `UiEntity` with the inner one sized `width: `${pct}%``. See the **Health Bar** patterns in `references/ui-components.md` and `references/ui-patterns.md`; a score is a `Label` bound to a module-level variable.
+- **Prompt / dialog / confirmation?** → full-screen overlay + centered panel + `Button`s. See the **OK-Prompt Modal** in `references/ui-patterns.md`.
+- **Health bar, progress bar, score?** → nested `UiEntity` with the inner one sized `width: `${pct}%``. See the **Health Bar** pattern in `references/ui-patterns.md`; a score is a `Label` bound to a module-level variable.
 - **Flash announcement (timed, centered)?** → a centered `Label` gated on a module-level flag, cleared with `timers.setTimeout`. See **Timed Announcement** in `references/ui-patterns.md`.
 - **Slider / drag handle / scrub bar?** → **drag sliders work.** UI handlers get no pointer coordinates, so instead: `onMouseDown` on the track starts a drag, and a system accumulates `PrimaryPointerInfo.screenDelta.x` (divided by the UI scale factor) into the value. A full-screen `pointerFilter: 'block'` overlay rendered only while dragging catches the release. Verified in-world on both the Unity and Bevy explorers. Desktop only — `screenDelta` is always 0 on mobile, so pair the track with `-`/`+` stepper `Button`s. Full implementation in `{baseDir}/references/ui-sliders.md`.
 - **Custom panel, inventory, complex layout?** → React-ECS directly (see `references/ui-patterns.md`).
@@ -237,8 +233,7 @@ Note: this is required specifically so absolute-positioned children get a full-s
 Rationale (**empirically verified** — tested in-engine June 2026):
 
 - Without a full-canvas root, absolute-positioned children using `position: { top, right }` may fail to render entirely. In testing, a root with no explicit `width`/`height` caused a `top-right` positioned child to disappear while a `bottom-left` child rendered correctly. Adding `width: '100%', height: '100%'` to the root fixed the issue.
-- A full-canvas root gives absolute-positioned children (`positionType: 'absolute'` with `position: { top, left, ... }`) a known, full-screen positioning context. This matches the implicit assumption most HUD code makes.
-- It avoids edge-case layout surprises with Yoga's default sizing for unspecified `width`/`height`.
+- A full-canvas root gives absolute-positioned children (`positionType: 'absolute'` with `position: { top, left, ... }`) a known, full-screen positioning context — what most HUD code implicitly assumes — and avoids edge-case surprises with Yoga's default sizing for unspecified `width`/`height`.
 
 ## Example scenes
 

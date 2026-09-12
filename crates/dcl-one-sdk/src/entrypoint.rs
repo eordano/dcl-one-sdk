@@ -72,8 +72,6 @@ pub fn authoritative_multiplayer(project: &Project) -> bool {
 
 const MP_CLIENT_TEMPLATE: &str = include_str!("templates/mp-client.js");
 
-// Exactly what `@dcl/sdk`'s own module body does (its index.ts), pulled into a
-// module the generated entrypoint can import before the scene.
 const SDK_BOOT: &str = "import { engine, setCompositeProvider } from '@dcl/sdk/ecs'\n\
                         import { compositeProvider } from '@dcl/sdk/composite-provider'\n\
                         setCompositeProvider(engine, compositeProvider)\n";
@@ -90,8 +88,6 @@ fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool, mp: bool) 
     } else {
         "false".to_string()
     };
-    // before the scene, after sdk-boot: the scene's module scope feature-
-    // detects registerMessages, so the graft must already be in place
     let mp_import = if mp { "import './mp-client.js'\n" } else { "" };
     format!(
         r#"// BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"

@@ -1,6 +1,3 @@
-//! The join card: launch targets, the deep-link knobs, what each target's
-//! client keeps of them ([`Carry`]), and the card markup.
-
 use super::super::chrome::esc;
 use serde_json::Value;
 
@@ -107,8 +104,6 @@ pub(in crate::start) const DEFAULT_ON: [&str; 2] = ["multi-instance", "skip-auth
 /// flag through.
 pub(super) fn knobs(query: Option<&str>, spawn_names: &[String]) -> Knobs {
     let Some(query) = query else {
-        // The fresh page also draws the terrain, but only as a page default:
-        // the terminal deep link carries just DEFAULT_ON.
         return Knobs {
             opts: DEFAULT_ON
                 .iter()
@@ -140,7 +135,6 @@ pub(super) struct Target {
     /// The value this choice rides under in the query string ([`WHERE_KEYS`]).
     pub(super) key: &'static str,
     pub(super) label: &'static str,
-    /// The one-line "what this launches" the card's title row shows.
     pub(super) hint: String,
     /// Built with the knobs this target can carry already folded in.
     pub(super) url: String,

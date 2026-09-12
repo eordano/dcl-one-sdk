@@ -2,14 +2,7 @@
 
 ## Setup
 
-```typescript
-// ui.tsx
-import ReactEcs, { ReactEcsRenderer, UiEntity, Label, Button, Input, Dropdown } from '@dcl/sdk/react-ecs'
-
-export function setupUi() {
-  ReactEcsRenderer.setUiRenderer(MyUI)
-}
-```
+Setup snippet (`src/ui.tsx` + `src/index.ts`): `ui-patterns.md` → Setup.
 
 Only call `ReactEcsRenderer.setUiRenderer()` once per scene. Combine all UI into a single root component. The renderer function may also return an **array** of elements — `setUiRenderer(() => [PanelA(), PanelB()])` — where later items render on top of earlier ones.
 
@@ -272,109 +265,7 @@ export function setupUi() {
 
 ## Layout Patterns
 
-### Health Bar
-
-```tsx
-<UiEntity
-  uiTransform={{ width: 200, height: 20, positionType: 'absolute', position: { bottom: 20, left: '50%' } }}
-  uiBackground={{ color: Color4.create(0.3, 0.3, 0.3, 0.8) }}
->
-  <UiEntity
-    uiTransform={{ width: `${health}%`, height: '100%' }}
-    uiBackground={{ color: Color4.create(0.2, 0.8, 0.2, 1) }}
-  />
-</UiEntity>
-```
-
-### Modal Dialog
-
-```tsx
-const Modal = () => {
-  if (!isOpen) return null
-  return (
-    <UiEntity
-      uiTransform={{ width: '100%', height: '100%', positionType: 'absolute', alignItems: 'center', justifyContent: 'center' }}
-      uiBackground={{ color: Color4.create(0, 0, 0, 0.5) }}
-    >
-      <UiEntity
-        uiTransform={{ width: 400, height: 300, flexDirection: 'column', alignItems: 'center', padding: 20 }}
-        uiBackground={{ color: Color4.create(0.2, 0.2, 0.2, 1) }}
-      >
-        <Label value="Title" fontSize={24} uiTransform={{ width: '100%', height: 40, margin: { bottom: 12 } }} />
-        <Button value="Close" variant="primary" onMouseDown={() => { isOpen = false }} uiTransform={{ width: 100, height: 40 }} />
-      </UiEntity>
-    </UiEntity>
-  )
-}
-```
-
-The `100%`×`100%` backdrop deliberately has **no** pointer handler and no `pointerFilter`: only the `Close` button does. Putting a listener on a full-screen element makes it capture clicks over the entire screen, blocking every other UI element and the 3D world behind it — see the pointer-blocking gotchas in `build-ui/SKILL.md`. If the modal should swallow background clicks while open, add `pointerFilter: 'block'` to the backdrop as a conscious choice; it is safe here only because the component returns `null` when closed, so the blocking rect does not exist the rest of the time.
-
-### Scrollable Container
-
-```tsx
-<UiEntity
-  uiTransform={{
-    width: 300,
-    height: 400,
-    overflow: 'scroll',
-    flexDirection: 'column',
-  }}
->
-  {/* Children exceeding 400px height become scrollable via drag or mouse wheel */}
-  {items.map((item, i) => (
-    <UiEntity
-      key={i}
-      uiTransform={{ width: '100%', height: 80 }}
-      uiBackground={{ color: i % 2 === 0 ? Color4.create(0.2, 0.2, 0.2, 1) : Color4.create(0.25, 0.25, 0.25, 1) }}
-    >
-      <Label value={item.name} fontSize={14} />
-    </UiEntity>
-  ))}
-</UiEntity>
-```
-
-### Dialog with Fixed Header and Scrollable Body
-
-```tsx
-<UiEntity uiTransform={{ width: 400, height: 500, flexDirection: 'column' }}>
-  {/* Fixed header */}
-  <UiEntity uiTransform={{ width: '100%', height: 60 }}>
-    <Label value="Inventory" fontSize={20} uiTransform={{ width: '100%', height: '100%' }} />
-  </UiEntity>
-  {/* Scrollable body fills remaining space */}
-  <UiEntity
-    uiTransform={{
-      width: '100%',
-      flexGrow: 1,
-      overflow: 'scroll',
-      flexDirection: 'column',
-    }}
-  >
-    {items.map((item, i) => (
-      <UiEntity key={i} uiTransform={{ width: '100%', height: 80 }}>
-        <Label value={item.name} fontSize={14} uiTransform={{ width: '100%', height: '100%' }} />
-      </UiEntity>
-    ))}
-  </UiEntity>
-</UiEntity>
-```
-
-### Inventory Grid
-
-```tsx
-<UiEntity uiTransform={{ width: 350, flexDirection: 'row', flexWrap: 'wrap' }}>
-  {items.map((item, i) => (
-    <UiEntity
-      key={i}
-      uiTransform={{ width: 70, height: 70, margin: 5, alignItems: 'center', justifyContent: 'center' }}
-      uiBackground={{ color: Color4.create(0.3, 0.3, 0.3, 1) }}
-      uiText={{ value: item.name, fontSize: 10 }}
-      onMouseDown={() => selectItem(i)}
-    />
-  ))}
-</UiEntity>
-```
+Health bar, modal dialog (and its pointer-blocking rule), scrollable container, fixed-header dialog and inventory grid: `ui-patterns.md`.
 
 ## UiCanvasInformation (Responsive Design)
 
@@ -416,25 +307,7 @@ Prefer `%` sizing where possible; reach for `UiCanvasInformation` when you need 
 
 ## State Management
 
-React hooks (`useState`, `useEffect`) are NOT available. Use module-level variables:
-
-```typescript
-let score = 0
-let showMenu = false
-
-const UI = () => (
-  <UiEntity uiTransform={{ width: '100%', height: '100%' }}>
-    <Label value={`Score: ${score}`} fontSize={20} uiTransform={{ width: 240, height: 30 }} />
-    {showMenu && <MenuPanel />}
-  </UiEntity>
-)
-
-// Update from game logic
-export function addScore(points: number) { score += points }
-export function toggleMenu() { showMenu = !showMenu }
-```
-
-The UI re-renders every frame, so module-level variable changes are reflected immediately.
+React hooks (`useState`, `useEffect`) are NOT available. Use module-level variables; the UI re-renders every frame, so changes to them are reflected immediately. Worked example: `ui-patterns.md` → State Management Example.
 
 ## Important Rules
 

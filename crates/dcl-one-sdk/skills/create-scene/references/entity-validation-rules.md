@@ -1,6 +1,6 @@
 # Entity Validation Rules
 
-Rules for validating entity component combinations. Apply to any entity in the scene — whether defined in a `main.composite` file or created at runtime via TypeScript code. Organized by severity.
+Rules for validating entity component combinations, by severity. Apply to any entity in the scene — defined in a `main.composite` file or created at runtime in TypeScript.
 
 ---
 
@@ -10,7 +10,7 @@ Rules for validating entity component combinations. Apply to any entity in the s
 
 **If** an entity has `PointerEvents` **or** a trigger of type `on_input_action`/`on_click`, **then** it must have:
 
-- `MeshCollider` with `collisionMask` that includes `CL_POINTER` (value 1, i.e. `mask & 1 !== 0` — checking `≥ 1` is wrong: a mask of `CL_PHYSICS` (2) alone has no pointer bit). Note that an **unset** `collisionMask` defaults to `CL_POINTER | CL_PHYSICS` (3), so a bare `MeshCollider` passes; this rule only fails when a mask is explicitly set without the pointer bit, **or**
+- `MeshCollider` with `collisionMask` that includes `CL_POINTER` (value 1, i.e. `mask & 1 !== 0` — checking `≥ 1` is wrong: a mask of `CL_PHYSICS` (2) alone has no pointer bit). An **unset** `collisionMask` defaults to `CL_POINTER | CL_PHYSICS` (3), so a bare `MeshCollider` passes; this rule only fails when a mask is explicitly set without the pointer bit, **or**
 - `GltfContainer` with `visibleMeshesCollisionMask` or `invisibleMeshesCollisionMask` that includes `CL_POINTER` (`mask & 1 !== 0`)
 
 Without a pointer-enabled collider, pointer events are silently ignored at runtime — clicks register nothing.

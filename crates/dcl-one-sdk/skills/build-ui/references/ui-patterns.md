@@ -44,89 +44,7 @@ export function main() {
 
 ## Core Component Examples
 
-### UiEntity (Container)
-```tsx
-import { Color4 } from '@dcl/sdk/math'
-
-<UiEntity
-  uiTransform={{
-    width: 300,              // Pixels or '50%'
-    height: 200,
-    positionType: 'absolute', // 'absolute' or 'relative' (default)
-    position: { top: 10, right: 10 }, // Only with absolute
-    flexDirection: 'column',  // 'row' | 'column'
-    justifyContent: 'center', // 'flex-start' | 'center' | 'flex-end' | 'space-between'
-    alignItems: 'center',     // 'flex-start' | 'center' | 'flex-end' | 'stretch'
-    padding: { top: 10, bottom: 10, left: 10, right: 10 },
-    margin: { top: 5 },
-    display: 'flex'           // 'flex' | 'none' (hide)
-  }}
-  uiBackground={{
-    color: Color4.create(0, 0, 0, 0.8) // Semi-transparent black
-  }}
-/>
-```
-
-### Label (Text)
-```tsx
-import { Color4 } from '@dcl/sdk/math'
-
-<Label
-  value="Score: 100"
-  fontSize={18}
-  color={Color4.White()}
-  textAlign="middle-center"
-  font="sans-serif"
-  uiTransform={{ width: 200, height: 30 }}
-/>
-```
-
-### Button
-```tsx
-<Button
-  value="Click Me"
-  variant="primary"  // 'primary' | 'secondary'
-  fontSize={16}
-  uiTransform={{ width: 150, height: 40 }}
-  onMouseDown={() => {
-    console.log('Button clicked!')
-  }}
-/>
-```
-
-### Input
-```tsx
-import { Input } from '@dcl/sdk/react-ecs'
-import { Color4 } from '@dcl/sdk/math'
-
-<Input
-  placeholder="Type here..."
-  fontSize={14}
-  color={Color4.White()}
-  uiTransform={{ width: 250, height: 35 }}
-  onChange={(value) => {
-    console.log('Value changing:', value)
-  }}
-  onSubmit={(value) => {
-    console.log('Submitted:', value)
-  }}
-/>
-```
-
-### Dropdown
-```tsx
-import { Dropdown } from '@dcl/sdk/react-ecs'
-
-<Dropdown
-  options={['Option A', 'Option B', 'Option C']}
-  selectedIndex={0}
-  onChange={(index) => {
-    console.log('Selected:', index)
-  }}
-  uiTransform={{ width: 200, height: 35 }}
-  fontSize={14}
-/>
-```
+Per-component prop lists and minimal examples (`UiEntity`, `Label`, `Button`, `Input`, `Dropdown`): `ui-components.md`.
 
 ---
 
@@ -487,25 +405,13 @@ Use `flexGrow: 1` on scrollable entities to fill remaining space in a parent, us
 </UiEntity>
 ```
 
-### Dropdown Extras
-```tsx
-<Dropdown
-  options={['Option A', 'Option B', 'Option C']}
-  selectedIndex={selectedIdx}
-  onChange={(idx) => { selectedIdx = idx }}
-  fontSize={14}
-  color={Color4.White()}
-  disabled={false}
-/>
-```
-
 ---
 
 ## Common Widgets (From Scratch)
 
 Build widgets from React-ECS primitives — there is no pre-built widget library.
 
-- **Prompt / dialog / confirmation** → see the **Modal Dialog** pattern in `ui-components.md` (full-screen overlay + centered panel + `Button`s). Add a second `Button` for a two-option (accept/reject) prompt.
+- **Prompt / dialog / confirmation** → see the **OK-Prompt Modal** below (full-screen overlay + centered panel + `Button`s). Add a second `Button` for a two-option (accept/reject) prompt.
 - **Progress / health / fill bar** → see **Health Bar** above (nested `UiEntity`, inner sized `width: `${pct}%``).
 
 ### OK-Prompt Modal

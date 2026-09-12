@@ -1,51 +1,50 @@
 # Vendored node_modules
 
 `node_modules.zip` is extracted by `dcl-one-sdk init` so a scaffolded scene builds
-and previews with no npm and no network. It contains the scene toolchain the Rust
-CLI actually uses: `@dcl/sdk` (with `@dcl/ecs`, `@dcl/react-ecs`, `@dcl/js-runtime`,
-`@dcl/ecs-math` and their runtime deps) plus `typescript` for the type check. It is
-pure JS — no platform binaries — so one blob serves linux, macOS and Windows.
+and previews with no npm and no network. It holds the scene toolchain the Rust CLI
+uses: `@dcl/sdk` (with `@dcl/ecs`, `@dcl/react-ecs`, `@dcl/js-runtime`,
+`@dcl/ecs-math` and their runtime deps) plus `typescript` for the type check. Pure
+JS, no platform binaries — one blob serves linux, macOS and Windows.
 
-The current blob is a registry install of the released 7.27.0 toolchain plus
-the rewrites `scripts/build-base-blob.py` applies on top of it. Every rewrite
-lives in `scripts/blob_overlays.py`, and this is the complete list, derived
-from that module (`scripts/blob_collect.py` decides what of the install ships
-at all; the pruning it does removes files and never edits one):
+The blob is a registry install of the released 7.27.0 toolchain plus the
+rewrites `scripts/build-base-blob.py` applies on top. Every rewrite lives in
+`scripts/blob_overlays.py`; the complete list, derived from that module
+(`scripts/blob_collect.py` decides what of the install ships at all — its
+pruning removes files, never edits one):
 
 | function | what the blob carries that the install did not |
 | --- | --- |
-| `patch_ecs_network_delete_length()` | the one overlay on upstream `@dcl/*` JS: `@dcl/ecs`'s `DeleteEntityNetwork.write` length fix, upstream #1595, unreleased - in the shipped `dist-cjs/serialization/crdt/network/deleteEntityNetwork.js` and, through the patched install tree, inside `prebuilt/core.js`; `check_chunk_netdelete()` fails the build unless the chunk carries it. Named under **7.27.0** below. |
-| `patch_ecs7_tsconfig()` | `@dcl/sdk/types/tsconfig.ecs7.json`: `downlevelIteration` and `suppressExcessPropertyErrors` removed, `moduleResolution` `node` -> `bundler`; every scene extends this file (`docs/ts7-migration.md`). Each edit must match exactly once: the build fails naming an edit upstream has already shipped (drop it from `ECS7_EDITS`), and with the instruction to delete the function once all three have. |
+| `patch_ecs_network_delete_length()` | the one overlay on upstream `@dcl/*` JS: `@dcl/ecs`'s `DeleteEntityNetwork.write` length fix (upstream #1595, unreleased), in the shipped `dist-cjs/serialization/crdt/network/deleteEntityNetwork.js` and, via the patched install tree, in `prebuilt/core.js`; `check_chunk_netdelete()` fails the build unless the chunk carries it. Detailed under **7.27.0** below. |
+| `patch_ecs7_tsconfig()` | `@dcl/sdk/types/tsconfig.ecs7.json`: `downlevelIteration` and `suppressExcessPropertyErrors` removed, `moduleResolution` `node` -> `bundler`; every scene extends this file (`docs/ts7-migration.md`). Each edit must match exactly once — the build fails naming an edit upstream has already shipped (drop it from `ECS7_EDITS`), and tells you to delete the function once all three have. |
 | `add_pbmin()` | `node_modules/protobufjs` is not upstream's: 4 files from `experiments/protobufjs-minimal-replacement` (`package.json` at version `7.2.4-dcl-one-sdk-pbmin.1`, `LICENSE`, `index.js`, `minimal.js`); `swap_pbmin_into_tree()` points the install tree at the same code before the chunks are bundled, and `check_chunk_pbmin()` fails the build if `prebuilt/core.js` stops carrying it. |
 | `add_shim()` | `node_modules/@dcl/inspector` is hand-authored, not a registry package: 8 files copied verbatim from `src/vendor/inspector-shim` (`index.js`, `engine.js`, `engine-to-composite.js`, `host.js`, `component-schemas.json`, `minimal-composite.json`, `root-components.json`, `package.json`). |
 | `build_service_descriptor()` | the ninth file of that package, `data-layer.gen.js`, transpiled at build time from the checked-in `data-layer.gen.ts` with the vendored `typescript`. |
 
-Two build steps in `build-base-blob.py` itself also leave the tree different
-from an install, without editing an upstream file: `build_chunks()` adds
-`@dcl/sdk/prebuilt/{core,smart}.js` + `registry.json` (the SDK runtime, in
-place of the packages' own `.js`), and `build_types_rollup()` writes
-`@dcl/js-runtime/index.d.ts` - the rolled-up ambient declarations of every SDK
-package, replacing that package's own `index.d.ts` (its three declaration
-files are copied into the rollup verbatim) and the `.d.ts` trees of the
-packages that no longer ship. #1450 (single tree-shakeable ecs) shipped
-upstream, and #1452 (built-in utf-8 codec) has now landed too: `@dcl/sdk` no
-longer imports `text-encoding`, so the 549 KB polyfill is gone from the tree
-and the last regression vs the old overlaid blob is closed.
+Two `build-base-blob.py` steps also leave the tree unlike an install without
+editing an upstream file: `build_chunks()` adds
+`@dcl/sdk/prebuilt/{core,smart}.js` + `registry.json` (the SDK runtime,
+replacing the packages' own `.js`), and `build_types_rollup()` writes
+`@dcl/js-runtime/index.d.ts`, the rolled-up ambient declarations of every SDK
+package, replacing that package's own `index.d.ts` (its three declaration files
+go into the rollup verbatim) and the `.d.ts` trees of packages that no longer
+ship. #1450 (single tree-shakeable ecs) and #1452 (built-in utf-8 codec) have
+both shipped upstream: `@dcl/sdk` no longer imports `text-encoding`, so the
+549 KB polyfill is gone and the last regression vs the old overlaid blob is
+closed.
 
 **7.27.0 (2026-09-04).** Same 422 files, same transitive set and versions
 (`@dcl/rpc` 1.1.2, `ws` 8.21.3, `long` 5.3.2, `mitt` 3.0.1, `typescript`
-6.0.3). Zip size, as one history: the previous pin zipped to 2,424,187 B, a
-pure install of 7.27.0 zips to 2,426,310 B, and the #1595 overlay below adds
-2 B to that, so the shipped `node_modules.zip` is **2,426,312 B**
-(`stat -c%s`). What the line brings, and what
-`init.rs::blob_tracks_the_scaffold_pin_and_carries_the_ecs_fixes` now pins:
-`ByteBuffer` scopes its `DataView` to the buffer's own `byteLength` in both
-the constructor and the growth path (upstream #1460 — a buffer over a subarray
-could read and write past its slice), and the entity container never
-generates, recycles or deletes a renderer-reserved entity id (upstream #1544).
-Both reach the scene runtime through `prebuilt/core.js`, not only the node-side
-`dist-cjs`. Two `@dcl/ecs` fixes landed upstream on 2026-09-03, after 7.27.0,
-and the wholesale-at-release rule treats them differently:
+6.0.3). Zip size as one history: the previous pin zipped to 2,424,187 B, a pure
+7.27.0 install zips to 2,426,310 B, the #1595 overlay adds 2 B, so the shipped
+`node_modules.zip` is **2,426,312 B** (`stat -c%s`). What the line brings,
+pinned by `init.rs::blob_tracks_the_scaffold_pin_and_carries_the_ecs_fixes`:
+`ByteBuffer` scopes its `DataView` to the buffer's own `byteLength` in both the
+constructor and the growth path (upstream #1460 — a buffer over a subarray could
+read and write past its slice), and the entity container never generates,
+recycles or deletes a renderer-reserved entity id (upstream #1544); both reach
+the scene runtime through `prebuilt/core.js`, not only the node-side `dist-cjs`.
+Two `@dcl/ecs` fixes landed upstream on 2026-09-03, after 7.27.0, and the
+wholesale-at-release rule treats them differently:
 
 * **#1595 is overlaid now** (js-sdk-toolchain 5ae3ef7c; decision ED,
   2026-09-04). `DeleteEntityNetwork.write` declared
@@ -53,71 +52,68 @@ and the wholesale-at-release rule treats them differently:
   id). `@dcl/ecs` reads its own stream field by field and never noticed; the
   bevy engine's CRDT reader frames strictly
   (`bevy-explorer/crates/dcl/src/interface/mod.rs`, `take_reader_exact`) and
-  discards the rest of the tick's batch from the first record that does not,
-  so every Serverless-Multiplayer entity deletion a 7.x scene sent lost its
-  tick against our engine. `patch_ecs_network_delete_length()` applies
-  upstream's one-line `+ MESSAGE_HEADER_LENGTH` to both builds of the install
-  tree before the chunks are bundled (`dist/` is what rolldown resolves) and
-  to the shipped `dist-cjs`; `check_chunk_netdelete()` fails the build unless
-  `prebuilt/core.js` frames the record as `8+<ns>.MESSAGE_HEADER_LENGTH` and
-  no longer as the folded `12`. Proven on the shipped bytes: exactly two files
-  differ from the pure 7.27.0 install,
+  discards the rest of the tick's batch from the first record that does not, so
+  every Serverless-Multiplayer entity deletion a 7.x scene sent lost its tick
+  against our engine. `patch_ecs_network_delete_length()` applies upstream's
+  one-line `+ MESSAGE_HEADER_LENGTH` to both builds of the install tree before
+  bundling (`dist/` is what rolldown resolves) and to the shipped `dist-cjs`;
+  `check_chunk_netdelete()` fails the build unless `prebuilt/core.js` frames the
+  record as `8+<ns>.MESSAGE_HEADER_LENGTH`, not the folded `12`. Proven on the
+  shipped bytes: exactly two files differ from a pure 7.27.0 install —
   `dist-cjs/serialization/crdt/network/deleteEntityNetwork.js` (1,301 ->
-  1,341 B) and `prebuilt/core.js` (475,116 -> 475,139 B), and they are the
-  whole of the 2 B between the pure install's 2,426,310 B and the shipped
-  2,426,312 B. Pinned by
+  1,341 B) and `prebuilt/core.js` (475,116 -> 475,139 B) — the whole 2 B between
+  2,426,310 B and 2,426,312 B. Pinned by
   `init.rs::blob_tracks_the_scaffold_pin_and_carries_the_ecs_fixes` (both
-  copies) and by
+  copies) and
   `schema_parity.rs::the_vendored_ecs_frames_a_network_entity_delete_by_its_declared_length`,
-  which runs the vendored `dist-cjs` and frames its output the way the engine
-  does. **Removal condition:** the first release carrying #1595. The rewrite
-  must find the buggy line exactly once, so a rebuild on that release fails
-  with the instruction to delete `NETDELETE_*`, both functions, this
-  paragraph and the table row above; the overlay cannot idle unnoticed.
+  which runs the vendored `dist-cjs` and frames its output as the engine does.
+  **Removal condition:** the first release carrying #1595. The rewrite must find
+  the buggy line exactly once, so a rebuild on that release fails, telling you
+  to delete `NETDELETE_*`, both functions, this paragraph and the table row
+  above; the overlay cannot idle unnoticed.
 * **#1582 stays deferred.** `Schemas.Optional` treats `false`/`0`/`''` as
-  absent; the fix is a wire-format change that `schema_crdt.rs` mirrors on
-  purpose (its optional encoding reproduces upstream's truthiness test), so it
-  lands together with that encoder and the `testdata/*.crdt` fixtures at the
-  release that carries it, not alone.
+  absent; the fix is a wire-format change `schema_crdt.rs` mirrors on purpose
+  (its optional encoding reproduces upstream's truthiness test), so it lands
+  with that encoder and the `testdata/*.crdt` fixtures at the release carrying
+  it, not alone.
 
-**Build it with `scripts/build-base-blob.py`.** The Regenerating section below
-walks its pipeline step by step, but the script is the source of truth: it
-derives its install list from `templates/init/scene/package.json` (so the
-vendored set cannot drift from the scaffold pin), keeps only what is reachable
-from the code that ships (`scripts/blob_collect.py`), applies the rewrites
-above (`scripts/blob_overlays.py`), and fails if any kept file has an import
-that would not resolve. Its module docstring carries the evidence for every
-prune. Current output: **422 files, 12,980,975 B (12.38 MB) unpacked,
-2,426,312 B (2.31 MB) zipped** - down from 2,999 / 45.0 MB / 11.0 MB, most of
-that from the prebuilt SDK export (chunks + a types rollup replace the SDK
-source tree) and from dropping the vendored editor. It was 424 / 12.07 MB /
-2.27 MB before the data-layer host landed; that host cost **+23 files,
-+0.28 MB unpacked, +0.05 MB zipped**, and replacing upstream `protobufjs` with
-our own drop-in then took **-34 files, -0.05 MB unpacked, -0.02 MB zipped**
-back off (447 -> 413).
+**Build it with `scripts/build-base-blob.py`.** Regenerating below walks the
+pipeline step by step; the script is the source of truth. It derives its install
+list from `templates/init/scene/package.json` (so the vendored set cannot drift
+from the scaffold pin), keeps only what is reachable from the code that ships
+(`scripts/blob_collect.py`), applies the rewrites above
+(`scripts/blob_overlays.py`), and fails if any kept file has an import that
+would not resolve; its module docstring carries the evidence for every prune.
+Current output: **422 files, 12,980,975 B (12.38 MB) unpacked, 2,426,312 B
+(2.31 MB) zipped** - down from 2,999 / 45.0 MB / 11.0 MB, mostly the prebuilt
+SDK export (chunks + a types rollup replace the SDK source tree) and dropping
+the vendored editor. Before the data-layer host landed it was 424 / 12.07 MB /
+2.27 MB; that host cost **+23 files, +0.28 MB unpacked, +0.05 MB zipped**, and
+replacing upstream `protobufjs` with our own drop-in then took that back off and
+more (exact figures below).
 
 Two versions are deliberately held below latest, both re-checked on every
 rebuild:
 
 * **`typescript` 6.0.3, not 7.0.2.** TS 7 is the Go port: `lib/getExePath.js`
   resolves a per-platform native package (`@typescript/typescript-darwin-arm64`
-  and friends), which would end this blob's one-zip-serves-every-OS property.
-  TS 6 is pure JS and works. It reports three deprecations on the scaffold:
-  `baseUrl` (the scaffold's own tsconfig) and `downlevelIteration` +
+  and friends), ending this blob's one-zip-serves-every-OS property. TS 6 is
+  pure JS and works. It reports three deprecations on the scaffold: `baseUrl`
+  (the scaffold's own tsconfig) and `downlevelIteration` +
   `moduleResolution=node10` (inherited from
   `@dcl/sdk/types/tsconfig.ecs7.json`, which every scaffolded scene extends).
   Two are fixed in `templates/init/scene/tsconfig.json` — `baseUrl` deleted,
-  `moduleResolution: "bundler"` set — and the remaining one needs a change to
-  the upstream ecs7 tsconfig. Do **not** paper over any of them with
+  `moduleResolution: "bundler"` set — the third needs a change to the upstream
+  ecs7 tsconfig. Do **not** paper over any of them with
   `"ignoreDeprecations": "6.0"`: TS 7 *removes* these options, so the mute buys
   nothing, and TS 5.9.3 rejects the option outright (TS5103). See
   `docs/ts7-migration.md` for the exact upstream diff and the evidence.
 * **`protobufjs` 7.2.4, not 8.7.1.** No upstream protobufjs *runtime* reaches
-  the blob any more — not as a package, and since `swap_pbmin_into_tree()` not
-  inside `prebuilt/core.js` either. It stays installed for its declarations,
+  the blob any more — neither as a package nor, since `swap_pbmin_into_tree()`,
+  inside `prebuilt/core.js` (below). It stays installed for its declarations,
   which `build_types_rollup()` needs because `@dcl/ecs/dist` imports
   `protobufjs/minimal` without declaring it, and as the reference the
-  replacement is differentially tested against. That second use is what pins the
+  replacement is differentially tested against. That second use pins the
   version: the npm flow resolves 7.2.4 through `@dcl/sdk` -> `@dcl/sdk-commands`
   -> `@dcl/protocol`, whose manifest pins it exactly, so 7.2.4 is what a scene
   built the npm way actually runs. Installing 8.x would aim the suite at a
@@ -129,45 +125,41 @@ rebuild:
 reimplementation of the `Reader` / `Writer` / `util.Long` / `configure` surface,
 4 files / 48,340 B, where upstream's `minimal` closure was 13 files / 58,872 B
 and dragged six `@protobufjs/*` micro-packages (25 files / 41,117 B) behind it.
-Those six now fall out of the BFS on their own, exactly the way
+Those six now fall out of the BFS on their own, as
 `@protobufjs/{codegen,path,fetch}` already had: `reachable()` only walks files
-the allowlist keeps, and protobufjs keeps none. `@protobufjs/utf8` is the one
-that stays — `@dcl/ecs/dist-cjs` requires it *directly*
-(`serialization/ByteBuffer/index.js`, `components/component-number.js`), not
-through protobufjs, so the replacement does not subsume it. `long` stays too:
-`avatar_shape.gen.js` and `descriptor.gen.js` name it.
+the allowlist keeps, and protobufjs keeps none. `@protobufjs/utf8` stays —
+`@dcl/ecs/dist-cjs` requires it *directly* (`serialization/ByteBuffer/index.js`,
+`components/component-number.js`), not through protobufjs, so the replacement
+does not subsume it. `long` stays too: `avatar_shape.gen.js` and
+`descriptor.gen.js` name it.
 
 Net: **-34 files, -51,649 B unpacked, -25,873 B zipped** (447 -> 413 files,
 12,954,435 -> 12,902,786 B unpacked, 2,429,940 -> 2,404,067 B zipped).
 
-An earlier revision of this file said of the old prune: *"The 53 KB that stays
-is the entire CRDT wire codec; nothing in it is safe to hand-port."* That was
-the right instinct and the wrong conclusion. It is not safe to hand-port on a
-reading; it is safe to replace on a differential suite, and there is one —
-`experiments/protobufjs-minimal-replacement/tests`, run with `tests/setup.sh &&
-bash tests/run-all.sh <seed>`. Per seed, with upstream 7.2.4 loaded side by side
-as the reference and every corpus module bound to exactly one implementation
-(asserted each run by `verify-isolation.js`), asserting byte-identical encodings
+An earlier revision said of the old prune: *"The 53 KB that stays is the entire
+CRDT wire codec; nothing in it is safe to hand-port."* Right instinct, wrong
+conclusion: not safe to hand-port on a reading, but safe to replace on a
+differential suite — `experiments/protobufjs-minimal-replacement/tests`
+(`bash tests/setup.sh && bash tests/run-all.sh <seed>`), whose README carries
+the full evidence. Per seed, with upstream 7.2.4 loaded side by side as the
+reference and every corpus module bound to exactly one implementation
+(`verify-isolation.js` asserts it each run), asserting byte-identical encodings
 in *both* directions, deep-equal decodes and throw-parity down to the error
-message:
-
-* all **336 `@dcl/ecs` message namespaces** (142 unique types) x 300 instances x
-  4 environments (Buffer / no-Buffer x Long / no-Long) = **403,200** instances;
-* the ESM `dist/` build of the same corpus, 244 namespaces x 100 = 24,400;
-* all **41 namespaces of the two catalogues that are not `@dcl/ecs`** —
-  `@dcl/rpc/dist/protocol/index.js` (11: the request/response/stream/port
-  framing every byte of the data-layer socket passes through) and the vendored
-  22-method data-layer descriptor `@dcl/inspector/data-layer.gen.js` (30) — x
-  2000 x the same 4 environments = **328,000** instances, plus an assertion
-  that every one of the 22 methods' request and response types was among them;
-* **800,000 fuzz operations** on random, truncated and corrupted input, where
-  the two implementations must agree on *which* inputs throw.
-
-**Zero divergences, six seeds** (`0xC0FFEE`, `0x1`, `0xDEADBEEF`, `0x5EED`,
-`0xBADF00D`, `0x2A`). Mutation-tested: 13 injected wire-format bugs, 13 caught —
-and the rpc/descriptor phase independently catches two of them
-(`varint-length-boundary-off-by-one`, `fixed32-byte-order`) that the `@dcl/ecs`
-corpus phase misses, so it is not riding on the older phase.
+message: **403,200** `@dcl/ecs` instances (all **336 message namespaces**, 142
+unique types, x 300 x 4 environments — Buffer / no-Buffer x Long / no-Long);
+24,400 from the ESM `dist/` build of that corpus (244 namespaces x 100);
+**328,000** from the **41 namespaces of the two catalogues that are not
+`@dcl/ecs`** — `@dcl/rpc/dist/protocol/index.js` (11: the
+request/response/stream/port framing every byte of the data-layer socket passes
+through) and the vendored 22-method `@dcl/inspector/data-layer.gen.js` (30) — x
+2000 x the same 4 environments, plus an assertion that all 22 methods' request
+and response types were among them; and **800,000 fuzz operations** on random,
+truncated and corrupted input, where the two implementations must agree on
+*which* inputs throw. **Zero divergences, six seeds** (`0xC0FFEE`, `0x1`,
+`0xDEADBEEF`, `0x5EED`, `0xBADF00D`, `0x2A`). Mutation-tested: 13 injected
+wire-format bugs, 13 caught — two (`varint-length-boundary-off-by-one`,
+`fixed32-byte-order`) only by the rpc/descriptor phase, which is therefore not
+riding on the `@dcl/ecs` corpus phase.
 
 Two upstream inconsistencies are reproduced **on purpose** and must not be
 "fixed": `BufferWriter.string` and `Writer.string` encode lone surrogates
@@ -177,25 +169,23 @@ where `Reader.string` throws. The suite pairs like for like.
 **The scene runtime uses it too.** `swap_pbmin_into_tree()` redirects the
 install tree's `minimal.js` at the replacement *before* `build_chunks()`
 resolves it, so `prebuilt/core.js` bundles this codec and every scene runs it
-inside QuickJS. `check_chunk_pbmin()` fails the build if the marker
-`dcl-one-sdk-pbmin.1` ever stops appearing in that chunk — the regression it
-guards is silent, since the swap works by file overwrite and restores upstream
-merely by being skipped.
+inside QuickJS; `check_chunk_pbmin()` fails the build if the marker
+`dcl-one-sdk-pbmin.1` stops appearing in that chunk — otherwise a silent
+regression, since the swap works by file overwrite and restores upstream merely
+by being skipped.
 
-So there is exactly one protobuf codec in the toolchain. There used to be two:
-this one for the node consumers — `@dcl/ecs/dist-cjs` (69 files, the CRDT wire
-format), `@dcl/rpc` (6 files, the socket framing) and the data-layer descriptor
-(1 file) — and upstream's, minified inside the chunk, for the scene runtime.
-
-Say the cost plainly: **QuickJS is still the axis the suite does not cover** (it
-is all node 24 / V8), and now that axis is load-bearing, where before it was
-only reached by upstream's copy. That is a genuine risk increase, accepted
-because the alternative was two implementations of one wire format with the
-untested, unowned one on the path that runs in production.
+So the toolchain has one protobuf codec where it had two: this one for the node
+consumers — `@dcl/ecs/dist-cjs` (69 files, the CRDT wire format), `@dcl/rpc`
+(6 files, the socket framing) and the data-layer descriptor (1 file) — and
+upstream's, minified inside the chunk, for the scene runtime. The cost, plainly:
+**QuickJS is still the axis the suite does not cover** (all node 24 / V8), and
+it is now load-bearing where before only upstream's copy reached it — a genuine
+risk increase, accepted because the alternative was two implementations of one
+wire format with the untested, unowned one on the path that runs in production.
 
 The behaviour difference — same class as the `typescript` prune, one step
 further — is a scene that imports `protobufjs` *itself*, the reflection library
-rather than the wire codec. That scene must declare protobufjs in its own
+rather than the wire codec. Such a scene must declare protobufjs in its own
 `package.json` (the scaffold does not), so `npm install` would hand it a full
 private copy anyway; and the shipped manifest reads
 `"version": "7.2.4-dcl-one-sdk-pbmin.1"`, so `npm ls` in an extracted scene
@@ -203,10 +193,9 @@ cannot mistake this for upstream 7.2.4.
 
 **`ethers` is no longer vendored.** Earlier revisions of this file called it
 "imported by `@dcl/sdk/ethereum-provider` but undeclared in its manifest". It is
-not imported. A specifier scan of every `.js`/`.ts` in the blob outside
-`ethers/` itself returns exactly three hits, and all three are the same line of
-one JSDoc comment (`@dcl/sdk/ethereum-provider/index.js:8`, its `.d.ts`, and its
-`src/` original):
+not imported: a specifier scan of every `.js`/`.ts` in the blob outside
+`ethers/` returns exactly three hits, all the same line of one JSDoc comment
+(`@dcl/sdk/ethereum-provider/index.js:8`, its `.d.ts`, and its `src/` original):
 
     * import { ethers } from 'ethers'
 
@@ -214,16 +203,16 @@ Neither `@dcl/sdk`'s manifest nor the scaffold's `package.json` declares
 `ethers`, so `npm install` in a scaffolded scene never installed it either —
 shipping it was the divergence. Dropping it and the four packages only it
 reached (`@adraffy/ens-normalize`, `aes-js`, `@noble/curves`, `@noble/hashes`)
-removed 13.0 MB. A scene that wants ethers adds it to its own `package.json`,
-exactly as in the npm flow. A verification scene importing
-`@dcl/sdk/ethereum-provider` still bundles and type-checks without it.
-`scan()` in `scripts/blob_collect.py` strips comments before scanning, so this
-class of phantom dependency cannot come back.
+removed 13.0 MB. A scene that wants ethers adds it to its own `package.json`, as
+in the npm flow; a verification scene importing `@dcl/sdk/ethereum-provider`
+still bundles and type-checks without it. `scan()` in
+`scripts/blob_collect.py` strips comments before scanning, so this class of
+phantom dependency cannot come back.
 
 ## `@dcl/inspector`: the protocol, not the UI
 
-`templates/data-layer-host.mjs` needs `@dcl/inspector` for two jobs.
-`inspector-shim/` does both; what it does not do is carry the browser editor.
+`templates/data-layer-host.mjs` needs `@dcl/inspector` for two jobs;
+`inspector-shim/` does both, and does not carry the browser editor.
 
 **What ships (0.18 MB).** Split by file:
 
@@ -238,31 +227,31 @@ class of phantom dependency cannot come back.
 | `root-components.json` | what `@dcl/asset-packs`' `initComponents` puts on entity 0 — 63 `asset-packs::ActionTypes` entries and an `asset-packs::Counter` — applied after every composite load, as upstream does |
 
 **The four live methods** are `crdtStream` (the engine ⟷ editor wire, both
-directions), `save`, `getInspectorPreferences` and `setInspectorPreferences`.
-That is enough for a live editing session: an editor connects, receives the
-whole engine state as the first stream message, pushes CRDT edits, and the host
-writes them back to `assets/scene/main.composite` — which the preview server's
-watcher turns into `main.crdt`.
+directions), `save`, `getInspectorPreferences` and `setInspectorPreferences` —
+enough for a live editing session: an editor connects, receives the whole engine
+state as the first stream message, pushes CRDT edits, and the host writes them
+back to `assets/scene/main.composite`, which the preview server's watcher turns
+into `main.crdt`.
 
-The other 18 return well-formed empty responses. They are not optional:
-`@dcl/rpc`'s `codegen.registerService` binds *every* key in the descriptor, so
-a missing one is a `TypeError` that kills the connection, and
+The other 18 return well-formed empty responses, and are not optional:
+`@dcl/rpc`'s `codegen.registerService` binds *every* key in the descriptor, so a
+missing one is a `TypeError` that kills the connection, and
 `serverProcedureUnary` rejects a falsy result outright. Against a real browser
 editor the stubs mean an empty asset panel, inert drag-and-drop import and dead
-undo/redo — reachable and empty, never throwing, and truthful about failing
+undo/redo — reachable and empty, never throwing, truthful about failing
 (`removeFiles` reports every path in `failed` rather than claiming success).
 Deliberately not ported: undo/redo (a 978-line state machine with 100 ms
 transaction batching), the load-time migrations in `composite-provider.ts`
-(we pass composites through verbatim — a `SceneMetadata-v4` stays v4 and
-Creator Hub migrates it when it next opens the scene, which is the safe
-direction), and `SceneProvider`, so **scene-metadata edits made against this
-host do not reach `scene.json`**. One piece of upstream's load path IS ported,
-as data: `composite-provider.ts` runs `@dcl/asset-packs`' `initComponents`
-after every load, and the 7.43 editor reads what it seeds on entity 0
-unconditionally — without it, adding the first entity throws `[getFrom]
-Component asset-packs::ActionTypes for entity #0 not found` and React unmounts
-the page. `seedRootComponents` in `host.js` applies `root-components.json`
-with `addActionType`'s merge rule (replace same `type`, append the rest), so a
+(composites pass through verbatim — a `SceneMetadata-v4` stays v4 and Creator
+Hub migrates it when it next opens the scene, the safe direction), and
+`SceneProvider`, so **scene-metadata edits made against this host do not reach
+`scene.json`**. One piece of upstream's load path IS ported, as data:
+`composite-provider.ts` runs `@dcl/asset-packs`' `initComponents` after every
+load, and the 7.43 editor reads what it seeds on entity 0 unconditionally —
+without it, adding the first entity throws `[getFrom] Component
+asset-packs::ActionTypes for entity #0 not found` and React unmounts the page.
+`seedRootComponents` in `host.js` applies `root-components.json` with
+`addActionType`'s merge rule (replace same `type`, append the rest), so a
 composite saved by another editor keeps the action types it has and gains the
 ones it lacks.
 
@@ -271,11 +260,10 @@ ones it lacks.
 `scripts/build-inspector-blob.py` were all removed. `start --data-layer` runs
 the vendored host and serves `/data-layer`; `/inspector/*` answers 404 with the
 install line until the package comes from `npm install --save-dev
-@dcl/inspector` or `DCL_ONE_INSPECTOR_DIR`. That split is deliberate — a
-missing UI used to be *fatal* to `--data-layer`, which meant the vendored host
-could only ever start in the one case where a real `@dcl/inspector` was
-installed, and in that case the real one wins at `require()` time. The fallback
-was unreachable.
+@dcl/inspector` or `DCL_ONE_INSPECTOR_DIR`. The split is deliberate: a missing
+UI used to be *fatal* to `--data-layer`, so the vendored host could only ever
+start in the one case where a real `@dcl/inspector` was installed — and there
+the real one wins at `require()` time. The fallback was unreachable.
 
 A real `@dcl/inspector` in the scene is still preferred for everything:
 `req()` in the template resolves against the scene first. This is a fallback,
@@ -285,10 +273,10 @@ not a takeover.
 
 `component-schemas.json`, `minimal-composite.json` and `root-components.json`
 are generated by `scripts/dump-inspector-tables.cjs` from an installed
-`@dcl/inspector` (currently **7.43.2**, with `@dcl/asset-packs` 2.20.0) — they
-cannot be derived from the blob, because the `inspector::*` schemas live in
-creator-hub's own source and the `asset-packs::*` ones, and the root-entity
-values `initComponents` seeds, come from `@dcl/asset-packs`, which the blob
+`@dcl/inspector` (currently **7.43.2**, with `@dcl/asset-packs` 2.20.0). They
+cannot be derived from the blob: the `inspector::*` schemas live in
+creator-hub's own source, and the `asset-packs::*` ones — plus the root-entity
+values `initComponents` seeds — come from `@dcl/asset-packs`, which the blob
 installs and then drops. **Re-run that script on every inspector bump.** The
 install it reads comes from `scripts/install-inspector-host.sh`: since 7.37.0 a
 bare `npm install @dcl/inspector` does not `require()` (undeclared
@@ -300,22 +288,21 @@ Why a table at all: `@dcl/ecs`'s CRDT receive loop
 (`dist-cjs/systems/crdt/index.js`) looks up `getComponentOrNull(componentId)`
 and, when that is null, only re-broadcasts the message — the value never enters
 the engine, so the next `save()` cannot see it. An editor writing a component
-the host never defined would have its edit accepted, echoed back, and then
-**silently dropped**. Going stale is therefore a data-loss bug, not a feature
-gap.
+the host never defined would have its edit accepted, echoed back, then
+**silently dropped**. Going stale is a data-loss bug, not a feature gap.
 
 Two details in the table are load-bearing:
 
 * **`defineFrom`.** 28 components come from `@dcl/ecs`'s own factories and 31
-  from `Schemas.fromJson(jsonSchema)`. It is not a name-prefix rule: the
-  generator probes each factory and compares `jsonSchema`. `core::Material`'s
-  schema is `{serializationType: 'protocol-buffer'}` — not rebuildable from
-  JSON, so the factory is mandatory — while `core::ParticleSystem` *looks* core
-  and newer `@dcl/ecs` releases do ship a factory for it, but the inspector
-  defines it from its own `ParticleSystemSchema`, so the factory is wrong there.
+  from `Schemas.fromJson(jsonSchema)` — not a name-prefix rule: the generator
+  probes each factory and compares `jsonSchema`. `core::Material`'s schema is
+  `{serializationType: 'protocol-buffer'}`, not rebuildable from JSON, so the
+  factory is mandatory; `core::ParticleSystem` *looks* core and newer `@dcl/ecs`
+  releases do ship a factory for it, but the inspector defines it from its own
+  `ParticleSystemSchema`, so the factory is wrong there.
 * **Definition order.** `dumpEngineToComposite` walks `componentsIter()`, so
-  definition order is the order component groups land in the saved file.
-  Matching upstream keeps scenes from churning in git. Verified: the `gather`
+  definition order is the order component groups land in the saved file;
+  matching upstream keeps scenes from churning in git. Verified: the `gather`
   scene's 201,674-byte `main.composite` (26 component groups, including a
   scene-local `cube-id` component) loads and dumps **byte-identical**, order
   included.
@@ -325,13 +312,13 @@ Two details in the table are load-bearing:
 `@dcl/rpc` is the wire protocol the data layer speaks — port multiplexing,
 request/response framing, bidirectional streaming — vendored rather than
 reimplemented. Pruned from 66 files / 0.31 MB to **14 files / 0.11 MB** by a
-`require()` walk from the three entry points anything names
-(`@dcl/rpc`, `@dcl/rpc/dist/codegen`, `@dcl/rpc/dist/transports/WebSocket`)
-plus `dist/push-channel` for its `AsyncQueue`. Its entire runtime `require()`
-surface is `mitt` and `protobufjs/minimal`; `ts-proto` is in its
-`dependencies` and is never required at runtime. What goes: every `.d.ts` and
-`.js.map`, `dist/rpc.api.json` (46,818 B of api-extractor report), and three
-unreachable runtime files — `dist/transports/{Memory,WebWorker}.js` and
+`require()` walk from the three entry points anything names (`@dcl/rpc`,
+`@dcl/rpc/dist/codegen`, `@dcl/rpc/dist/transports/WebSocket`) plus
+`dist/push-channel` for its `AsyncQueue`. Its entire runtime `require()` surface
+is `mitt` and `protobufjs/minimal`; `ts-proto` is a `dependencies` entry never
+required at runtime. What goes: every `.d.ts` and `.js.map`,
+`dist/rpc.api.json` (46,818 B of api-extractor report), and three unreachable
+runtime files — `dist/transports/{Memory,WebWorker}.js` and
 `dist/codegen-types.js` (a 118 B `__esModule` marker for a declarations-only
 module).
 
@@ -354,21 +341,21 @@ generates it from
 `protoc-gen-dcl_ts_proto` — a plugin from **`@dcl/ts-proto`, a DCL fork**, not
 the `ts-proto` on npm.
 
-We vendor the *output*. `inspector-shim/data-layer.gen.ts` (75,703 B) is
-checked in verbatim beside the `.proto` it came from; neither ships.
-`build_service_descriptor()` in `scripts/blob_overlays.py` transpiles the `.ts` to
-83,418 B of CommonJS with the already-vendored `typescript` and fails the build
-unless the result still declares 22 methods. `--noCheck` makes that a
+We vendor the *output*. `inspector-shim/data-layer.gen.ts` (75,703 B) is checked
+in verbatim beside the `.proto` it came from; neither ships.
+`build_service_descriptor()` in `scripts/blob_overlays.py` transpiles the `.ts`
+to 83,418 B of CommonJS with the already-vendored `typescript` and fails the
+build unless the result still declares 22 methods. `--noCheck` makes that a
 transpile, not a type check: the file's only imports are `long` and
 `protobufjs/minimal`, whose `.d.ts` this blob deliberately drops.
 
 Reproducing the codegen toolchain instead would mean vendoring a ~5 MB Node
 plugin plus `ts-proto-descriptors` / `case-anything` / `dprint-node` to
 regenerate a file that changes about once a year (the proto's last edit is
-2025-11-13, creator-hub `36c4130`). Hand-writing the descriptor is technically
-possible — `codegen.js` reads only five fields per method — but would be 22
-hand-maintained message codecs matching a fork's exact wire choices
-(`oneof=unions`, `useMapType=true`), for no size win over 83 KB.
+2025-11-13, creator-hub `36c4130`). Hand-writing the descriptor is possible —
+`codegen.js` reads only five fields per method — but would be 22 hand-maintained
+message codecs matching a fork's exact wire choices (`oneof=unions`,
+`useMapType=true`), for no size win over 83 KB.
 
 ### Autosave
 
@@ -383,18 +370,18 @@ have.
 
 `ajv` is not vendored for the preferences file. The JTD schema is two optional
 booleans; the checks are inlined and every parse failure falls back to the
-defaults, which is what upstream does with an `InvalidPreferences` too.
+defaults, as upstream does with an `InvalidPreferences` too.
 
 It was dropped because the weight is upstream build output we cannot fix from
 here, and it is most of the package:
 
-* `public/bundle.js` is 18.0 MB, and **~10.8 MB of that is Babylon.js**, bundled
-  whole rather than tree-shaken. The bundle carries a barrel re-export map of
-  **2,037 Babylon symbols** — including 359 NodeMaterial shader-graph blocks, 61
-  WebXR symbols, post-processing, particles, sprites and 929 GLSL fragments —
-  because the import is a namespace import (`BABYLON.` appears 533 times), which
-  defeats `@babylonjs/core`'s own side-effect-free tree-shaking. An editor
-  viewport genuinely needs a WebGL engine for its gizmos
+* `public/bundle.js` is 18.0 MB, **~10.8 MB of it Babylon.js**, bundled whole
+  rather than tree-shaken: a barrel re-export map of **2,037 Babylon symbols** —
+  including 359 NodeMaterial shader-graph blocks, 61 WebXR symbols,
+  post-processing, particles, sprites and 929 GLSL fragments — because the
+  import is a namespace import (`BABYLON.` appears 533 times), which defeats
+  `@babylonjs/core`'s own side-effect-free tree-shaking. An editor viewport
+  genuinely needs a WebGL engine for its gizmos
   (`PositionGizmo`/`RotationGizmo`/`ScaleGizmo`/`GizmoManager`) and glTF
   loading; it does not need VR session management.
 * **2,967 Font Awesome icon records, 1.62 MB of raw SVG path data** — the whole
@@ -419,18 +406,18 @@ toolchain is built and tested against.
 
 The blob itself no longer constrains the floor. It used to: the vendored
 `@dcl/inspector` host did `require("node-fetch")` at module scope on an ESM-only
-`node-fetch` 3.x, which is legal only under node's `require(esm)` support
-(unflagged in **20.19.0 / 22.12.0**), so `start --data-layer` genuinely could not
-run below that. Reproduced at the time with:
+`node-fetch` 3.x, legal only under node's `require(esm)` support (unflagged in
+**20.19.0 / 22.12.0**), so `start --data-layer` genuinely could not run below
+that. Reproduced at the time with:
 
     Error [ERR_REQUIRE_ESM]: require() of ES Module .../node-fetch/src/index.js
     from .../@dcl/inspector/dist/tooling-entrypoint.js not supported.
 
-That was an inherited defect, never ours — and it left with the package. The
-data-layer host is now our own, built on the already-vendored `@dcl/ecs`, and it
+That was an inherited defect, never ours, and it left with the package. The
+data-layer host is now our own, built on the already-vendored `@dcl/ecs`, and
 requires no `node-fetch` at all.
 
-What the scaffold used to claim, `">=16"`, was simply **false** while that host
+The scaffold's old claim of `">=16"` was simply **false** while that host
 shipped: `start --data-layer` had never worked on node 16 or 18. The number is
 now a support statement rather than a hard constraint, so keep it honest — 24 is
 what CI and this machine build and test against. Lowering it means testing
@@ -442,8 +429,8 @@ has its own `@dcl/inspector`, `HTTP 404` otherwise). The cheap end-to-end check
 is `cargo test -p dcl-one-sdk --test data_layer_rpc` with
 `DCL_ONE_SDK_TEST_NODE_MODULES` pointed at an extracted blob: it drives a real
 node RPC client through boot-composite → initial CRDT state → edit → save →
-`SCENE_UPDATE` → `main.crdt`, against the blob alone. The stronger check, with
-a real browser and a real editor UI, is
+`SCENE_UPDATE` → `main.crdt`, against the blob alone. The stronger check, with a
+real browser and a real editor UI, is
 `scripts/creator-hub-ui-drive.sh <scene> <evidence-dir>`.
 
 ### crdt parity of the stand-in
@@ -466,9 +453,8 @@ the entry it writes re-exports a sibling, never itself. The other,
 reused tree, which on a fresh install is the signal that upstream #1595 has
 shipped and the overlay must go; it tolerates the reused tree only because
 `main()` passes the flag through and the function accepts the fixed line under
-it. This is what the script does, in the order `main()` runs it; the steps are
-recorded so the script stays auditable, and each names the function that owns
-it.
+it. The steps below are what the script does, in the order `main()` runs them,
+each naming the function that owns it — recorded so the script stays auditable.
 
 1. **Install** (`main()`): empty `--work` dir, `corepack pnpm add
    --ignore-scripts --config.node-linker=hoisted` of the scaffold's
@@ -476,7 +462,7 @@ it.
    imports (`protobufjs@7.2.4`, `@protobufjs/utf8`, `ws`, `@dcl/rpc`) and
    `@dcl/asset-packs`, installed only so the chunk build and the rollup can
    read it. The `--config.node-linker=hoisted` **flag** is required: an `.npmrc`
-   with the same setting is silently ignored by pnpm 11, which yields a `.pnpm`
+   with the same setting is silently ignored by pnpm 11, yielding a `.pnpm`
    tree where nothing resolves.
 2. **Prune by code reachability, not manifest reachability** (`reachable()`
    in `scripts/blob_collect.py`): BFS the bare specifiers found in the
@@ -485,29 +471,27 @@ it.
    `@protobufjs/utf8`, `ws`, `@dcl/rpc`), never into `NEVER` or
    `DROP_PACKAGES`. Declarations count - `build --production` type-checks the
    scene, and tsc follows `.d.ts` imports exactly like node follows `require`.
-   This is strictly better than the old manifest BFS: it drops
+   Strictly better than the old manifest BFS: it drops
    `loose-envify`/`js-tokens` (react 18 declares them; nothing imports them)
-   and it never invents `ethers`. Comments are stripped before scanning, and a
+   and never invents `ethers`. Comments are stripped before scanning, and a
    specifier naming a node builtin is not treated as a package - `ws` requires
    `'buffer'`, which is node's, not npm's.
 3. **Prune inside kept packages** (`wanted()` + `FILE_ALLOWLIST`, applied by
    `collect()`): symlinks, nested `node_modules`, source maps, `.md`, test and
-   docs directories go everywhere, and eight packages are allowlisted file by
-   file (`FILE_ALLOWLIST`: `@dcl/ecs`, `@dcl/js-runtime`, `@dcl/rpc`,
-   `@dcl/sdk`, `long`, `mitt`, `protobufjs`, `typescript`) -
-   `check_readme_allowlist()` fails the build if that count or list stops
-   matching the dict. `protobufjs` is cut to *nothing* - step 4 writes the
-   package instead, and the six `@protobufjs/*` micro-packages it was the sole
-   importer of then leave the closure on their own, the way
-   `@protobufjs/{codegen,path,fetch}` already had. The largest allowlist is
-   `typescript`: `build.rs` runs exactly
-   `node typescript/lib/tsc.js -p tsconfig.json --noEmit`, and that run under
-   a node with `Module._resolveFilename` and the `fs` read family hooked
+   docs directories go everywhere; eight packages are allowlisted file by file
+   (`FILE_ALLOWLIST`: `@dcl/ecs`, `@dcl/js-runtime`, `@dcl/rpc`, `@dcl/sdk`,
+   `long`, `mitt`, `protobufjs`, `typescript`) - `check_readme_allowlist()`
+   fails the build if that count or list stops matching the dict. `protobufjs`
+   is cut to *nothing* - step 4 writes the package instead, and the six
+   `@protobufjs/*` micro-packages it solely imported then leave the closure on
+   their own (above). The largest allowlist is `typescript`: `build.rs` runs
+   exactly `node typescript/lib/tsc.js -p tsconfig.json --noEmit`, and that run
+   under a node with `Module._resolveFilename` and the `fs` read family hooked
    touches precisely `lib/tsc.js`, the `lib/_tsc.js` it requires,
    `package.json`, and 45 `lib/lib.*.d.ts`. So `lib/typescript.js` (8.7 MB,
    the programmatic API), `typescript.d.ts`, every `tsserver*` file and the 13
    locale directories (4.2 MB) all go - 22.5 MB -> 9.6 MB. Locales are safe to
-   drop: with `lib/ja/` present `tsc --locale ja` prints Japanese, with every
+   drop: with `lib/ja/` present `tsc --locale ja` prints Japanese; with every
    locale directory deleted the same command exits 0 and prints English.
 4. **The rewrites** (`scripts/blob_overlays.py`, in this order):
    `add_pbmin()`, `add_shim()`, `build_service_descriptor()` and
@@ -537,8 +521,8 @@ it.
 8. **Prove it before committing**: `dcl-one-sdk init` in an empty dir, then
    `build --production` (rolldown + type check) with a scene importing
    `@dcl/sdk/players` and `@dcl/sdk/network`, then `start` and probe `/about`.
-   A `.composite` scene must still reach `[4/5] main.crdt regenerated`, which
-   is the test that the `@dcl/inspector` stand-in survived the rebuild; and
+   A `.composite` scene must still reach `[4/5] main.crdt regenerated`, the
+   test that the `@dcl/inspector` stand-in survived the rebuild; and
    `cargo test --test data_layer_rpc` with `DCL_ONE_SDK_TEST_NODE_MODULES` set
    to the new tree is the test that its data-layer half did.
 
@@ -581,19 +565,19 @@ reaches `[4/5] main.crdt regenerated (1 composite)`.
 **Do not add the `.d.ts` closure to the blob as files.** It was measured — the
 package's declarations are 90,874 B against 1,286,817 B of runtime `.js`, so
 0.09 MB looks cheap — but it buys nothing the rollup does not already provide
-and it actively regresses two things. A `node_modules/@dcl/asset-packs` with a
-manifest whose `typings` resolves would make tsc prefer the on-disk tree over
-the ambient declarations, which is precisely the failure mode `DROP_PACKAGES`
-exists to prevent; and shipping the tree wholesale (rather than the rollup's
-reachability walk) drags in declarations nothing public re-exports — the
-`admin-toolkit-ui/**` half of the package — the same class of trap that
+and regresses two things. A `node_modules/@dcl/asset-packs` with a manifest
+whose `typings` resolves would make tsc prefer the on-disk tree over the ambient
+declarations, precisely the failure mode `DROP_PACKAGES` exists to prevent; and
+shipping the tree wholesale (rather than the rollup's reachability walk) drags
+in declarations nothing public re-exports — the `admin-toolkit-ui/**` half of
+the package — the same class of trap that
 `@dcl/react-ecs/dist/reconciler/types.d.ts` and its DOM `Document` reference
-already sprang once. The TS7016 hazard the old `inspector.zip` note warned
-about is real, and the rollup is where it is handled: drop a `.d.ts` the closure
-needs and `build_types_rollup()` fails the build with unresolved relative
-specifiers before the zip is written.
+already sprang once. The TS7016 hazard the old `inspector.zip` note warned about
+is real, and the rollup is where it is handled: drop a `.d.ts` the closure needs
+and `build_types_rollup()` fails the build with unresolved relative specifiers
+before the zip is written.
 
 The one thing the base blob still does not carry is the *visual editor's UI*
-(`@dcl/inspector`'s `public/`). Its **protocol** half is here — see the
-stand-in section above — so `start --data-layer` works offline and only
-`/inspector/*` needs a scene with its own `npm install`.
+(`@dcl/inspector`'s `public/`); its **protocol** half is here (see the stand-in
+section above), so `start --data-layer` works offline and only `/inspector/*`
+needs a scene with its own `npm install`.

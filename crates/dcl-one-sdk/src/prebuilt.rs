@@ -25,7 +25,6 @@ use crate::{entrypoint, split};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Package-relative home of the chunks, inside the vendored `@dcl/sdk`.
 pub const DIR: &str = "@dcl/sdk/prebuilt";
 pub const CORE_FILE: &str = "@dcl/sdk/prebuilt/core.js";
 pub const SMART_FILE: &str = "@dcl/sdk/prebuilt/smart.js";
@@ -65,7 +64,6 @@ fn chunk_requires(chunk: &Path, package: &str) -> bool {
     code.contains(&format!("require(\"{package}")) || code.contains(&format!("require('{package}"))
 }
 
-/// Put a prebuilt chunk in place under the scene's `main` directory.
 pub fn install(src: &Path, dst: &Path) -> Result<()> {
     if let Some(dir) = dst.parent() {
         std::fs::create_dir_all(dir)

@@ -3,12 +3,9 @@
 Target repo: `decentraland/creator-hub` (`packages/inspector`; `@dcl/inspector`'s
 `package.json` `repository.directory` points there, as does `@dcl/asset-packs`').
 
-Status of this draft: not filed. Every number below was measured on this machine and the
-commands to re-derive them are inline. The "Verified vs inferred" section at the end says
-exactly which conclusions rest on measurement and which on reasoning we could not close
-offline.
-
----
+Status: not filed. Every number below was measured on this machine, with the commands to
+re-derive them inline; *Verified vs inferred* at the end separates measurement from
+reasoning we could not close offline.
 
 ## Summary
 
@@ -19,8 +16,6 @@ offline.
 Separately, `public/bin/index.js` is 11,421,444 B and byte-identical to both
 `@dcl/asset-packs/bin/index.js` and `@dcl/asset-packs/dist/bin/index.js`; it is fetched only
 when a host opts in via `binIndexJsUrl`, and our host never does.
-
----
 
 ## Environment
 
@@ -39,8 +34,6 @@ The shipped desktop app carries the same bytes. `grep -a -c` against
 `vnd.ms-fontobject` (2 hits) and `fonts.googleapis.com/css?family=Lato:400,700,400italic,700italic`
 (3 hits), so this is not an artifact of how we serve the package.
 
----
-
 ## Reproduction
 
 No Creator Hub checkout required.
@@ -52,8 +45,8 @@ ls -l package/public/
 node measure-bundle-css.mjs package/public/bundle.css
 ```
 
-`measure-bundle-css.mjs` is next to this file. It parses every `data:` URI out of the
-stylesheet, decodes it, and buckets by MIME. Output on `@dcl/inspector@7.36.3`:
+`measure-bundle-css.mjs` (next to this file) parses every `data:` URI out of the stylesheet,
+decodes it and buckets by MIME. Output on `@dcl/inspector@7.36.3`:
 
 ```
 package/public/bundle.css: 5884637 B
@@ -74,31 +67,27 @@ css with every data: URI removed: 1980035 B
 For the runtime half, point any Chromium at the inspector with CDP `Network.enable` and
 record `Network.requestWillBeSent`. Ours drives the real UI end to end: navigate to
 `/inspector/`, wait for the hierarchy, right-click Scene, "Add child", name it, select it,
-type into the Transform X field, wait for `assets/scene/main.composite` to hit disk and for
-`main.crdt` to be regenerated. Full log kept at `/tmp/nrepro/evidence/network.json`.
-
----
+type into the Transform X field, wait for `assets/scene/main.composite` to hit disk and
+`main.crdt` to regenerate. Full log at `/tmp/nrepro/evidence/network.json`.
 
 ## Expected vs actual
 
 **Expected.** A stylesheet inlines only assets small enough that a separate request costs
-more than the bytes — the usual cutoff is 4–8 KB. Everything above that is emitted as a file
-so the browser fetches it on demand, caches it, and can skip it entirely when the rule never
-matches. Fonts ship in the one format the runtime supports.
+more than the bytes — usual cutoff 4–8 KB. Larger ones are emitted as files: fetched on
+demand, cached, skipped entirely when the rule never matches. Fonts ship in the one format
+the runtime supports.
 
-**Actual.** Every asset is inlined regardless of size — the largest single data URI is
-535,590 chars — so the entire 5.61 MiB stylesheet must be downloaded, decoded and parsed
-before first paint even though almost none of it is used, and nothing is separately
-cacheable. Fonts ship in four formats including EOT, which only IE ≤ 11 ever read.
-
----
+**Actual.** Everything is inlined regardless of size — largest single data URI 535,590
+chars — so the whole 5.61 MiB stylesheet is downloaded, decoded and parsed before first
+paint though almost none of it is used, and nothing is separately cacheable. Fonts ship in
+four formats including EOT, which only IE ≤ 11 ever read.
 
 ## Evidence
 
 ### 1. What the bytes are, and where they come from
 
-`bundle.css.map` ships alongside the stylesheet, so each data URI can be attributed to its
-input file. Decoding the VLQ mappings and locating each `data:` URI:
+`bundle.css.map` ships alongside, so each data URI can be attributed to its input file.
+Decoding the VLQ mappings and locating each `data:` URI:
 
 | source | n | inline chars | % of bundle.css |
 |---|---:|---:|---:|
@@ -109,18 +98,18 @@ input file. Decoding the VLQ mappings and locating each `data:` URI:
 | `packages/inspector/src/components/AssetsCatalog/Asset/Asset.css` | 2 | 3,300 | 0.06% |
 | 34 other files (mostly `decentraland-ui/dist/components/*.css`) | 108 | 5,268 | 0.09% |
 
-Two things follow. First, 58% of the stylesheet enters through one dependency,
+Two things follow. First, 58% enters through one dependency,
 `decentraland-ui/lib/styles.css`, which appears to arrive with its assets **already
-inlined** — see "Verified vs inferred". Second, the single largest item this repo owns
-directly is one 352,240 B variable-axis WOFF2 (`wOF2` magic, 19 tables, `VAR`/`STAT`
-present, 882,104 B uncompressed sfnt) inlined from `packages/inspector/src/theme/index.css`,
-costing 469,679 chars — 7.98% of the file — for one `@font-face`.
+inlined** (see *Verified vs inferred*). Second, the largest item this repo owns directly is
+one 352,240 B variable-axis WOFF2 (`wOF2` magic, 19 tables, `VAR`/`STAT` present, 882,104 B
+uncompressed sfnt) inlined from `packages/inspector/src/theme/index.css`, costing 469,679
+chars — 7.98% of the file — for one `@font-face`.
 
 ### 2. Four font formats, three of them dead
 
-`eot` + `ttf` + `woff` = 1,149,757 chars, 19.54% of `bundle.css`. The inspector renders
-only inside Electron/Chromium, which has supported WOFF2 since Chrome 36. EOT is
-Internet Explorer ≤ 11 only and cannot be loaded by any engine the inspector runs on.
+`eot` + `ttf` + `woff` = 1,149,757 chars, 19.54% of `bundle.css`. The inspector renders only
+inside Electron/Chromium, which has supported WOFF2 since Chrome 36. EOT is IE ≤ 11 only and
+cannot be loaded by any engine the inspector runs on.
 
 The three largest duplicate payloads in the whole file are EOT fonts inlined twice each:
 141,382 + 131,562 + 41,586 = 314,530 chars of the 366,391 redundant bytes, all from
@@ -129,23 +118,23 @@ The three largest duplicate payloads in the whole file are EOT fonts inlined twi
 ### 3. Almost none of it is used
 
 CDP `Network.requestWillBeSent` for a complete editor session. Chromium raises a request
-event for a `data:` URI at the moment the resource is actually decoded and attached, so this
+event for a `data:` URI when the resource is actually decoded and attached, so this
 distinguishes "shipped" from "used".
 
 - 246 assets inlined in `bundle.css`.
 - **1** activated during the session: the 469,679-char WOFF2 from `src/theme/index.css`.
 - 0 of the 221 inlined images activated. 1 of the 25 inlined fonts activated.
-- That is 12.0% of the inlined bytes, and it is the one asset that is genuinely needed on
-  first paint.
+- That is 12.0% of the inlined bytes, and it is the one asset genuinely needed on first
+  paint.
 
 The other 15 `data:` URIs in the trace (14 images, 1 octet-stream) are emitted by
 `bundle.js` at runtime; none of their SHA-256s match anything in `bundle.css`.
 
-This is a lower bound on usage, not proof of deadness — Chromium activates a `@font-face`
-only when a glyph needs it and a CSS background only when the element renders, so screens we
-did not open (login, wearable preview, chain selector, modals) would pull more. That is
-precisely the argument for emitting files: with `url(./x.woff2)` the browser fetches on
-demand and caches; inlined, all 3.72 MiB is parsed and retained on every launch regardless.
+A lower bound on usage, not proof of deadness — Chromium activates a `@font-face` only when
+a glyph needs it and a CSS background only when the element renders, so screens we did not
+open (login, wearable preview, chain selector, modals) would pull more. Which is precisely
+the argument for emitting files: with `url(./x.woff2)` the browser fetches on demand and
+caches; inlined, all 3.72 MiB is parsed and retained on every launch regardless.
 
 ### 4. Requests actually made from the local origin
 
@@ -175,8 +164,8 @@ $ shasum -a 256 node_modules/@dcl/asset-packs/bin/index.js \
 5c5b05bd065217a3addc8b2d47cbb5a11511aed548dcb83b580a7146dc86214b  .../inspector/public/bin/index.js
 ```
 
-11,421,444 B each, 34,264,332 B for the set. The `@dcl/inspector` copy is produced by the
-package's own `copy-bin` script — visible in the published `package.json`:
+11,421,444 B each, 34,264,332 B for the set. The `@dcl/inspector` copy comes from the
+package's own `copy-bin` script, in the published `package.json`:
 
 ```json
 "build": "npm run copy-bin && node ./build.js --production",
@@ -184,7 +173,7 @@ package's own `copy-bin` script — visible in the published `package.json`:
 ```
 
 It is only ever fetched when a host opts in. From `public/bundle.js` (identifiers minified;
-this is the whole function):
+whole function):
 
 ```js
 async function gn0(r) {
@@ -197,14 +186,14 @@ async function gn0(r) {
 ```
 
 and `binIndexJsUrl` is `?binIndexJsUrl=` ?? `globalThis.InspectorConfig.binIndexJsUrl` ??
-`null`. Our host never sets it, which matches the network log above. Since `binIndexJsUrl`
-is an absolute URL the host chooses, the copy inside the `@dcl/inspector` tarball is only
-load-bearing for hosts that point it at their own static mount of `public/`.
+`null`. Our host never sets it, matching the network log above. Since `binIndexJsUrl` is an
+absolute URL the host chooses, the tarball copy is load-bearing only for hosts pointing it
+at their own static mount of `public/`.
 
 ### 6. Source maps ship to every consumer
 
-Not in the original scope, but it dwarfs everything else and is one line to fix. The
-package's `files` field is `["dist", "public"]`, so:
+Out of the original scope, but it dwarfs everything else and is one line to fix. `files` is
+`["dist", "public"]`, so:
 
 | file | bytes | MiB |
 |---|---:|---:|
@@ -216,28 +205,25 @@ package's `files` field is `["dist", "public"]`, so:
 | `dist/` (all, incl. `dist/tooling-entrypoint.js.map`) | 4,382,057 | 4.18 |
 | **package total** | **125,062,573** | **119.27** |
 
-The two `public/` maps are 84,443,783 B (80.53 MiB); counting
-`dist/tooling-entrypoint.js.map` as well, source maps are 85,927,010 B — 81.95 MiB, **68.7%
-of the unpacked package**. `bundle.css` references `bundle.css.map` via a `sourceMappingURL`
-comment, so browsers only pull it when devtools are open — but it is on every user's disk
-and inside every `app.asar`.
-
----
+The two `public/` maps are 84,443,783 B (80.53 MiB); with `dist/tooling-entrypoint.js.map`,
+source maps are 85,927,010 B — 81.95 MiB, **68.7% of the unpacked package**. `bundle.css`
+references `bundle.css.map` via a `sourceMappingURL` comment, so browsers only pull it when
+devtools are open — but it is on every user's disk and inside every `app.asar`.
 
 ## Proposed fix
 
-We do not have a `creator-hub` checkout, so this is an issue rather than a PR and the
-snippets below are suggestions, not a tested diff. `packages/inspector/build.js` is not
-published to npm, so we could not read the current bundler configuration.
+We have no `creator-hub` checkout, so this is an issue rather than a PR and the snippets
+below are suggestions, not a tested diff; `packages/inspector/build.js` is not published to
+npm, so we could not read the current bundler configuration.
 
 The bundler is **esbuild** (`"esbuild": "^0.28.0"` in `devDependencies`, driven by
-`node ./build.js --production`). Note that this is esbuild's `loader` map, not webpack's
+`node ./build.js --production`). This is esbuild's `loader` map, not webpack's
 `asset/resource` vs `asset/inline` — if you have seen this reported in webpack terms, it
 does not apply here.
 
 **1. Stop inlining assets above a threshold.** esbuild has no built-in size cutoff, so it is
-either a per-extension loader flip or a small plugin. The minimal version, which fixes the
-352 KB variable font this repo owns directly:
+either a per-extension loader flip or a small plugin. Minimal version, fixing the 352 KB
+variable font this repo owns directly:
 
 ```js
 // packages/inspector/build.js
@@ -256,14 +242,14 @@ either a per-extension loader flip or a small plugin. The minimal version, which
 +publicPath: '.',
 ```
 
-Keeping `.svg` inline is deliberate: all 202 of them together are 2.36% of the file, the
-median is 46 B and the largest is 7,038 B, so they are below any sane threshold. If you want a true byte
-cutoff instead of a per-extension rule, an `onLoad` plugin that returns `contents` for small
-files and `{ loader: 'file' }` for large ones is about fifteen lines.
+Keeping `.svg` inline is deliberate: all 202 together are 2.36% of the file, median 46 B,
+largest 7,038 B — below any sane threshold. For a true byte cutoff instead of a
+per-extension rule, an `onLoad` plugin returning `contents` for small files and
+`{ loader: 'file' }` for large ones is about fifteen lines.
 
-Whatever the mechanism, the host must serve the emitted `assets/` directory next to
-`bundle.css`. That is a real compatibility consideration for third-party hosts of `public/`
-(ours included) and worth a line in the release notes.
+Either way the host must serve the emitted `assets/` directory next to `bundle.css` — a real
+compatibility consideration for third-party hosts of `public/` (ours included) and worth a
+release-note line.
 
 **2. Drop the legacy font formats.** 1,149,757 B, 19.54% of the stylesheet, unreachable in
 Chromium. Most of this is inside `decentraland-ui`, so the fix likely belongs there — see
@@ -275,23 +261,22 @@ item 5.
 @import"https://fonts.googleapis.com/css?family=Lato:400,700,400italic,700italic&subset=latin";
 ```
 
-A render-blocking cross-origin request, from a desktop application, in a stylesheet that
-already inlines 1.68 MiB of fonts. It fires on every editor launch (confirmed in the network
-trace) and is present in the shipped `app.asar`. Self-hosting Lato — or dropping it if the
-inlined faces already cover it — removes a startup network dependency and makes the editor
-work offline.
+A render-blocking cross-origin request, from a desktop application, in a stylesheet already
+inlining 1.68 MiB of fonts. It fires on every editor launch (confirmed in the network trace)
+and is present in the shipped `app.asar`. Self-hosting Lato — or dropping it if the inlined
+faces already cover it — removes a startup network dependency and makes the editor work
+offline.
 
 **4. Do not ship `public/bin/index.js`.** It is byte-identical to
-`@dcl/asset-packs/bin/index.js`, which is already a dependency and resolvable from the same
-tree. Either drop `copy-bin` and have hosts point `binIndexJsUrl` at the `@dcl/asset-packs`
-copy, or keep the copy step for local dev and add `!public/bin` to the published `files`.
-Worth checking whether `@dcl/asset-packs` needs both `bin/index.js` and `dist/bin/index.js`
-while you are there — that is another 11.4 MB.
+`@dcl/asset-packs/bin/index.js`, already a dependency and resolvable from the same tree.
+Either drop `copy-bin` and have hosts point `binIndexJsUrl` at the `@dcl/asset-packs` copy,
+or keep the copy step for local dev and add `!public/bin` to the published `files`. Worth
+checking whether `@dcl/asset-packs` needs both `bin/index.js` and `dist/bin/index.js` while
+you are there — another 11.4 MB.
 
-**5. Upstream in `decentraland-ui`.** The 58% that arrives pre-inlined through
-`lib/styles.css` cannot be fixed by any esbuild setting in this repo, because esbuild sees
-`url(data:...)` tokens it can only pass through. That change has to happen in
-`decentraland-ui`'s own build.
+**5. Upstream in `decentraland-ui`.** The 58% arriving pre-inlined through `lib/styles.css`
+cannot be fixed by any esbuild setting in this repo, because esbuild sees `url(data:...)`
+tokens it can only pass through. That change belongs in `decentraland-ui`'s own build.
 
 **6. `"files": ["dist", "public", "!**/*.map"]`.** 81.95 MiB, 68.7% of the unpacked package.
 (`!public/*.map` alone would leave `dist/tooling-entrypoint.js.map` behind.)
@@ -306,12 +291,9 @@ Items 1 and 2 alone, assuming a ~45 B `url()` per externalised asset:
 | assets on disk, fetched on demand | 0 | ~2,062,000 B (2,923,827 B minus the 861,684 B of eot/ttf/woff) |
 | total on disk | 5,884,637 B | ~4,053,000 B |
 
-The stylesheet the browser must parse before first paint drops by 66%; ~980 KB of pure
-base64 encoding overhead disappears; and the remaining assets become individually cacheable
-and lazily fetched instead of unconditionally resident. This is every Creator Hub launch,
-for every user.
-
----
+The stylesheet parsed before first paint drops 66%; ~980 KB of pure base64 encoding overhead
+disappears; remaining assets become individually cacheable and lazily fetched instead of
+unconditionally resident. This is every Creator Hub launch, for every user.
 
 ## Verified vs inferred
 
@@ -329,25 +311,25 @@ for every user.
 
 **Inferred, not confirmed:**
 
-- **That `decentraland-ui/lib/styles.css` arrives with assets already inlined.** It is a
-  pruned devDependency here and we did not install it. The evidence is that a single source
-  file yields both modern MIME strings (`font/woff2`, `font/ttf`) and legacy ones
-  (`application/font-woff`, `application/x-font-ttf`); esbuild derives the data-URL MIME
-  from the file extension, so a single generator would be self-consistent, and
-  `semantic-ui-css/semantic.min.css` — a published, minified artifact nobody's build step
-  rewrote — contributes the same legacy strings. One command settles it:
+- **That `decentraland-ui/lib/styles.css` arrives with assets already inlined.** A pruned
+  devDependency here; we did not install it. Evidence: one source file yields both modern
+  MIME strings (`font/woff2`, `font/ttf`) and legacy ones (`application/font-woff`,
+  `application/x-font-ttf`); esbuild derives the data-URL MIME from the file extension, so a
+  single generator would be self-consistent, and `semantic-ui-css/semantic.min.css` — a
+  published, minified artifact nobody's build step rewrote — contributes the same legacy
+  strings. One command settles it:
   `grep -c 'url(data:' node_modules/decentraland-ui/lib/styles.css`.
 - **That esbuild never emits `application/font-woff` / `application/x-font-ttf`.** We could
   not read esbuild's MIME table offline. If it does, the argument above weakens and more of
   the inlining is fixable in this repo, which would be the better outcome.
-- **That Creator Hub's own Electron host does not set `binIndexJsUrl`.** We verified this
-  for our host only. If Creator Hub does set it, `public/bin/index.js` is load-bearing there
-  and fix 4 must be limited to the `!public/bin` variant, or to pointing the URL at the
+- **That Creator Hub's own Electron host does not set `binIndexJsUrl`.** Verified for our
+  host only. If Creator Hub does set it, `public/bin/index.js` is load-bearing there and fix
+  4 must be limited to the `!public/bin` variant, or to pointing the URL at the
   `@dcl/asset-packs` copy.
-- **That the 245 unactivated assets are largely dead.** They are unused in the session we
-  drove; wider UI coverage would activate more. The externalisation argument does not depend
-  on this and holds either way.
-- The "expected effect" table is arithmetic on the measured numbers, not a rebuild. We did
+- **That the 245 unactivated assets are largely dead.** Unused in the session we drove;
+  wider UI coverage would activate more. The externalisation argument does not depend on
+  this and holds either way.
+- The "expected effect" table is arithmetic on the measured numbers, not a rebuild — we did
   not build the inspector.
 
 **Not investigated:** whether `bundle.js` (18.04 MiB) has the same problem. It contains 14

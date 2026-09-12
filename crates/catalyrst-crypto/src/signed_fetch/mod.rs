@@ -136,11 +136,6 @@ pub enum AuthChainError {
     #[error("EIP-1654 not implemented")]
     EipNotImplemented,
 
-    // Variants below are produced by service-side validators built on this
-    // chain type (market's address check, world-storage's async EIP-1654
-    // validator and scene-signer policy), not by the extraction/validation in
-    // this module. They live here so services share one AuthChainError instead
-    // of redefining the enum plus a From<> mapping each.
     #[error("Forbidden: address mismatch")]
     AddressMismatch { expected: String, recovered: String },
     #[error("Invalid timestamp")]
@@ -162,8 +157,6 @@ impl AuthChainError {
         )
     }
 
-    /// The 400 body text, detail included.
-    ///
     /// `Display` stays the upstream-facing constant that several services pin
     /// byte for byte, so the reason a request was refused - which canonical key
     /// was misconfigured, which spelling arrived, which signer the gate turned
@@ -179,8 +172,6 @@ impl AuthChainError {
         }
     }
 
-    /// The HTTP answer every service gives a failed signed fetch: 400 with
-    /// the diagnostic for a malformed request, otherwise a bare 401.
     pub fn http_status_and_message(&self) -> (u16, String) {
         if self.is_bad_request() {
             (400, self.http_message())
@@ -254,7 +245,6 @@ pub struct SignedFetchPath<'a> {
 }
 
 impl<'a> SignedFetchPath<'a> {
-    /// A request no proxy forwarded a public path for: the route path alone.
     pub fn route_only(route: &'a str) -> Self {
         Self {
             route,
@@ -262,19 +252,14 @@ impl<'a> SignedFetchPath<'a> {
         }
     }
 
-    /// The route path the service matched.
     pub fn route(&self) -> &str {
         self.route
     }
 
-    /// The public path when the proxy forwarded one, else the route path: what
-    /// a verifier that builds a single payload uses.
     pub fn primary(&self) -> &str {
         self.original.as_deref().unwrap_or(self.route)
     }
 
-    /// The route path when it differs from the public one - the second payload
-    /// to try after the public path's signature comparison fails.
     pub fn fallback(&self) -> Option<&str> {
         self.original
             .as_deref()
@@ -306,9 +291,6 @@ pub fn signed_fetch_path<'a>(headers: &HeaderMap, fallback: &'a str) -> SignedFe
         .get("x-original-path")
         .and_then(|v| v.to_str().ok())
         .map(|raw| raw.split('?').next().unwrap_or(raw))
-        // x-original-path is only trustworthy as the route path behind a
-        // proxy prefix; a value that is not a suffix of the actual route is
-        // a forged client header and must not rebind the signature.
         .filter(|stripped| stripped.ends_with(fallback))
         .map(str::to_string);
     SignedFetchPath {
@@ -330,7 +312,6 @@ impl SignatureComparison for AuthChainError {
     }
 }
 
-/// One payload shape built over each path of a [`SignedFetchPath`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayloadOverPaths {
     primary: String,
@@ -651,8 +632,6 @@ pub enum AttemptOrder {
     LegacyFirst,
 }
 
-/// The per-surface half of the signed-fetch contract.
-///
 /// `canonical_metadata_keys` doubles as the legacy switch deliberately: there
 /// is no way to accept the legacy payload without naming the fields that make
 /// doing so safe. An empty slice is 6.x-only in either order, which is the

@@ -1,7 +1,5 @@
 # Drag sliders in React-ECS UI
 
-Read this when the user asks for a slider, a drag handle, a scrub bar, or any UI driven by dragging.
-
 **Short answer: drag sliders ARE supported.** Build them with `PrimaryPointerInfo.screenDelta`, not with the UI event handlers alone. Confirmed working in-world in both the Unity and the Bevy explorers.
 
 ## Why you need `screenDelta`
@@ -20,7 +18,7 @@ export type Listeners = {
 ```
 
 - No `onMouseDrag` / `onMouseMove` listener exists.
-- **No arguments are passed to a handler** — no event object, no pointer position. The reconciler wires each listener through `pointerEventsSystem` and then calls `callback()` with the `PBPointerEventsResult` discarded, so "where on this element did they click" never reaches scene code.
+- **No arguments are passed to a handler** — no event object, no pointer position: the reconciler calls `callback()` with the `PBPointerEventsResult` discarded, so "where on this element did they click" never reaches scene code.
 - All four are hardcoded to `InputAction.IA_POINTER`; you cannot bind a UI element to right-click or a key.
 
 So you cannot compute a value from *where* the click landed. You **can** track how far the mouse has *moved* since the drag started — which is what a slider actually needs.

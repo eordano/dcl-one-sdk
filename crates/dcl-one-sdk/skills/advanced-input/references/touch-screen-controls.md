@@ -1,6 +1,6 @@
 # TouchScreenControls — button layout, icons, worked examples
 
-Details extracted from the `advanced-input` SKILL.md. Read this file when a task needs the button ordering rules, custom button icons, or a full configuration example. The API surface (fields + helpers) stays in SKILL.md.
+Button ordering rules, custom button icons and full configuration examples. The API surface (fields + helpers) stays in the `advanced-input` SKILL.md.
 
 Available from `@dcl/ecs` **7.26.0**; not present in 7.25.0 or earlier. Component id `1218` (`PBTouchScreenControls`).
 

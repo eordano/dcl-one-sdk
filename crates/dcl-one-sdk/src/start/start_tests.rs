@@ -542,7 +542,6 @@ fn the_request_log_forgets_the_oldest_past_its_cap() {
     );
 }
 
-/// Cut on the way in, so the unbounded version is never held at all.
 #[test]
 fn a_path_too_long_to_be_a_path_is_cut_before_it_is_kept() {
     let method = axum::http::Method::GET;

@@ -48,10 +48,7 @@ engine.addSystem(checkCameraMode)
 
 ### Camera Mode Values
 
-```typescript
-CameraType.CT_FIRST_PERSON // First-person view
-CameraType.CT_THIRD_PERSON // Third-person view (default)
-```
+`CameraType.CT_FIRST_PERSON` (first-person view) and `CameraType.CT_THIRD_PERSON` (third-person view, the default).
 
 ### React to Camera Mode Changes
 
@@ -161,7 +158,7 @@ Poll camera position each frame by reading `Transform.get(engine.CameraEntity).p
 
 ## Camera and Colliders
 
-When a player's camera moves in 3rd person mode, the camera might be blocked by colliders or not, depending on the collision layers assigned to the entities. To avoid the camera from going through walls, you must assign both the ColliderLayer.CL_PHYSICS and the ColliderLayer.CL_POINTER layers to the entities that you want to block the camera.
+In 3rd person the camera is blocked by an entity only when both `ColliderLayer.CL_PHYSICS` and `ColliderLayer.CL_POINTER` are assigned to the same geometry. To keep the camera out of walls, assign both layers to the blocking entities.
 
 ```ts
 // NO CAMERA GOING THROUGH THE WALL
@@ -210,7 +207,7 @@ For full worked patterns, see `{baseDir}/references/camera-patterns.md`:
 - **Camera-Triggered Events** — use camera position/proximity to trigger actions when the player looks at an area.
 - **Following an NPC (camera-follows-NPC)** — track an NPC by driving a VirtualCamera's Transform each frame (guardrail on why this works lives in the VirtualCamera section above).
 - **Mouselook Camera (FPS-style)** — drive a VirtualCamera with `PrimaryPointerInfo.screenDelta` (pixel delta per frame, keeps working while cursor is locked). Accumulate into yaw/pitch, clamp pitch [-85,+85], combine with PointerLock + InputModifier `disableAll`. Desktop only (screenDelta always 0 on mobile). See `{baseDir}/references/camera-patterns.md` → "Mouselook Camera".
-- **Spectate Mode (observer / director / replay camera)** — toggle the player from avatar movement into a free-roaming or player-following camera: two-entity yaw/pitch rig, WASD/E/F/1/2 controls, `onEnterScene`/`onLeaveScene` player roster, InputModifier freeze, and parcel-bounds clamping (the engine disables VirtualCameras outside parcel bounds). See `{baseDir}/references/camera-patterns.md` → "Spectate Mode".
+- **Spectate Mode (observer / director / replay camera)** — free-roaming or player-following camera: two-entity yaw/pitch rig, WASD/E/F/1/2 controls, `onEnterScene`/`onLeaveScene` player roster, InputModifier freeze, and parcel-bounds clamping (the engine disables VirtualCameras outside parcel bounds). See `{baseDir}/references/camera-patterns.md` → "Spectate Mode".
 
 > **Freezing player during cutscenes?** Combine VirtualCamera with `InputModifier` from the **advanced-input** skill to prevent player movement during cinematic sequences.
 

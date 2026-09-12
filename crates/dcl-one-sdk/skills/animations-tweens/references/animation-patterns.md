@@ -23,20 +23,6 @@ Animator.playSingleAnimation(character, 'walk')
 Animator.stopAllAnimations(character)
 ```
 
-### Switching Animations
-```typescript
-function playAnimation(entity: Entity, clipName: string) {
-  const animator = Animator.getMutable(entity)
-  for (const state of animator.states) {
-    state.playing = false
-  }
-  const state = animator.states.find(s => s.clip === clipName)
-  if (state) {
-    state.playing = true
-  }
-}
-```
-
 ### Animator Extras
 ```typescript
 const clip = Animator.getClip(entity, 'Walk')
@@ -187,7 +173,7 @@ Tween.setRotateContinuous(entity, Quaternion.fromEulerDegrees(0, 45, 0), 1)
 
 ## Follow a constantly changing target (chase / homing)
 
-Use `setMoveContinuous`, **not** a `setMove` tween re-created every frame. The re-created-Move approach stutters: `Transform.get(entity).position` is what the renderer last wrote back over CRDT (~1-3 frames stale), and the renderer applies that `start` immediately, so the entity snaps backwards on every re-aim. A direction + speed has no scene-supplied start to disagree with the renderer, so replacing it mid-motion never snaps.
+Use `setMoveContinuous`, **not** a `setMove` tween re-created every frame — the re-created-Move approach stutters (why: see the SKILL's PITFALL on constantly changing targets).
 
 ```typescript
 const CHASE_SPEED = 3 // meters/second
@@ -313,28 +299,6 @@ if (comp) { comp.playing = !comp.playing }   // toggle pause/resume
 else { Tween.setMoveContinuous(entity, Vector3.create(0, 1, 0), 1, 5000) } // first click: create
 
 if (Tween.has(entity)) Tween.deleteFrom(entity) // remove tween entirely (stops it)
-```
-
----
-
-## Pause / Reset a Tween
-
-```typescript
-const tween = Tween.getMutable(entity)
-tween.playing = false   // pause
-tween.currentTime = 0   // reset to beginning
-tween.playing = true    // resume
-```
-
----
-
-## Yoyo Loop Mode
-
-```typescript
-TweenSequence.create(entity, {
-  sequence: [{ duration: 1000, ... }],
-  loop: TweenLoop.TL_YOYO
-})
 ```
 
 ---

@@ -164,8 +164,7 @@ async fn handshake(socket: &mut WebSocket, st: &CommsState, room_id: &str) -> Re
     Ok(address)
 }
 
-/// Removes `alias` from its room, dropping the room when it empties and telling
-/// the rest of the room otherwise.
+/// Drops the room when it empties, and otherwise tells the rest of the room.
 fn drop_peer(reg: &mut Registry, room_id: &str, alias: u32) -> Option<Peer> {
     let room = reg.rooms.get_mut(room_id)?;
     let peer = room.remove(&alias)?;

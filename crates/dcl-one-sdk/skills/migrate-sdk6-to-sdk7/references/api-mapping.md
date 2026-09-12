@@ -1,6 +1,6 @@
 # SDK6 → SDK7 API Mapping
 
-Comprehensive table of every common SDK6 API and its SDK7 equivalent. Use this as a search reference during migration.
+Search reference: every common SDK6 API and its SDK7 equivalent.
 
 ## Imports
 
@@ -52,11 +52,7 @@ Code-reference rewrites that must follow the move:
 | `new UIImage(parent, new Texture('images/icon.png'))`           | React-ECS: `uiBackground={{ texture: { src: 'assets/Images/icon.png' } }}`    |
 | Any path literal in `.composite` files                          | Update to the new `assets/...` path                                           |
 
-**Rules**:
-- Use **capitalized** category folders (`Models`, `Images`, `Audio`, `Videos`) — matches the convention used by [[create-scene]], [[add-3d-models]], and [[audio-video]] for fresh SDK7 work.
-- **Reuse existing layout if present.** If the project already has `assets/scene/Models/` (Creator Hub legacy layout) or `assets/asset-packs/` (Creator Hub asset packs) / `assets/custom/` (Creator Hub custom items), keep using those exact paths — don't create a parallel `assets/Models/`.
-- **Never leave dual copies.** Delete the old top-level folders once the move is done. Dual copies bloat deploy size and cause Creator Hub to index stale paths.
-- **Grep before declaring done.** Search the entire repo (including `.composite`, `.json`, `.ts`, `.tsx` files) for each old folder name (`models/`, `sounds/`, etc.) — there should be zero remaining references.
+Rules for the move (capitalized category folders, reuse an existing `assets/scene/` or `assets/asset-packs/` layout, never leave dual copies, grep before declaring done): the SKILL's **Migration Workflow** step 3.
 
 ## Entities
 
@@ -269,9 +265,7 @@ const open = Animator.getClip(entity, 'Open') // returns the state object
 // then mutate the Animator with getMutable to flip `playing`
 ```
 
-**A clip must be in `states[]` when calling `playSingleAnimation` programmatically.** Unlike SDK6's `Animator.getClip(name)`, which auto-created the clip on first use, `Animator.playSingleAnimation(entity, clipName)` returns `false` and does nothing if `clipName` is not already in `Animator.states` (verified — `@dcl/ecs/dist-cjs/components/extended/Animator.js` lines 35-46). This is the path porters typically hit, because they author the Animator in code. Walk every `playAnimation` / `getClip` call in the SDK6 source and collect the full set of clip names per entity before writing `states`. For a port-friendly shim that lazily pushes missing states, see the wrapper in [[animations-tweens]] (PITFALL section). This rule does **not** apply to Animators authored by the Creator Hub Inspector (whose composite already lists every GLB clip in `states[]`) or by asset packs / smart items (which ship populated).
-
-Also: if a GLTF model has animation clips and the entity has **no** `Animator` component, `GltfContainer` autoplays one clip from the .glb on its own — this is the same mechanism that lets clip-less Inspector scenes animate without explicit registration. SDK6 stayed in bind pose by default, so porting an SDK6 scene that simply omitted `Animator` will produce models that spawn playing an arbitrary clip (observed: `die` autoplaying on ghosts with no Animator). If you want a specific default, attach an `Animator.create` with the intended clip set to `playing: true`. If you also want to switch clips at runtime via `playSingleAnimation`, list every clip you'll switch to in `states[]` per the rule above.
+**A clip must be in `states[]` when calling `playSingleAnimation` programmatically**, and a model with clips but **no** `Animator` autoplays one clip from the .glb — both rules, with their exceptions, are in the SKILL's **Common Pitfalls**.
 
 See [[animations-tweens]] for full details. Note: `AnimationState` is gone — clips are configured inside `Animator.states[]`.
 
@@ -420,9 +414,7 @@ triggerAreaEventsSystem.onTriggerExit(area, (result) => {
 | Custom per-frame system polling `Camera.instance.position` against the region       | Replace entirely. Do NOT port the polling logic — the native component handles it. |
 | Utils library implicitly only ever detected the local player                        | Native `TriggerArea` defaults to `ColliderLayer.CL_PLAYER`. **Behavioral note below.** |
 
-**Behavior parity — local player only (important):**
-
-The Utils library trigger only ever fired for the **current local player** — there was no concept of detecting other avatars inside the region. The native SDK7 `TriggerArea` defaults to the `CL_PLAYER` layer, which fires for ANY player on that layer — local OR remote. The guard inside the handler is the documented way to preserve "local-player-only" behavior:
+**Behavior parity — local player only (important):** the Utils library trigger only ever fired for the **current local player**; native `TriggerArea` defaults to `CL_PLAYER`, which fires for ANY player on that layer — local OR remote. The documented guard for local-player-only behavior:
 
 ```typescript
 if (result.trigger?.entity !== engine.PlayerEntity) return
@@ -450,7 +442,7 @@ See [[add-interactivity]] for the full TriggerArea reference and [[player-physic
 
 ### Attaching items to the player
 
-SDK6 had two coarse "follow" options for items meant to ride along with the player. SDK7 splits these into three distinct paths, picked by **what kind of item** it is. Use the table to pick the right destination — bone-level `AvatarAttach` is **not** the universal SDK7 replacement for SDK6 `Attachable`, and `engine.PlayerEntity` is **not** the universal replacement for `Attachable.FIRST_PERSON_CAMERA` (it loses camera pitch — see anti-patterns below).
+SDK6's two coarse "follow" options become three SDK7 paths, picked by **what kind of item** it is. Bone-level `AvatarAttach` is **not** the universal replacement for SDK6 `Attachable`, and `engine.PlayerEntity` is **not** the universal replacement for `Attachable.FIRST_PERSON_CAMERA` (it loses camera pitch — see anti-patterns below).
 
 | Parent / mechanism | Tracks | Use for | SDK6 origin |
 |--------------------|--------|---------|-------------|
@@ -469,8 +461,6 @@ SDK6 had two coarse "follow" options for items meant to ride along with the play
 - Replacing `Attachable.FIRST_PERSON_CAMERA` with `Transform.parent = engine.PlayerEntity`. This is the **most common subtle failure** when porting held gameplay items: it looks correct for hip-fire (the gun follows yaw with the body), but the moment the player tilts the camera up to aim at a high target the gun stays flat — `PlayerEntity` inherits body yaw only, not camera pitch. For any aim-sensitive item, parent to `engine.CameraEntity` instead. Reserve `PlayerEntity` for items that should explicitly stay level regardless of look direction.
 
 See [[player-avatar]] for the full "Held items vs cosmetic items" comparison and a worked gun example, and [[camera-control]] for camera-mode forcing when equipping a held weapon.
-
-See [[camera-control]] and [[player-avatar]].
 
 ## Audio
 
@@ -580,7 +570,7 @@ UI migrations almost always need a from-scratch rewrite. See [[build-ui]].
 | UI sizes/positions are raw pixels against a **fixed** screen size (e.g. `width = 200`, `positionX = -350`) | Pixel values are scaled against a virtual canvas. On 7.26.0+, if you don't choose one a per-platform default applies (`1920x1080`, or `1600x720` on mobile) — very likely **not** the grid the SDK6 UI was authored against. Below 7.26.0, not choosing one means no scaling at all |
 | No virtual canvas concept | `ReactEcsRenderer.setUiRenderer(ui, { virtualWidth, virtualHeight })` defines a virtual coordinate space; the engine scales it to the real screen |
 
-**Setting a virtual canvas makes existing SDK6 pixel values behave as coordinates inside that virtual space**, so layouts scale predictably. Pass it explicitly during a port: the default is a guess about your reference resolution, and if the SDK6 UI targeted something else, every ported coordinate lands in the wrong place by that ratio.
+**Setting a virtual canvas makes existing SDK6 pixel values behave as coordinates inside that virtual space**, so layouts scale predictably. Pass it explicitly during a port: the default is a guess about your reference resolution, and if the SDK6 UI targeted something else, every ported coordinate lands off by that ratio.
 
 ```ts
 ReactEcsRenderer.setUiRenderer(uiRoot, { virtualWidth: 1920, virtualHeight: 1080 })
@@ -588,10 +578,9 @@ ReactEcsRenderer.setUiRenderer(uiRoot, { virtualWidth: 1920, virtualHeight: 1080
 
 Picking the right size:
 
-- Open the SDK6 source (the legacy ECS reference is https://github.com/decentraland/ecs) and read the `UICanvas`/`UIImage`/`UIText` setup to see what pixel grid the original UI was authored against.
-- Pass those numbers as `virtualWidth` / `virtualHeight`. `1920x1080` is a reasonable default and matches what most community examples assume, but if the SDK6 scene targeted a different resolution (e.g. `1280x720`), use those instead so existing pixel coordinates land in the same place.
+- Read the SDK6 `UICanvas`/`UIImage`/`UIText` setup (legacy ECS reference: https://github.com/decentraland/ecs) to see what pixel grid the original UI was authored against, and pass those numbers as `virtualWidth` / `virtualHeight`. `1920x1080` is a reasonable default and matches most community examples, but if the SDK6 scene targeted e.g. `1280x720`, use those instead so existing pixel coordinates land in the same place.
 - Only one `setUiRenderer` call per scene — pass the virtual size there, not on individual elements. See [[build-ui]] for the full default-rule guidance.
-- On SDK 7.26.0+, beware two behaviors that can silently change the grid your coordinates land on: a **16:9 size is overridden to `1600x720` on mobile**, and a size with any value `<= 0` **disables** scaling entirely (raw canvas pixels). Neither is usually what a port wants.
+- On SDK 7.26.0+, two behaviors can silently change the grid: a **16:9 size is overridden to `1600x720` on mobile**, and a size with any value `<= 0` **disables** scaling entirely (raw canvas pixels). Neither is usually what a port wants.
 
 Signature reference — **SDK 7.26.0+** (verified against [[build-ui]] skill docs):
 

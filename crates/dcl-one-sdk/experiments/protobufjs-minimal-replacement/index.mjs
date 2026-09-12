@@ -1,4 +1,3 @@
-// ESM facade over the CommonJS core. Named + default exports mirror `protobufjs/minimal`.
 import protobuf from "./index.js";
 
 export const build = protobuf.build;

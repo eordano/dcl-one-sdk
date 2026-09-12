@@ -199,7 +199,6 @@ pub(super) fn columns(areas: &[Area]) -> Vec<Column<'_>> {
         .filter(|(_, _, take)| !take.is_empty())
         .map(|(head, ranked, take)| Column {
             head,
-            // Only what no column shows counts as hidden.
             more: ranked
                 .iter()
                 .filter(|a| !shown.contains(&a.parcels[0]))
@@ -214,9 +213,7 @@ pub(super) fn columns(areas: &[Area]) -> Vec<Column<'_>> {
 }
 
 /// Folded only when the scene already sits, published, on parcels the wallet
-/// holds — the one case where picking a new area is not the next step. A
-/// scene that came back from a World, sits on someone else's LAND, or has
-/// nothing deployed under it gets the picker open.
+/// holds — the one case where picking a new area is not the next step.
 pub(super) fn folded(
     declared: &[(i64, i64)],
     held: &HashSet<(i64, i64)>,
@@ -245,7 +242,6 @@ pub(super) fn folded(
     }
 }
 
-/// The `<details>` block the LAND view carries under the map.
 pub(super) fn land_picker(
     prefix: &str,
     tok: &str,
@@ -404,8 +400,6 @@ impl<'a> Column<'a> {
     }
 }
 
-/// One area: the parcel a move would land the base on, what the area holds,
-/// and the move itself — or the badge saying the scene is already here.
 fn row(prefix: &str, tok: &str, a: &Area, footprint: usize, now: i64, known: bool) -> String {
     let anchor = a.fit.map(|(b, _)| b).unwrap_or(a.parcels[0]);
     let n = a.parcels.len();
@@ -425,7 +419,6 @@ fn row(prefix: &str, tok: &str, a: &Area, footprint: usize, now: i64, known: boo
             None => bits.push("nothing deployed".to_string()),
         }
     }
-    // The scene's own parcels are the overlap on the area it sits on.
     match a.fit {
         Some((_, 0)) => {}
         Some(_) if a.holds_scene => {}
@@ -495,7 +488,6 @@ mod tests {
         )
     }
 
-    /// Diagonal neighbours are separate areas; an L and a lone parcel make two.
     #[test]
     fn areas_are_four_neighbour_islands() {
         let coords = [(0, 0), (1, 0), (0, 1), (5, 5), (6, 6)];
@@ -629,8 +621,6 @@ mod tests {
         assert_eq!(older, [(0, 0), (10, 0)]);
         assert_eq!(cols[2].more, 0);
 
-        // Six deployed one-parcel areas: Emptier takes all six, the age
-        // columns have nothing left, and the picker falls back to one list.
         let six = [(0, 0), (10, 0), (20, 0), (30, 0), (40, 0), (50, 0), (60, 0)];
         let land_use = LandUse {
             scenes: (0..7)
@@ -691,8 +681,6 @@ mod tests {
         );
     }
 
-    /// The rendered block: the badge on the area the scene sits in, a move
-    /// form on every other, the ranked headings, and the folded state.
     #[test]
     fn the_picker_renders_moves_and_the_badge() {
         let coords = [

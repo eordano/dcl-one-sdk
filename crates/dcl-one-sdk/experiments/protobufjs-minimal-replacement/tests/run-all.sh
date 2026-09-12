@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Full differential suite. Usage: tests/run-all.sh [seed]
 set -u
 cd "$(dirname "$0")/.."
 SEED="${1:-0xC0FFEE}"
@@ -14,8 +13,6 @@ run tests/corpus-diff.js    ITERS=300 NO_BUFFER=1
 run tests/corpus-diff.js    ITERS=300 NO_LONG=1
 run tests/corpus-diff.js    ITERS=300 NO_BUFFER=1 NO_LONG=1
 run tests/esm-corpus-diff.mjs ITERS=100
-# 41 namespaces instead of 336, so the per-type iteration count goes up to keep the
-# instance count in the same order: 41 x 2000 = 82,000 per environment.
 run tests/rpc-diff.js       ITERS=2000
 run tests/rpc-diff.js       ITERS=2000 NO_BUFFER=1
 run tests/rpc-diff.js       ITERS=2000 NO_LONG=1

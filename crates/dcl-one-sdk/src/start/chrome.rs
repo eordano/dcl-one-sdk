@@ -21,7 +21,6 @@ pub(crate) fn esc(s: &str) -> String {
     out
 }
 
-/// One radio sub-tab, the strip idiom the join and target cards share.
 pub(crate) fn radio_tab(name: &str, value: &str, label: &str, checked: bool) -> String {
     format!(
         r#"<label class="jn2__tab"><input class="jn2__tab-r" type="radio" name="{}" value="{}"{}>{label}</label>"#,
@@ -31,7 +30,6 @@ pub(crate) fn radio_tab(name: &str, value: &str, label: &str, checked: bool) -> 
     )
 }
 
-/// One label/value row, the shape every panel on every page uses.
 pub(crate) fn kv(k: &str, v: String) -> String {
     format!(
         r#"<div class="kv"><span class="k">{}</span>{v}</div>"#,
@@ -39,8 +37,8 @@ pub(crate) fn kv(k: &str, v: String) -> String {
     )
 }
 
-/// A rendered page, with the headers that keep a preview page from being
-/// cached while the scene under it changes.
+/// Headers keep a preview page from being cached while the scene under it
+/// changes.
 pub(crate) fn html(body: String) -> Response {
     (
         [
@@ -52,14 +50,14 @@ pub(crate) fn html(body: String) -> Response {
         .into_response()
 }
 
-/// What the header bar shows for this render. `None` renders the bare mark —
-/// the CLI's standalone signing server has no sections to offer.
+/// `None` renders the bare mark — the CLI's standalone signing server has no
+/// sections to offer.
 pub(crate) struct Nav<'a> {
     pub active: &'a str,
     pub badge: &'a str,
     pub host: &'a str,
     /// The remembered account, drawn as a pill linking to /target; `None`
-    /// draws the connect button. A server-wide fact, so it lives in the bar.
+    /// draws the connect button.
     pub account: Option<String>,
     /// The page token the connect POST carries; gated exactly like the
     /// publish button, so rendering it to every reader gives a stranger
@@ -117,9 +115,6 @@ fn pgnav(prefix: &str, nav: &Nav) -> String {
             action = esc(&format!("{prefix}/target/address")),
             tok = esc(nav.token),
         )),
-        // One pill, two doors: the browser wallet directly (script-armed;
-        // inert without one) and the Decentraland sign-in, whose form POST
-        // works with no script at all.
         None => out.push_str(&format!(
             r#"<span class="bar__acct bar__acct--split"><button class="bar__cta" id="bar-wallet" type="button" data-wallet>Connect Wallet</button><form method="post" action="{action}"><input type="hidden" name="token" value="{tok}"><button class="bar__cta" type="submit">Connect with DCL</button></form></span>"#,
             action = esc(&format!("{prefix}/target/connect")),
@@ -135,8 +130,6 @@ fn pgnav(prefix: &str, nav: &Nav) -> String {
     out
 }
 
-/// One stylesheet, one header with the section nav, one skip link — so the
-/// four sections read as one server, not four pages.
 pub(crate) fn document(
     title: &str,
     prefix: &str,

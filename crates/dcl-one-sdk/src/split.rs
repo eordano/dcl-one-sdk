@@ -244,7 +244,6 @@ pub fn write_loader_stub(
     })
 }
 
-/// `name` in `main`'s directory, scene-relative.
 fn beside(main: &str, name: &str) -> String {
     match main.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/{name}"),

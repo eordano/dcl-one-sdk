@@ -180,16 +180,6 @@ pub async fn deploy(opts: &DeployOptions) -> Result<String> {
             ux::note(note);
         }
     }
-    // World deploys are additive by default: a scene replaces only what sits
-    // on its own parcels and leaves the world's other scenes alone — the
-    // preview's behaviour too, and the safe default. Additive also makes the
-    // deploy ask the content server nothing before the upload; behind a
-    // Cloudflare-fronted worlds server a pre-flight GET flags the IP and the
-    // upload that follows is challenged, where a lone upload passes. The
-    // destructive "replace every scene in the world" path is opt-in
-    // (`multi_scene` is false only when the caller asked to replace), and it
-    // makes the overwrite pre-check — so it works against a self-hosted
-    // server but not behind a challenging edge.
     let needs_delete = match &world {
         Some(w) if !opts.multi_scene => {
             confirm_world_overwrite(&target, w, &pointers, opts).await?

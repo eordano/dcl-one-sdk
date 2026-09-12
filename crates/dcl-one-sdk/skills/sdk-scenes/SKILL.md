@@ -34,13 +34,13 @@ For streaming references (`AudioStream`, `VideoPlayer`): these don't download fi
 
 ### 3. Adding a Multiplayer Server
 
-Introduces `isServer()`, `registerMessages()`, `Storage`, `EnvVar`, or switches to `@dcl/sdk@auth-server`. This feature requires switching to an alternative SDK branch (`@dcl/sdk@auth-server`). Many users who want "multiplayer" only need the simpler `multiplayer-sync` skill (no server). Confirm before implementing:
+Introduces `isServer()`, `registerMessages()`, `Storage`, `EnvVar`, and requires switching to the alternative SDK branch `@dcl/sdk@auth-server`. Many users who want "multiplayer" only need the simpler `multiplayer-sync` skill (no server). Confirm before implementing:
 
 > "To handle multiplayer this way I'd need to add the Multiplayer Server — that requires switching to the `@dcl/sdk@auth-server` SDK branch instead of the standard one. Is that what you're after, or would simpler peer-to-peer sync work for your use case?"
 
 ### General principle
 
-These aren't things the agent should refuse to do — they're things it should communicate about before doing them. If the user confirms, proceed confidently. The goal is transparency, not gatekeeping.
+Never refuse these — communicate before doing them, then proceed confidently once the user confirms. The goal is transparency, not gatekeeping.
 
 ---
 
@@ -64,7 +64,7 @@ Before modifying `assets/scene/main.composite`, scan it for `inspector::Nodes`. 
 
 ## Individual Skills
 
-This skill is the entry point. The detailed implementation guidance lives in individual topic skills, each installable separately. Install specific ones or use `--skill '*'` for all.
+Implementation guidance lives in individual topic skills, each installable separately (`--skill '*'` installs all).
 
 ### Scene Setup & Configuration
 
@@ -118,7 +118,7 @@ This skill is the entry point. The detailed implementation guidance lives in ind
 
 **Skill: `build-ui`** — React ECS components for 2D screen-space UI overlays: layout, text, images, buttons, inputs.
 
-**Skill: `editable-ui`** — Write that UI so the Creator Hub's 2D UI editor (UI Designer) can read and edit it: the `src/ui/` file-per-component layout, the `state`/`props` binding surface, `useInteraction` style layers, `@ui-action` handlers, and the driver pattern that keeps animation outside the editor's reach. Use whenever the user wants UI editable in the Creator Hub, or wants an existing coded UI adapted for it.
+**Skill: `editable-ui`** — Write that UI so the Creator Hub's 2D UI editor (UI Designer) can read and edit it: the `src/ui/` file-per-component layout, the `state`/`props` binding surface, `useInteraction` style layers, `@ui-action` handlers, and the driver pattern that keeps animation outside the editor's reach. Use when the user wants UI editable in the Creator Hub, or an existing coded UI adapted for it.
 
 ### Audio & Video
 
@@ -169,7 +169,7 @@ This skill is the entry point. The detailed implementation guidance lives in ind
 
 ## Shared References
 
-These reference files are used across multiple skills. Load them when you need detailed component APIs, validation rules, or asset catalogs.
+Used across multiple skills — load when you need detailed component APIs, validation rules, or asset catalogs.
 
 ### Components Reference
 

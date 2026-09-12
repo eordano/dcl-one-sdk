@@ -137,9 +137,7 @@ impl SignerGate {
     }
 }
 
-/// Build once at startup and reuse: a non-canonical argument could never match
-/// a value that passed the canonical check, so it must be a startup failure
-/// rather than a gate that silently never fires.
+/// Build once at startup and reuse.
 pub fn reject_if_signer(signers: &[&str]) -> Result<SignerGate, SignerGateError> {
     check_canonical_arguments(signers).map_err(|fault| match fault {
         ArgumentFault::NoValues => SignerGateError::NoValues,
@@ -261,9 +259,6 @@ pub fn assert_legacy_metadata_keys(
                 if delivered.is_empty() {
                     continue;
                 }
-                // Two spellings fold to one field, so which value the service
-                // reads depends on key order rather than on anything the
-                // signature pinned. Refused even when one of them is canonical.
                 if delivered.len() > 1 {
                     return Err(AuthChainError::MalformedChain {
                         detail: format!(

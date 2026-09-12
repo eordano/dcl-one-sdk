@@ -1,9 +1,8 @@
-//! Scene JavaScript errors, read from the running client and printed here.
-//!
-//! Read from the client's own log buffer over the MCP server it runs under
-//! `--mcp` (`GetSceneLogsTool`) rather than by injecting a reporter into the
-//! scene: nothing is added to the user's bundle, and we see what the CLIENT
-//! saw — including engine-side failures a scene-side hook cannot observe.
+//! Scene JavaScript errors, read from the client's own log buffer over the
+//! MCP server it runs under `--mcp` (`GetSceneLogsTool`) rather than by
+//! injecting a reporter into the scene: nothing is added to the user's
+//! bundle, and we see what the CLIENT saw — including engine-side failures
+//! a scene-side hook cannot observe.
 
 use super::SourceContext;
 use crate::scene::Project;
@@ -459,8 +458,6 @@ mod tests {
         assert_eq!(entries[0].frames().count(), 2);
     }
 
-    /// An Error that unwound carries its own stack ahead of the host's
-    /// stackTrace:, which is the whole discriminator.
     #[test]
     fn an_unwound_error_keeps_its_own_stack_and_reads_as_thrown() {
         let thrown = "latestSeq=1 returned=1\n\

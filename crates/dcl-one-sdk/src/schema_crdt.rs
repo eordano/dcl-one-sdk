@@ -32,8 +32,7 @@ const NAME_WINDOW: usize = 128;
 
 #[derive(Debug)]
 pub enum SchemaError {
-    /// A jsonSchema construct this encoder does not implement; the node
-    /// data-layer may still know how to serialize it.
+    /// The node data-layer may still know how to serialize it.
     Unsupported(String),
     /// The value does not fit its schema in a way @dcl/ecs would also throw on.
     Invalid(String),
@@ -253,8 +252,8 @@ pub fn encode_component_value(schema: &Schema, json: &Value) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-/// Serialize `value` against `schema`. `None` is JS `undefined` — a key the
-/// composite omitted below the extended top level.
+/// `None` is JS `undefined`: a key the composite omitted below the extended
+/// top level.
 pub fn encode(
     schema: &Schema,
     value: Option<&Value>,
@@ -426,7 +425,6 @@ fn join_element(value: &Value) -> String {
     }
 }
 
-/// The `0x`/`0o`/`0b` radix prefix of a numeric string and the digits after it.
 fn radix_prefix(t: &str) -> Option<(u32, &str)> {
     let radix = match t.get(..2)?.to_ascii_lowercase().as_str() {
         "0x" => 16,

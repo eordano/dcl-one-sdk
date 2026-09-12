@@ -1,26 +1,21 @@
-//! The contract `cargo test -p dcl-one-sdk` is supposed to keep, pinned.
+//! The contract `cargo test -p dcl-one-sdk` keeps, pinned. Three claims, each
+//! false before this file existed:
 //!
-//! Three claims, each of which was false before this file existed:
-//!
-//! 1. A test that could not run is **visible**. Either the harness prints
-//!    `ignored, <reason>`, or — when the runtime opt-out is open — a `SKIPPED`
-//!    line reaches the operator. libtest discards the captured stderr of every
-//!    passing test, and a skip passes by construction, so a notice printed with
-//!    `eprintln!` is seen by nobody: the operator gets `test x ... ok` and a
-//!    tally that counts a test which asserted nothing.
-//! 2. Asking for a gated suite and not getting it is a **failure**, naming the
-//!    variable — not a green run.
-//! 3. Every variable that gates real coverage is written down where a
-//!    contributor will find it.
+//! 1. A test that could not run is **visible** — `ignored, <reason>` from the
+//!    harness, or a `SKIPPED` line when the runtime opt-out is open. libtest
+//!    discards the captured stderr of every passing test, and a skip passes by
+//!    construction, so `eprintln!` reaches nobody.
+//! 2. Asking for a gated suite and not getting it is a **failure** naming the
+//!    variable, not a green run.
+//! 3. Every variable that gates real coverage is written down.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
 
-/// A requirement no machine can satisfy, and deliberately outside every prefix
-/// [`documented_prefixes`] treats as a gate: this is the harness testing itself,
-/// not a knob anyone should set.
+/// Deliberately outside every [`documented_prefixes`] gate: the harness
+/// testing itself, not a knob anyone should set.
 const IMPOSSIBLE: &str = "A_RESOURCE_THIS_MACHINE_DOES_NOT_HAVE";
 
 /// Runs only as a child of the tests below, which pass `--include-ignored`.
@@ -138,8 +133,7 @@ fn every_ignored_test_names_a_reason() {
     );
 }
 
-/// Prefixes that mark a variable as gating real coverage rather than being a
-/// product knob a test happens to set.
+/// Prefixes that mark a variable as gating coverage, not a product knob.
 fn documented_prefixes() -> [&'static str; 5] {
     [
         "DCL_ONE_SDK_TEST_",

@@ -39,7 +39,7 @@ When you change the `src` of an existing `GltfContainer` (in a composite, in cod
 
 Treat every model swap as fresh placement:
 
-1. **Look up the new GLB's native bounding box** — use the bounding box script in `{baseDir}/references/model-patterns.md` (raw accessor `min`/`max` is not sufficient; node-level scale/translation must be applied).
+1. **Look up the new GLB's native bounding box** — use the bounding box script in `{baseDir}/references/model-patterns.md`.
 2. **Recompute `scale`** so the world-space size (native size × scale) is sensible for the role. Do not carry over the previous entity's scale — it was calibrated against a different native size.
 3. **Verify pivot location.** Many architecture/building GLBs have pivots at a corner (e.g. `(0,0,0)` at one base corner), not the center. Two models with the same `position` but different pivots will visually shift after the swap.
 4. **Verify the resulting world-space bounding box stays inside scene bounds.** Each parcel is 16 × 16 m horizontally; max height is `log2(parcels+1) × 20 m` (1 parcel → 20 m, 4 parcels → 46 m, 9 parcels → 66 m — see `{baseDir}/../optimize-scene/SKILL.md`). Compute `position +/- bbox` against scene `[0, maxX] × [0, maxZ]` and `y <= maxHeight`.
@@ -57,13 +57,13 @@ See the "Editing an existing composite (edit mode)" section of `{baseDir}/../com
 
 ## RULE: Parenting a model to the player — pick by item type
 
-When a `GltfContainer` entity needs to follow the player (held weapon, aiming reticle, cosmetic backpack, halo, torch), there are three SDK7 mechanisms and they are NOT interchangeable. **Default for aim-sensitive items: parent to `engine.CameraEntity`** — this is the most common porting mistake when coming from SDK6.
+When a `GltfContainer` entity needs to follow the player (held weapon, aiming reticle, cosmetic backpack, halo, torch), there are three SDK7 mechanisms and they are NOT interchangeable.
 
 - **Aim-sensitive held item** (gun, aiming reticle, flashlight — anything the player should be able to point by looking around) → `Transform.create(entity, { parent: engine.CameraEntity, position: ..., ... })`. Follows camera yaw **+ pitch**, so the item points where the player is looking. This is the SDK7 analogue of SDK6's `Attachable.FIRST_PERSON_CAMERA`. **Recommended default for held gameplay items.**
 - **Yaw-only / body-fixed item** (held shield not used for aim, static carried torch, non-aimed inventory item) → `Transform.create(entity, { parent: engine.PlayerEntity, position: ..., ... })`. Follows feet + body yaw only — no pitch, no animation. Wrong default for guns: a weapon parented to `PlayerEntity` stays flat when the player looks up to aim.
 - **Cosmetic item** (hat, halo, backpack, name plate, decorative torch visible to other players) → `AvatarAttach.create(entity, { anchorPointId: AAPT_HEAD | AAPT_SPINE | AAPT_LEFT_HAND | ... })`. Follows the animated bone — the item visually moves with idle bob, walk cycle, and gestures. **Not for aim** (animation jitter makes aim-sensitive items unusable).
 
-Using a bone anchor like `AAPT_RIGHT_HAND` for a gun **looks** correct ("put the gun in the hand") but the hand bone is animated — the gun jitters every frame and is unaimable. This is a porting trap when coming from SDK6's `Attachable.FIRST_PERSON_CAMERA` pattern; the correct SDK7 mapping is `engine.CameraEntity`, NOT `AvatarAttach` and NOT `engine.PlayerEntity` (which loses pitch).
+Using a bone anchor like `AAPT_RIGHT_HAND` for a gun **looks** correct ("put the gun in the hand") but the hand bone is animated — the gun jitters every frame and is unaimable. This is the most common SDK6 porting mistake.
 
 See [[player-avatar]] (Held items vs cosmetic items) for the full comparison and a worked gun example. For SDK6 porting context, see [[migrate-sdk6-to-sdk7]].
 
@@ -139,7 +139,7 @@ The catalog is at `{baseDir}/references/model-catalog.md`. Search with `grep -i 
 - Materials in models should use PBR for best results
 - For repeated content (lamp posts, chairs, trees), point many entities at **one shared `.glb`** rather than exporting a near-identical file per copy — the engine downloads, converts, and stores a shared source's meshes and textures once, session-wide. This does not reduce draw calls or material count — both track rendered objects; see **optimize-scene** → Repeated Models for when merging meshes is the right call instead.
 
-For full code examples (loading, colliders, operations, catalog workflow), see `{baseDir}/references/model-patterns.md`. For the asset catalog (8,800+ models), see `{baseDir}/references/model-catalog.md`.
+More code examples: `{baseDir}/references/model-patterns.md`.
 
 ## Example scenes
 

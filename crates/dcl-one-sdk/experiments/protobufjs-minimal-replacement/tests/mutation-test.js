@@ -1,7 +1,4 @@
 "use strict";
-// Meta-test: a differential suite that reports "0 divergences" is only meaningful if it can
-// actually see divergences. This injects deliberate, realistic wire-format bugs into a copy
-// of the module and asserts that each phase catches them.
 
 const fs = require("fs");
 const path = require("path");
@@ -24,9 +21,6 @@ const MUTANTS = [
         "return this.uint32((value << 1 ^ value >> 31) >>> 0);",
         "return this.uint32((value << 1) >>> 0);"],
 
-    // NB: the obvious "(& 15) -> (& 127)" mutation on the 5th varint byte is an EQUIVALENT
-    // mutant - JS `<<` discards bits above 31, so both expressions are identical for every
-    // input byte. It is deliberately not used here. These two are real:
     ["uint32-read-shift",
         "value = (value | (this.buf[this.pos] & 127) << 21) >>> 0; if (this.buf[this.pos++] < 128) return value;",
         "value = (value | (this.buf[this.pos] & 127) << 22) >>> 0; if (this.buf[this.pos++] < 128) return value;"],
@@ -87,8 +81,6 @@ const MUTANTS = [
 const phases = [
     ["phase1", ["tests/corpus-diff.js"], { ITERS: "40" }],
     ["phase1-nobuf", ["tests/corpus-diff.js"], { ITERS: "40", NO_BUFFER: "1" }],
-    // The rpc/data-layer catalogue is 41 namespaces against the ecs corpus's 336, so it is
-    // listed here to show it has detection power of its own rather than riding on phase 1.
     ["phase1c-rpc", ["tests/rpc-diff.js"], { ITERS: "400" }],
     ["phase2", ["tests/primitive-diff.js"], {}],
     ["phase3", ["tests/fuzz.js"], { N_RAW: "40000", N_MSG: "8" }],
@@ -107,13 +99,13 @@ for (const [name, from, to] of MUTANTS) {
                 env: { ...process.env, ...env, MINE_ID: "pbmutant", SEED: "12648430" },
             });
         } catch (e) {
-            caughtBy.push(pname); // non-zero exit == divergence detected
+            caughtBy.push(pname);
         }
     }
     const ok = caughtBy.length > 0;
     if (!ok) allCaught = false;
     console.log(`  ${name.padEnd(38)} ${ok ? "CAUGHT" : "*** MISSED ***"}  by: ${caughtBy.join(", ") || "-"}`);
 }
-fs.writeFileSync(MUT, SRC); // leave the mutant dir holding a clean copy
+fs.writeFileSync(MUT, SRC);
 console.log(`\n${allCaught ? "All mutants detected." : "SOME MUTANTS SURVIVED - suite has blind spots."}`);
 process.exitCode = allCaught ? 0 : 1;

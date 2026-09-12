@@ -7,7 +7,7 @@ description: Dynamic lighting and environment in Decentraland scenes. LightSourc
 
 ## Point Lights
 
-Emit light in all directions from a position:
+Light in all directions from a position:
 
 ```typescript
 import { engine, Transform, LightSource } from '@dcl/sdk/ecs'
@@ -38,7 +38,7 @@ Defaults (from the protocol): `active` true, `color` white, `intensity` 16000 ca
 
 ## Spot Lights
 
-Emit a cone of light in a direction:
+A cone of light in a direction:
 
 ```typescript
 import { Quaternion } from '@dcl/sdk/math'
@@ -75,7 +75,7 @@ LightSource.create(spotlight, {
 })
 ```
 
-Note: shadows are only rendered for spot lights, not point lights. `shadow` is a top-level boolean on the component (not inside `Spot`/`Point`).
+Shadows are only rendered for spot lights, not point lights. `shadow` is a top-level optional boolean on the component (default `false`), not a field inside `Spot`/`Point`.
 
 ### Shadow Mask Textures (Gobos)
 
@@ -89,7 +89,7 @@ maskedLight.shadowMaskTexture = Material.Texture.Common({
 ```
 
 - Set `shadowMaskTexture = undefined` to remove the mask again.
-- The mask projects light shape (e.g. a window pattern) — simulating caustics/soft shadows. Used on spot lights.
+- The mask projects a light shape (e.g. a window pattern), simulating caustics/soft shadows. Spot lights only.
 
 ## Toggling Lights
 
@@ -110,8 +110,6 @@ lightData.active = !lightData.active
 - Spread lights out so few are near the player at once (only the closest ones render).
 
 ## SkyboxTime (Day/Night Cycle)
-
-Use SkyboxTime for atmosphere — nighttime scenes with point lights create dramatic environments.
 
 ### Fixed Time in scene.json
 
@@ -179,7 +177,7 @@ engine.addSystem(dayNightCycle)
 
 ## Realm Info
 
-Detect which realm (server) the player is connected to:
+Which realm (server) the player is connected to:
 
 ```typescript
 import { getRealm } from '~system/Runtime'
@@ -194,7 +192,7 @@ executeTask(async () => {
 
 ## Emissive Materials (Glow Effects)
 
-For a visual glow without casting light on surroundings:
+A visual glow that casts no light on surroundings:
 
 ```typescript
 import { engine, Material } from '@dcl/sdk/ecs'
@@ -208,7 +206,7 @@ Material.setPbrMaterial(entity, {
 })
 ```
 
-Note: emissive materials don't illuminate other surrounding entities, they just have a glow effect on them.
+Emissive materials do not illuminate surrounding entities; they only glow themselves.
 
 ### Combining Emissive + LightSource
 
@@ -232,7 +230,7 @@ LightSource.create(bulb, {
 
 ### Shadow Quality
 
-`shadow` is a top-level optional boolean on the LightSource component (default `false`). There is no shadow-type enum — quality is automatic and distance-based. `Spot({...})` accepts only `innerAngle?` and `outerAngle?`.
+There is no shadow-type enum — quality is automatic and distance-based. `Spot({...})` accepts only `innerAngle?` and `outerAngle?`.
 
 ```typescript
 import { LightSource } from '@dcl/sdk/ecs'
@@ -247,7 +245,7 @@ LightSource.create(spotEntity, {
 
 Constraints:
 - Shadows are only supported for **spot** lights; point lights do not cast shadows.
-- Max **3** shadow-casting lights rendered at a time — disable `shadow` on lights that don't need it. Spot lights with shadows suit dramatic effects such as flashlights.
+- Max **3** shadow-casting lights rendered at a time — disable `shadow` on lights that don't need it.
 - Shadow quality/culling is automatic, based on the light's distance from the player. Exact distances vary by light type and the player's quality settings; general rule:
 
 | Distance from player | Result |
@@ -272,7 +270,6 @@ Verified against docs commit `09c5818` (mobile parity tracker, Aug 2026).
 ## Gotchas
 
 - `range` left unset (`-1`) is auto-derived from intensity as `intensity^0.25` — small intensities give surprisingly short range. Set `range` explicitly for predictable falloff.
-- `shadow` only affects spot lights; setting it on a point light has no effect.
 - Animating a light's direction: put a `Tween`/`TweenSequence` (Rotate mode) on the light entity — the beam follows the entity's forward vector.
 - `SkyboxTime` on `RootEntity` overrides any scene.json `fixedTime`; `deleteFrom` reverts to it.
 

@@ -5,8 +5,6 @@ description: Cross-cutting runtime APIs for Decentraland SDK7 scenes. Use when t
 
 # Scene Runtime APIs
 
-Cross-cutting runtime APIs available in every Decentraland SDK7 scene.
-
 ## Async Tasks
 
 The scene runtime is single-threaded. Wrap any async work in `executeTask()` (or an async function) — bare promises are silently dropped:
@@ -94,7 +92,7 @@ executeTask(async () => {
 
 ## Read Deployed Files
 
-Read files deployed with the scene at runtime — use it for data files like JSON configs or level data:
+Read files deployed with the scene at runtime (JSON configs, level data):
 
 ```typescript
 import { readFile } from "~system/Runtime";
@@ -142,7 +140,7 @@ Verified against protocol commit `0b3d285` (field 4 `bool scene_hidden` in `PBEn
 
 `engine.addSystem(fn, priority?, name?)` runs `fn(dt)` every frame. The `priority` parameter controls **when** in the frame it runs relative to other systems.
 
-**HIGHER priority number = runs EARLIER in the frame.** Systems are sorted **descending** by priority (`sort((a, b) => b.priority - a.priority)` in `@dcl/ecs`). The SDK's own JSDoc states: *"a number with the priority, big number are called before smaller ones."*
+**HIGHER priority number = runs EARLIER in the frame.** Systems are sorted **descending** by priority (`sort((a, b) => b.priority - a.priority)` in `@dcl/ecs`).
 
 > **WARNING — counter-intuitive:** This is the OPPOSITE of Unity/Godot/many engines where a lower number runs first. In Decentraland SDK7, "make this run first" means giving it a **large** priority number, NOT `1`. A system with priority `1` runs almost LAST.
 
@@ -212,7 +210,7 @@ changeRealm({ realm: "other-realm.dcl.eth", message: "Join this realm?" });
 
 ### openExplorerUi -- Open Explorer Panels
 
-Open a fullscreen explorer panel (map, backpack, settings, etc.) from scene code. Requires prior player interaction.
+Open a fullscreen explorer panel (map, backpack, settings, etc.). Requires prior player interaction.
 
 ```typescript
 import { openExplorerUi } from "~system/RestrictedActions";
@@ -226,7 +224,7 @@ openExplorerUi({ ui: ExplorerUi.EU_MAP });
 
 ### ExplorerUiEventsResult -- Observe Panel Open/Close
 
-Scenes can observe when explorer panels are opened or closed. `ExplorerUiEventsResult` is a grow-only value set (APPEND semantics, max 100 entries) on `engine.RootEntity`. Each entry reports which panel and whether it opened or closed.
+`ExplorerUiEventsResult` is a grow-only value set (APPEND semantics, max 100 entries) on `engine.RootEntity`. Each entry reports which panel and whether it opened or closed.
 
 ```typescript
 import { engine, ExplorerUiEventsResult, ExplorerUi } from "@dcl/sdk/ecs";
@@ -249,7 +247,8 @@ Each entry has: `ui` (`ExplorerUi` enum), `timestamp` (scene tick), `event` (one
 
 ## Timers
 
-**Always use the engine-bound `timers` object from `@dcl/sdk/ecs`.** Do NOT use the native JS `setTimeout` / `setInterval` globals. Although the QuickJS runtime exposes JS-standard `setTimeout` / `clearTimeout` / `setInterval` / `clearInterval` as globals (declared in `@dcl/js-runtime/index.d.ts`), calling them in a Decentraland scene may appear to work but can introduce subtle problems — they are not bound to the scene's engine. Use `timers.setTimeout` instead.
+**Always use the engine-bound `timers` object from `@dcl/sdk/ecs`.**
+Do NOT use the native JS `setTimeout` / `setInterval` globals. The QuickJS runtime does expose JS-standard `setTimeout` / `clearTimeout` / `setInterval` / `clearInterval` as globals (declared in `@dcl/js-runtime/index.d.ts`), and they may appear to work, but they are not bound to the scene's engine and can introduce subtle problems.
 
 ```typescript
 import { timers } from "@dcl/sdk/ecs";
@@ -272,9 +271,9 @@ timers.clearInterval(timerId: number): void
 
 **Argument order is `(callback, ms)`** — not `(ms, callback)`. Do NOT write a custom helper that flips them.
 
-**Timer error handling:** if a timer callback throws, subsequent timers still measure correctly. The SDK clears the internal timing context via `try/finally` so a thrown exception in one callback does not corrupt elapsed-time tracking for later timers. Verified against js-sdk-toolchain commit `a2ccd0b1`.
+**Timer error handling:** a throwing callback does not corrupt elapsed-time tracking for later timers — the SDK clears the internal timing context via `try/finally`. Verified against js-sdk-toolchain commit `a2ccd0b1`.
 
-**Do NOT write a custom per-frame timer system** that accumulates `dt` to fire delayed callbacks. The SDK already ships `timers`. Custom systems duplicate work, drift from the engine's own scheduling, and are the wrong abstraction for one-shot delays.
+**Do NOT write a custom per-frame timer system** that accumulates `dt` to fire delayed callbacks. The SDK already ships `timers`; a custom system drifts from the engine's own scheduling and is the wrong abstraction for one-shot delays.
 
 For a custom engine instance, use `createTimers(engineInstance)` from `@dcl/sdk/ecs` to get a `Timers` object scoped to that engine.
 
@@ -311,13 +310,13 @@ Removes all components from an entity and releases its id for reuse. Returns `bo
 - `true` — entity accepted; components purged, id released for recycling.
 - `false` — entity refused; components **untouched**, id stays reserved. This happens for entity ids in the renderer-reserved range (avatar entities, numbers 3 through `reservedStaticEntities - 1` at any version). The three named static entities (`engine.RootEntity`, `engine.PlayerEntity`, `engine.CameraEntity`) are also reserved and never released, but their components **are** still purged (the renderer accepts scene deletes on those three).
 
-The return type changed from `void` to `boolean` as of js-sdk-toolchain commit `e712ef71`. Existing code that ignores the return value is unaffected.
+The return type changed from `void` to `boolean` as of js-sdk-toolchain commit `e712ef71`; code that ignores it is unaffected.
 
 **Gotcha — avatar entity collision:** before this fix, `engine.removeEntity` could silently purge components of a live remote player's avatar entity. The engine now refuses removal of renderer-reserved ids, preventing this. Never call `removeEntity` on an entity returned by iterating `PlayerIdentityData` unless you specifically intend to clear a named static entity.
 
 ### removeEntityWithChildren
 
-Recursively remove an entity and all its children — reach for this when cleaning up complex entity hierarchies:
+Recursively remove an entity and all its children (use for complex hierarchies):
 
 ```typescript
 import { removeEntityWithChildren } from "@dcl/sdk/ecs";
@@ -353,8 +352,7 @@ const { loaded } = await getPortableExperiencesLoaded({});
 await exit({});
 ```
 
-- `spawn({ ens?, pid? })` → `SpawnResponse { pid, parentCid, name, ens? }`. Field is `ens`/`pid`, **not `urn`**.
-- `kill({ pid })` returns `{ status: boolean }`; `kill({ pid })` and `getPortableExperiencesLoaded({})` both key off `pid`, never `urn`.
+- `spawn({ ens?, pid? })` → `SpawnResponse { pid, parentCid, name, ens? }`; `kill({ pid })` → `{ status: boolean }`. `kill` and `getPortableExperiencesLoaded({})` key off `pid`, **never `urn`**.
 - The **host scene** must enable them in `scene.json`: `"featureToggles": { "portableExperiences": "enabled" }`. Values: `"enabled"` | `"disabled"` | `"hideUi"` (spawns PX but hides their UI). With `"disabled"`, `spawn()` is a no-op / rejected.
 
 ## Testing Framework

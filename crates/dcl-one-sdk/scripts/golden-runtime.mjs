@@ -1,27 +1,4 @@
 #!/usr/bin/env node
-// golden-runtime.mjs — the RUNTIME tier of the golden scene-snapshot harness.
-//
-// Usage: node scripts/golden-runtime.mjs <scene-root>
-//
-// Loads a built scene's `main` (the split loader stub) in a CommonJS sandbox
-// whose only door to the outside is an injected `require` over a fixed
-// `~system/*` mock table, runs upstream's short frame loop, and prints the
-// block that `tests/golden.rs` appends to the golden file.
-//
-// Two different failures, two different mechanisms:
-//
-//   * An error that escapes a phase, or an unhandled rejection anywhere, exits
-//     non-zero — a scene that silently died on frame 2.
-//   * An error the SCENE swallows never reaches this process: the SDK's
-//     generated startup wraps main() in `try { … } catch (e) { console.error(e.stack) }`
-//     and a caught throw changes no CRDT traffic, so exit status cannot see it.
-//     Console output is therefore recorded INTO the golden as `CONSOLE(<level>):`
-//     lines under the phase that emitted them. A scene that starts throwing
-//     changes its golden and the test fails as stale.
-//
-// Plain .mjs rather than the .mts the other harnesses use, because this one is
-// spawned by `cargo test` on every run and node's TypeScript stripping is a
-// version-dependent flag; there is nothing here that needs types.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -31,17 +8,12 @@ const root = path.resolve(process.argv[2] ?? '.')
 const sceneJson = JSON.parse(fs.readFileSync(path.join(root, 'scene.json'), 'utf8'))
 const mainFile = sceneJson.main
 
-// Decoding with the scene's copy rather than one of our own is what makes the
-// `data=null` lines meaningful: a component id the installed @dcl/ecs does not
-// know (asset-packs writes several) renders as null exactly the way upstream's
-// goldens show it, instead of being silently dropped or guessed at.
 const sceneRequire = createRequire(path.join(root, 'golden-runtime-anchor.js'))
 const { ReadWriteByteBuffer } = sceneRequire('@dcl/ecs/dist-cjs/serialization/ByteBuffer')
 const { readMessage } = sceneRequire('@dcl/ecs/dist-cjs/serialization/crdt/message')
 const { CrdtMessageType } = sceneRequire('@dcl/ecs/dist-cjs/serialization/crdt/types')
 const hostEngine = sceneRequire('@dcl/ecs/dist-cjs').engine
 
-/** Upstream's serializer, character for character. */
 function serializeMessage(prefix, msg) {
   const type = CrdtMessageType[msg.type] ?? `UNKNOWN(${msg.type})`
   const head = `  ${prefix}: ${type} e=0x${msg.entityId.toString(16)}`
@@ -58,7 +30,6 @@ function serializeMessage(prefix, msg) {
   return `${head} c=${msg.componentId} t=${msg.timestamp} data=${data}`
 }
 
-/** Decode one wire buffer, in wire order — never sorted. */
 function decodeBuffer(prefix, bytes) {
   const buffer = new ReadWriteByteBuffer(bytes)
   const lines = []
@@ -77,20 +48,14 @@ const readFiles = []
 const requiredHostModules = []
 const consoleLines = []
 const rejections = []
-/** Lines emitted by the phase currently running. */
 let phase = []
 
 process.on('unhandledRejection', (err) => {
   rejections.push(String(err && err.stack ? err.stack : err))
 })
 
-/** A `    at …` stack frame, the only place a path or an eval offset appears. */
 const STACK_FRAME = /^\s+at\s/
 
-// Stack FRAMES are dropped before a console line reaches the golden: they carry
-// absolute paths and `new Function` eval offsets, neither of which may ever sit
-// in a checked-in snapshot. The message line survives, and that is the line
-// that names the failure ("Error: golden fixture boom").
 function consoleText(args) {
   return args
     .map((a) => (a instanceof Error && a.stack ? String(a.stack) : String(a)))
@@ -110,10 +75,6 @@ for (const level of ['log', 'info', 'warn', 'error', 'debug', 'trace']) {
   }
 }
 
-// Every entry is the narrowest shape the SDK actually reads. An unknown module
-// id THROWS: that is what turns the REQUIRE lines below from a log into an
-// assertion about the host-API surface a scene depends on, so a new host
-// module reaching the runtime fails the suite instead of quietly working.
 const HOST_MODULES = {
   '~system/Runtime': () => ({
     readFile: async ({ fileName }) => {
@@ -137,9 +98,6 @@ const HOST_MODULES = {
       metadataJson: JSON.stringify(sceneJson),
       baseUrl: 'http://127.0.0.1:8000/content/contents/',
     }),
-    // Missing from scripts/split-harness.mts, which is why that harness dies
-    // with "(0 , p.getExplorerInformation) is not a function" inside
-    // @dcl/sdk/platform for any react-ecs or smart-item scene.
     getExplorerInformation: async () => ({
       agent: 'golden',
       platform: 'desktop',
@@ -154,9 +112,6 @@ const HOST_MODULES = {
       }
       return { data: [] }
     },
-    // Feeding the scene's own main.crdt back in is upstream's
-    // `<bundle>.js-main.crdt` trick, except the file is the one this build just
-    // produced rather than a hand-placed sidecar.
     crdtGetState: async () => {
       hostCalls.crdtGetState += 1
       const state = mainCrdtBytes()
@@ -237,7 +192,6 @@ const HOST_MODULES = {
   }),
 }
 
-/** main.crdt as bytes, or undefined when the fixture has no composite. */
 let cachedMainCrdt
 function mainCrdtBytes() {
   if (cachedMainCrdt === undefined) {
@@ -247,7 +201,6 @@ function mainCrdtBytes() {
   return cachedMainCrdt
 }
 
-/** crdtSendToRenderer takes one buffer; crdtGetState-shaped payloads take many. */
 function toBuffers(data) {
   if (!data) return []
   return ArrayBuffer.isView(data) ? [data] : data
@@ -271,9 +224,6 @@ function hostRequire(spec) {
 
 const fakeGlobal = { require: hostRequire, console: sandboxConsole }
 
-// `TextDecoder = undefined` is not laziness: it forces the loader's
-// String.fromCharCode fallback, which is the path the real QuickJS host takes,
-// so the golden covers the branch scenes actually run.
 const PREAMBLE = [
   'const require = globalThis.require;',
   'const console = globalThis.console;',
@@ -299,7 +249,6 @@ function fail(what, err) {
 }
 
 const out = []
-/** Run one phase, collecting whatever CRDT lines it emits under its header. */
 async function runPhase(header, body) {
   phase = []
   try {
@@ -316,15 +265,10 @@ try {
 } catch (e) {
   fail(`eval ${mainFile}`, e)
 }
-// Whatever module evaluation logged, before runPhase resets the buffer.
 const evalConsole = phase
 if (typeof loader.onStart !== 'function') fail(`${mainFile} exports no onStart`)
 if (typeof loader.onUpdate !== 'function') fail(`${mainFile} exports no onUpdate`)
 
-// The EVAL section carries the whole run's file reads and host-module requests
-// rather than only what module evaluation itself touched: with the split loader
-// the chunks are fetched and evaluated inside onStart, so listing them here is
-// what keeps "bringing the scene up" in one block, as upstream's goldens read.
 const evalSection = out.length
 out.push(`EVAL ${mainFile}`)
 
@@ -333,9 +277,6 @@ for (const dt of [0.0, 0.1, 0.1, 0.1]) {
   await runPhase(`CALL onUpdate(${dt})`, () => loader.onUpdate(dt))
 }
 
-// Drain anything the scene queued in a microtask before reading the counters,
-// so a rejection raised by the last frame is reported rather than swallowed by
-// process exit.
 await new Promise((resolve) => setImmediate(resolve))
 if (rejections.length) fail(`unhandled rejection\n${rejections.join('\n')}`)
 

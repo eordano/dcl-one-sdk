@@ -254,11 +254,6 @@ async fn two_member_workspace_builds_serves_and_reloads_per_member() {
         .expect("scene-update websocket");
     let (_, mut ws_rx) = ws.split();
 
-    // Watch the SCENE chunk, not bin/index.js. Since the prebuilt-chunk split,
-    // bin/index.js is a loader stub whose bytes do not depend on scene source —
-    // editing scene-b rewrites bin/scene.js and leaves the stub's mtime alone,
-    // so asserting on the stub made "was it rebuilt?" permanently false and
-    // "did the other scene stay untouched?" vacuously true.
     let a_chunk = root.join("scene-a/bin/scene.js");
     let b_chunk = root.join("scene-b/bin/scene.js");
     assert!(a_chunk.is_file(), "scene-a has no bin/scene.js");

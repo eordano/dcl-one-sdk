@@ -155,7 +155,6 @@ fn the_qr_rides_the_phone_card_only() {
     assert_eq!(phone.matches("QRQR").count(), 1, "the QR is emitted once");
 }
 
-/// The href of the one launch button, as a browser would read it.
 fn launch_href(html: &str) -> String {
     const OPEN: &str = r#"<a class="jn__cta" id="launch" href=""#;
     let at = html.find(OPEN).expect("no launch button") + OPEN.len();
@@ -233,9 +232,6 @@ fn the_mcp_knob_adds_exactly_the_mcp_pair() {
 fn the_knobs_take_only_what_the_page_offers() {
     let names = ["entrance".to_string()];
     let tokens = |q: Option<&str>| knobs(q, &names).tokens(Carry::Loopback);
-    // Terrain is inverted (the client draws it unless =false), so the fresh
-    // page — which starts it checked — emits nothing for it, while any
-    // APPLIED state without the box means "off".
     let terrain_off = ["--landscape-terrain-enabled=false".to_string()];
     assert_eq!(
         tokens(None),
@@ -434,8 +430,6 @@ fn every_control_is_named_by_the_text_beside_it() {
     assert!(html.contains(r#"<legend class="knob__k u-sr-only">where</legend>"#));
 }
 
-/// A memo that never recomputes is a bug and a memo that always
-/// recomputes is not a memo.
 #[test]
 fn the_ttl_memo_computes_once_inside_its_window() {
     use std::sync::atomic::{AtomicUsize, Ordering};

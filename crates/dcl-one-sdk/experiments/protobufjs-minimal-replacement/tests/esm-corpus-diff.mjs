@@ -1,6 +1,3 @@
-// Phase 1b: same differential round-trip, but against @dcl/ecs's ESM build (dist/), which is
-// the tree a scene bundler actually consumes. Two independent module graphs are obtained by
-// tagging every corpus URL with ?__impl=ref|mine, so each graph binds its own implementation.
 
 import { registerHooks } from "node:module";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -29,13 +26,8 @@ registerHooks({
         const impl = implOf(context.parentURL);
         if (specifier === "protobufjs/minimal") {
             if (!impl) return nextResolve(specifier, context);
-            // No query here on purpose: a query string would make Node instantiate a SECOND
-            // copy of the CJS module graph, and protobufjs's internal require cycle then sees
-            // a half-initialised util (symptom: "utf8.write is not a function"). ref and mine
-            // are different files, so the plain URLs already keep the graphs apart.
             return { url: IMPL_URL[impl], shortCircuit: true, format: "commonjs" };
         }
-        // extensionless relative imports inside the corpus
         if (impl && /^\.{1,2}\//.test(specifier)) {
             const base = new URL(specifier, context.parentURL);
             let p = fileURLToPath(base.href.split("?")[0]);
@@ -80,15 +72,11 @@ const ref = await loadEsm("ref");
 const mine = await loadEsm("mine");
 console.log(`esm modules loaded   : ref=${ref.mods.size} mine=${mine.mods.size}` +
     (ref.failures.length || mine.failures.length ? ` (failures ref=${ref.failures.length} mine=${mine.failures.length})` : ""));
-// global.gen.js is not a schema module - it re-exports index.gen.js and additionally pulls in
-// the @dcl/ecs engine runtime, which is not part of the extracted corpus. It fails identically
-// for both implementations and contributes no encode/decode of its own.
 if (ref.failures.length) console.log("  (expected, impl-independent):", ref.failures.map((f) => f[0] + ": " + f[1]).join("; "));
 
 const refMsgs = H.collectMessages(ref.mods);
 const myIndex = new Map(H.collectMessages(mine.mods).map((m) => [m.rel + "#" + m.name, m]));
 
-// prove the two graphs really are bound to different implementations
 {
     const refImpl = require(path.join(ROOT, "ref/node_modules/protobufjs/minimal.js"));
     const myImpl = require(path.join(ROOT, "pbmin/index.js"));
@@ -101,7 +89,7 @@ const myIndex = new Map(H.collectMessages(mine.mods).map((m) => [m.rel + "#" + m
             let hit = null;
             refImpl.Reader.create = function (b) { hit = "ref"; return ro.call(this, b); };
             myImpl.Reader.create = function (b) { hit = "mine"; return mo.call(this, b); };
-            try { ns.decode(new Uint8Array(0)); } catch { /* ignore */ }
+            try { ns.decode(new Uint8Array(0)); } catch {  }
             refImpl.Reader.create = ro; myImpl.Reader.create = mo;
             hits[hit === want ? want : "unknown"]++;
         }

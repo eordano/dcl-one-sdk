@@ -89,8 +89,7 @@ const COMPOSITE_ROOT: &str = "composite::root";
 
 #[derive(Debug)]
 pub enum GenError {
-    /// The scene uses something the native path does not cover; the node
-    /// data-layer fallback may still handle it.
+    /// The node data-layer fallback may still handle it.
     Unsupported(String),
     /// The composite itself is malformed; no toolchain can instance it.
     Invalid(String),
@@ -355,7 +354,6 @@ fn parse_messages(bytes: &[u8]) -> Vec<(u32, u32, &[u8])> {
     out
 }
 
-/// Every component id the scene can possibly emit, so a diff can name them.
 fn component_names(root: &Path) -> HashMap<u32, String> {
     let mut out: HashMap<u32, String> = COMPONENTS
         .iter()
@@ -495,7 +493,6 @@ fn bytes_value(v: &Value) -> Option<Vec<u8>> {
     })
 }
 
-/// A scalar is at its proto3 default (and a non-`optional` field would skip it).
 fn is_proto3_default(kind: FieldKind, v: &Value) -> bool {
     match kind {
         FieldKind::Bool => v.as_bool() == Some(false),
@@ -507,7 +504,6 @@ fn is_proto3_default(kind: FieldKind, v: &Value) -> bool {
     }
 }
 
-/// Write one scalar without its tag — the packed-array element form.
 fn write_untagged_scalar(
     msg: &MsgDef,
     field: &FieldDef,

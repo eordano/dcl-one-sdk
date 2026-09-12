@@ -220,13 +220,6 @@ async fn data_layer_rpc_edit_saves_composite_and_reloads() {
     wait_for_about(&base, &client).await;
     eprintln!("phase: server up on {base}");
 
-    // The editor's browser bundle is a separate npm package and is NOT in the
-    // blob — the blob ships the data-layer host and no UI. Both outcomes are
-    // correct and both are asserted; which one applies depends on whether the
-    // node_modules under test happens to carry `@dcl/inspector/public`.
-    //
-    // Everything below this block is the part that must hold either way: the
-    // data layer itself.
     let has_ui = scene
         .join("node_modules/@dcl/inspector/public/index.html")
         .is_file();
@@ -255,8 +248,6 @@ async fn data_layer_rpc_edit_saves_composite_and_reloads() {
             "application/javascript"
         );
     } else {
-        // A 404 that names the missing package, not a dead server: the point
-        // is that `--data-layer` came up at all without the UI installed.
         assert_eq!(index.status(), reqwest::StatusCode::NOT_FOUND);
         let body = index.text().await.unwrap();
         assert!(body.contains("@dcl/inspector"), "unhelpful 404: {body}");

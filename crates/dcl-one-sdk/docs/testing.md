@@ -10,8 +10,8 @@ anything. node is the one dependency deliberately *not* hidden behind
 `#[ignore]` — see below — so on a machine without it the eight `golden` tests
 fail rather than skip.
 
-Everything else that needs a resource this repo cannot provide is `#[ignore]`d
-with a reason, so the harness prints the reason instead of a green tick:
+Everything else needing a resource this repo cannot provide is `#[ignore]`d with
+a reason, so the harness prints the reason instead of a green tick:
 
 ```
 test two_member_workspace_builds_serves_and_reloads_per_member ... ignored, needs DCL_ONE_SDK_TEST_NODE_MODULES ...
@@ -19,7 +19,7 @@ test two_member_workspace_builds_serves_and_reloads_per_member ... ignored, need
 
 `ignored` in the tally is the honest count of what was not run. A bare
 `#[ignore]` with no reason is rejected by `tests/testgate_contract.rs`, and so
-is a gating variable that is not listed on this page.
+is a gating variable not listed on this page.
 
 ## Turning the gated tests on
 
@@ -29,13 +29,12 @@ DCL_ONE_SDK_TEST_SCENE=/path/to/scene \
   cargo test -p dcl-one-sdk -- --include-ignored
 ```
 
-Under `--include-ignored` the gate is *armed*: a variable that is missing makes
-the test **fail** naming the variable, rather than passing silently. That is
-the testgate in `tests/common/testgate.rs` (the monorepo's `catalyrst-testgate`,
-copied so the standalone workspace needs no extra crate), and it is the point
-of the gate — asking for the
-heavyweight suite and getting a green run that skipped it is the failure mode it
-exists to stop.
+Under `--include-ignored` the gate is *armed*: a missing variable makes the test
+**fail** naming the variable, rather than passing silently. That is the testgate
+in `tests/common/testgate.rs` (the monorepo's `catalyrst-testgate`, copied so
+the standalone workspace needs no extra crate), and it is the point of the gate
+— asking for the heavyweight suite and getting a green run that skipped it is
+the failure mode it exists to stop.
 
 | variable | what it unlocks | what to point it at |
 | --- | --- | --- |
@@ -48,14 +47,14 @@ exists to stop.
 `data_layer_ui` and its driver `scripts/creator-hub-ui-drive.sh` are **not in
 the published tree**: `dcl-one-sdk-standalone-assemble.sh` excludes `scripts/`
 (bar `pin-abgen.sh` and `golden-runtime.mjs`) and `tests/data_layer_ui.rs`, as
-dev harnesses that reach for private tooling. Both live in the upstream source
-checkout only, where the test additionally needs a chromium on the machine.
+dev harnesses reaching for private tooling. Both live in the upstream source
+checkout only, where the test also needs a chromium on the machine.
 
 **`node` is not on this list on purpose.** `golden`'s runtime tier needs it and
 gates on it at runtime rather than with `#[ignore]`, because the crate's own
 `build` cannot type-check without node either: a machine missing it cannot use
-this tool at all, so a red test is the right answer there, not a quiet skip. It
-fails naming `node` and pointing at the opt-out below.
+this tool at all, so a red test is the right answer, not a quiet skip. It fails
+naming `node` and pointing at the opt-out below.
 
 ## The escape hatch, and what it costs you
 
@@ -74,8 +73,8 @@ fails naming `node` and pointing at the opt-out below.
 ## Timing
 
 Every test that spawns the CLI goes through `error_contract.rs`'s `run()`, which
-kills the child and fails naming the arguments once it passes
-`CHILD_TIMEOUT`. Nothing in this suite is allowed to wait on a default
-product timeout — `deploy` without a key waits ten minutes for a browser
-signature (`DCL_ONE_SDK_LINKER_TIMEOUT_SECS`, default 600), and a test that
-reaches that path must fail in seconds, not turn CI into a twelve-minute outage.
+kills the child and fails naming the arguments once it passes `CHILD_TIMEOUT`.
+Nothing in this suite may wait on a default product timeout — `deploy` without a
+key waits ten minutes for a browser signature
+(`DCL_ONE_SDK_LINKER_TIMEOUT_SECS`, default 600), and a test reaching that path
+must fail in seconds, not turn CI into a twelve-minute outage.

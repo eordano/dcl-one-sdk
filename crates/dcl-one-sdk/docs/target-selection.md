@@ -4,9 +4,9 @@ Reviewed against the official documentation on 2026-09-09.
 
 The Target page chooses the destination for this project's next publication. The
 World and LAND views browse destinations; their explicit selection forms update
-the project. They do not publish. **Deploy** opens the existing upload
-review and signing flow. When a delegated signing session is available, opening
-the review page waits for the explicit Publish POST; it does not publish on GET.
+the project. They do not publish. **Deploy** opens the existing upload review and
+signing flow. With a delegated signing session available, opening the review page
+waits for the explicit Publish POST; it does not publish on GET.
 
 | Concept | UI behavior | Documentation |
 | --- | --- | --- |
@@ -21,9 +21,9 @@ the review page waits for the explicit Publish POST; it does not publish on GET.
 | History | Its own tab listing past deployments (age, target, signer, outcome, and the entity / server / HTTP chips of a publish), never a selectable destination. | UI organization based on the two documented destinations; the five-segment layout follows the 2026-09-09 design. |
 | Help | A fifth tab beside History: the publishing guide is its call to action (in the slot the other tabs give Deploy) and the guide anchors this page follows fill its column. It replaced the "Choose where to publish" note above the tab strip. | [Publish your scene](https://docs.decentraland.org/creator/scene-editor/publish/publish-scene) |
 
-The SDK preview already publishes Worlds additively (`multi_scene: true`): it
-preserves non-overlapping scenes rather than deleting the whole World first.
-The Target page describes that existing behavior. Its Multiscene tab does not
+The SDK preview already publishes Worlds additively (`multi_scene: true`),
+preserving non-overlapping scenes rather than deleting the whole World first;
+the Target page describes that existing behavior. Its Multiscene tab does not
 implement Creator Hub's World-settings or collaborator-management controls, and
 does not claim that selecting a World converts it to a different mode.
 
@@ -40,5 +40,5 @@ cargo test -p dcl-one-sdk --no-default-features --lib start::
 ```
 
 Set `DCL_TARGET_DESIGN_CAPTURE` to a temporary directory when running these tests
-to export the renderer's LAND, denied-rights, and World fixtures for browser
+to export the renderer's LAND, denied-rights and World fixtures for browser
 review. The fixture values are confined to tests.

@@ -12,10 +12,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The composite component Creator Hub stores entity names in.
 const NAME_COMPONENT: &str = "core-schema::Name";
 
-/// Where Creator Hub writes the file, relative to the scene root.
 pub const OUTPUT_PATH: &str = "assets/scene/entity-names.ts";
 
 const HEADER: &str = "// Auto-generated entity names from the scene\n\n\n/**\n * Object containing all entity names in the scene for autocomplete support.\n */\nexport enum EntityNames {\n";
@@ -43,7 +41,6 @@ fn enum_key(name: &str) -> Option<String> {
     Some(key)
 }
 
-/// Escape for a TypeScript double-quoted string literal.
 fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -107,7 +104,7 @@ pub fn collect(root: &Path) -> BTreeMap<String, String> {
 }
 
 /// Regenerate `assets/scene/entity-names.ts` when the composites imply a
-/// different file than the one on disk. See [`write`].
+/// different file than the one on disk.
 pub fn write_if_changed(root: &Path) -> std::io::Result<Option<usize>> {
     write(root, &collect(root))
 }

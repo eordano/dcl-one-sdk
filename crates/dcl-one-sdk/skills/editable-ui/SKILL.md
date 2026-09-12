@@ -7,7 +7,7 @@ description: Write React-ECS scene UI that the Creator Hub's 2D UI editor (UI De
 
 The Creator Hub UI editor has **no saved format of its own**: the scene's real `@dcl/react-ecs` `.tsx` files under `src/ui/` *are* the document. The editor parses them into a node tree, renders that on a canvas, and writes visual edits back as minimal text splices. A 1s disk watcher reflects external edits back onto the canvas.
 
-Consequence: **"editable in the editor" is a checkable property of the code**, not a style preference. Code the parser cannot statically understand degrades in one of two ways:
+So **"editable in the editor" is a checkable property of the code**, not a style preference. Code the parser cannot statically understand degrades in one of two ways:
 
 | Degradation | Trigger | Effect |
 |---|---|---|
@@ -233,7 +233,7 @@ Use it for genuinely different structure per device. Per-property overrides are 
 
 ## What is never expressible
 
-Do not attempt these; choose the listed substitute instead.
+Do not attempt these; use the listed substitute.
 
 | Not expressible | Substitute |
 |---|---|
@@ -283,7 +283,7 @@ Full examples (eased open/close, formatted timer label, two-variable exit gate, 
 
 - **The root element of every `/** @ui-component */` file declares explicit `width` AND `height`** — px numbers or percent literals. Never rely on auto/fit-content sizing from children. The canvas renders a component instance from its *declared* box, so an unset dimension reads as **0**: the instance looks collapsed in the preview and the panel shows height 0, even though Yoga lays it out correctly at runtime. This is the failure mode's whole shape — a root with `width: 400` and a 26 px label row plus a 44 px track auto-sizes to 70 px in-world and to nothing on the canvas. Declare `height: 70`.
 - **Wrapper `UiEntity`s around a component ref need the same treatment**: explicit `width`/`height` matching the component's root size, alongside the margin or position they exist for. A wrapper carrying only `margin`/`position` collapses identically.
-- Because in-flow children with fixed sizes lay out fine at runtime, both failures are invisible until someone opens the editor — which is the entire point of writing to this contract.
+- Because in-flow children with fixed sizes lay out fine at runtime, both failures are invisible until someone opens the editor.
 - **Every `Label` declares an explicit `uiTransform` `width` AND `height` too, and so does every container that stacks labels.** This is the *runtime* sibling of the editor-canvas rule above, and it bites on a different axis: text intrinsic sizing is **engine-dependent**. The Bevy explorer measures rendered text and feeds its height back into flex layout; the Unity explorer gives an unset text dimension ~0 while still drawing the glyphs on the zero-height node. So on Unity, stacked labels **overlap** and any parent auto-sizing from text children **collapses** to its padding. Verified in-world with side-by-side screenshots: a 720-px dialog whose two labels had `width: '100%'`, `textWrap="wrap"` and no `height`, in a panel with no `height`, was correct on Bevy and squashed on Unity — both labels drawn over each other, the panel collapsed to padding + button. The fix in that scene: panel `height: 210`, name label `height: 30`, wrapped body label `height: 60`, button label `width: '100%', height: '100%'`. A wrapped multi-line label needs a height for its line count (two lines at `fontSize: 20` → 60); a label filling a fixed parent uses `100%`/`100%`. Note all three surfaces now agree — the editor canvas, Bevy and Unity are only consistent once every box is explicit, and like the emoji rule this is engine-dependent, so **a correct preview in one explorer proves nothing**.
 - **Every bound size or position is a plain px `number`.** No arithmetic in the value, no percent strings. Static percent literals in unbound keys are fine and are the best tool for fluid layout.
 - Design against the two default virtual canvases: **desktop `1920x1080`, mobile `1600x720`**. The mobile canvas is 33% shorter, so tall stacked layouts that fit desktop can overflow on a phone. Anchor to edges and use flex/percent literals for the fluid axis instead of absolute offsets computed for one height.

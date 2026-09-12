@@ -71,7 +71,6 @@ fn memo<K, T: Clone>(
     value
 }
 
-/// A value recomputed at most once per `ttl`.
 fn memoised<T: Clone>(
     cell: &Mutex<Option<(Instant, T)>>,
     ttl: Duration,
@@ -80,7 +79,6 @@ fn memoised<T: Clone>(
     memo(cell, |at| at.elapsed() < ttl, Instant::now, compute)
 }
 
-/// A value recomputed only when its one string input changes.
 fn memoised_by<T: Clone>(
     cell: &Mutex<Option<(String, T)>>,
     key: &str,
@@ -157,8 +155,6 @@ const SCRIPT: &str = concat!(
     include_str!("landing_edit.js")
 );
 
-/// The scene hero: cover, title, position line, description and tags — every
-/// piece an editor target.
 fn scene_card(
     project: Option<&Project>,
     machine: &str,
@@ -213,7 +209,6 @@ fn scene_card(
     )
 }
 
-/// The four launch targets, each with the deep link its client will keep.
 fn launch_targets(
     st: &AppState,
     knobs: &Knobs,
@@ -286,9 +281,8 @@ fn launch_targets(
     targets
 }
 
-/// The request drawer's count and rows. Only the dozen drawn rows are
-/// escaped; the buffer holds up to 200 attacker-influenced lines and the rest
-/// are just counted.
+/// Only the dozen drawn rows are escaped; the buffer holds up to 200
+/// attacker-influenced lines and the rest are just counted.
 fn requests_drawer(st: &AppState) -> (usize, String) {
     let Ok(buffer) = st.recent_requests.lock() else {
         return (0, String::new());
@@ -322,7 +316,6 @@ fn requests_drawer(st: &AppState) -> (usize, String) {
     (lines.len(), rows)
 }
 
-/// The other scenes this realm serves, folded into a drawer.
 fn more_scenes_chips(others: &[Project]) -> String {
     if others.is_empty() {
         return String::new();
@@ -477,10 +470,6 @@ fn render(
         .unwrap_or(0);
     let (request_count, request_rows) = requests_drawer(st);
 
-    // The landing page never carries the wallet panel: the CLI's printed URL
-    // is /deploy, a page publish signs on /deploy — `/` is the preview, and
-    // a wallet prompt on it would be a surprise wherever the visitor came
-    // from.
     let sections = format!(
         r##"  <section id="join" class="sec">
     {join_control}
@@ -513,8 +502,7 @@ fn render(
     )
 }
 
-/// `/scene` — the layout card with an Info tab holding the scene hero, so
-/// every fact about the scene edits in one card under one sub-navigation.
+/// `/scene` — the layout card with an Info tab holding the scene hero.
 pub(super) fn scene_page(st: &AppState, headers: &HeaderMap, local: bool) -> Response {
     let prefix = forwarded_prefix(headers);
     let projects = st.projects();

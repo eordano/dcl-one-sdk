@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# Repin abgen: the release every dcl-one-sdk binary embeds and the flake input
-# every nix build takes, moved together so one tag holds everywhere.
-#
-#   scripts/pin-abgen.sh            # latest release
-#   scripts/pin-abgen.sh v0.17.10   # a specific tag
-#
-# abgen-release.lock is what build.rs and export-overlay/flake.nix read, but the
-# tag also lives in the root and catalyrst flake.nix
-# (`github:decentraland/abgen/<tag>`) and in the locked rev of every flake.lock
-# that carries the node: root and catalyrst directly, the deployment and bevy-explorer
-# through their `catalyrst` path input, which `nix flake lock` never re-locks
-# on its own. One run rewrites all of them, prints every rev, and finishes with
-# the deployment's abgen-pin gate, which fails when any copy
-# drifts. In the standalone dcl-one-sdk export only abgen-release.lock exists
-# and the flake steps are skipped. Re-running at the current tag changes
-# nothing. curl + jq + git; nix only when a lock actually moves.
 set -euo pipefail
 
 repo=decentraland/abgen
@@ -44,8 +28,6 @@ trap 'rm -f "$sums"' EXIT
 curl -fsSL -o "$sums" "https://github.com/$repo/releases/download/$tag/SHA256SUMS.txt" \
   || { echo "no SHA256SUMS.txt for $tag under https://github.com/$repo/releases" >&2; exit 1; }
 
-# Only the plain `abgen-<tag>-<target>.tar.gz` archives: the `abgen-native-`
-# ones are the C ABI shared library, not the server this embeds.
 targets=(
   aarch64-apple-darwin
   x86_64-apple-darwin
@@ -63,9 +45,6 @@ for t in "${targets[@]}"; do
   body+=$(printf '%-26s = %s\n' "$t" "$sha")$'\n'
 done
 
-# Keep the header comment; replace version and the target table. Note the
-# trailing \n: $(...) strips it, and without it the last header line fuses onto
-# the first line of the block below.
 grep -q '^# Keys are abgen' "$lock" || { echo "$lock lost its '# Keys are abgen' header line" >&2; exit 1; }
 header=$(sed -n '1,/^# Keys are abgen/p' "$lock" | sed '$d')
 {
@@ -95,8 +74,6 @@ if [ ! -f "$gate" ] || [ ! -f "$one/catalyrst/flake.nix" ]; then
   exit 0
 fi
 
-# The mirror answers offline; the GitHub commits endpoint peels annotated
-# tags and needs no token, gh only widens its rate limit.
 resolve_rev() {
   local sha
   if [ -d "$mirror" ] && sha=$(git -C "$mirror" rev-parse --verify --quiet "refs/tags/$tag^{commit}" 2>/dev/null); then
@@ -116,8 +93,6 @@ rev=$(resolve_rev) || { echo "cannot resolve $tag to a commit: mirror $mirror la
 [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "'$rev' is not a commit id" >&2; exit 1; }
 echo "abgen $tag = $rev"
 
-# Same discovery as the gate: tracked plus untracked-unignored flakes anywhere
-# in the tree, minus build output.
 discover() {
   local name=$1 f
   while IFS= read -r -d '' f; do
@@ -148,10 +123,6 @@ while IFS= read -r f; do
   fi
 done < <(discover flake.nix)
 
-# Root inputs through which an abgen node at the wrong rev or ref is reachable,
-# with the depth of the shortest route: direct declarers (depth 1) re-lock
-# before the path-input consumers that copy their lock. The ancestry list is
-# the visited set, so a cycle ends the walk instead of hanging it.
 JQ_STALE="$(cat <<'JQ'
 . as $doc
 | def reach($key; $keys; $names):

@@ -1,24 +1,24 @@
 # dcl-one-sdk coverage tour
 
 LLVM source-based line coverage of the crate's own code (`crates/dcl-one-sdk/src`),
-measured by running the existing test suites plus a whole-CLI "tour" that drives
-every user-facing command and probes the running servers.
+measured by running the existing test suites plus a whole-CLI "tour" driving
+every user-facing command and probing the running servers.
 
 ## Result
 
-| | lines | covered | line % |
-|---|---|---|---|
+|| lines | covered | line % |
+| --- | --- | --- | --- |
 | baseline (existing suites only) | 13285 | 9610 | 72.34% |
 | final (baseline + tour) | 13285 | 11595 | 87.28% |
 
 Scope: `crates/dcl-one-sdk/src` only (`--ignore-filename-regex` excludes deps and
-workspace siblings). The percentage counts in-file `#[cfg(test)]` modules, which
-are always fully hit when their tests run.
+workspace siblings). The percentage counts in-file `#[cfg(test)]` modules, always
+fully hit when their tests run.
 
 ## How to reproduce
 
 Instrument (devshell; the two `llvm-args` enable `LLVM_PROFILE_FILE=%c`
-continuous mode so servers killed mid-run still write a mergeable profile):
+continuous mode, so servers killed mid-run still write a mergeable profile):
 
 ```
 export CARGO_TARGET_DIR=target/cov
@@ -48,9 +48,9 @@ scripts/coverage-tour.sh target/cov/debug/dcl-one-sdk <scratch-workdir>
 # TOUR_NPM_SCENE / TOUR_TUNNEL_BIN override the signing/tunnel deps
 ```
 
-Merge and report with the toolchain-matched LLVM (the devshell rustc 1.95.0
-reports LLVM 21.1.8 — the `rust-toolchain.toml` 1.97.0 pin is the export CI's,
-not the devshell's; nixpkgs `llvmPackages_21.libllvm` provides a byte-compatible
+Merge and report with the toolchain-matched LLVM (devshell rustc 1.95.0 reports
+LLVM 21.1.8 — the `rust-toolchain.toml` 1.97.0 pin is the export CI's, not the
+devshell's; nixpkgs `llvmPackages_21.libllvm` provides a byte-compatible
 `llvm-profdata` / `llvm-cov`):
 
 ```
@@ -64,7 +64,7 @@ llvm-cov report --instr-profile=final.profdata $OBJ crates/dcl-one-sdk/src
 ## Tooling caveats
 
 - The devshell has no `cargo-llvm-cov`/`llvm-profdata`/`llvm-cov`; the manual
-  path above was chosen (over fetchable `nixpkgs#cargo-llvm-cov`) so server
+  path above was chosen over fetchable `nixpkgs#cargo-llvm-cov` so server
   commands can be killed while keeping their profiles.
 - Plain `-C instrument-coverage` does **not** support continuous (`%c`) mode; a
   `%c` profile aborts with *"Neither __llvm_profile_counter_bias nor
@@ -74,10 +74,10 @@ llvm-cov report --instr-profile=final.profdata $OBJ crates/dcl-one-sdk/src
 
 122 cases pass, 0 fail, 1 documented skip. Each is a numbered function in
 `scripts/coverage-tour.sh`; the driver's `tcase` table is the authoritative list.
-The harness, stub servers, node sidecars, and fixture writers live in the
-sourced `scripts/coverage-tour-lib.sh` beside it. Cases have a forward
-dependency order (e.g. `07 init_scene` builds the shared scene the later cases
-reuse), so run the whole script, not arbitrary subsets.
+The harness, stub servers, node sidecars and fixture writers live in the sourced
+`scripts/coverage-tour-lib.sh` beside it. Cases have a forward dependency order
+(e.g. `07 init_scene` builds the shared scene later cases reuse), so run the
+whole script, not arbitrary subsets.
 
 - CLI surface: 01 version, 02 help_top, 03 help_subcommands, 04 unknown_flag,
   05 unknown_subcommand, 06 no_args, 92 verbose_error_chain,
@@ -139,13 +139,14 @@ reuse), so run the whole script, not arbitrary subsets.
 - **106 deploy_consent_refused_ci** — the public-network consent gate
   (`deploy/net.rs:213-231`) fires only when the resolved target is on the real
   upstream catalyst rotation; an env-supplied rotation is treated as an explicit
-  target and bypasses it. Not reachable offline. The same code is driven from the
-  TTY side by 107 (prompt) and the non-interactive refusal below it is covered.
+  target and bypasses it, so it is not reachable offline. The same code is driven
+  from the TTY side by 107 (prompt), and the non-interactive refusal below it is
+  covered.
 
 ## Per-file line coverage (baseline → final)
 
 | file | lines | base % | final covered | final % |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | start/mod.rs | 920 | 82.2 | 874 | 95.0 |
 | tunnel.rs | 734 | 31.3 | 533 | 72.6 |
 | deploy/net.rs | 699 | 30.0 | 577 | 82.5 |
@@ -190,33 +191,33 @@ reuse), so run the whole script, not arbitrary subsets.
 
 ## Uncovered-region inventory
 
-1690 lines remain uncovered. Classified below; `file:line` ranges are the
-largest contiguous blocks per file (`llvm-cov show` / lcov `DA:` zeros).
+1690 lines remain uncovered. `file:line` ranges below are the largest contiguous
+blocks per file (`llvm-cov show` / lcov `DA:` zeros).
 
 ### (a) Drivable — not yet driven
 
 - **crdt_gen.rs** 437-453, 307-315, 288-293, 147-162 (~125 lines total, 66%):
   the CRDT binary encoder's map/packed-array/enum/bytes branches. Reachable by
-  building composites that exercise every component field kind; the tour's
+  building composites exercising every component field kind; the tour's
   composites hit only Transform/MeshRenderer. A composite fixture covering each
   `FieldKind` (map, repeated, enum-by-name, base64 bytes) would close most.
   Numbers predate the ISchema encoder below and are stale for this file.
 - **schema_crdt.rs** (new since this table): the second of main.crdt's two
   encoders. crdt_gen serializes `core::*` as protobuf against the vendored
-  @dcl/protocol descriptors; everything else — `inspector::*`,
-  `core-schema::*`, `asset-packs::*` and user-named components — is serialized
-  here against the `jsonSchema` the composite itself carries, which is the only
-  way a user-defined component can be encoded at all. Driven by the golden
-  fixtures in `testdata/{opera,gather,gather2,museum}-main.{composite,crdt}`
-  (each `.crdt` regenerated through the node data-layer when it was committed,
-  @dcl/ecs 7.26.0; still byte-identical under 7.27.0) and by `tests/schema_parity.rs`, a seeded differential fuzz
-  against @dcl/ecs itself. `scripts/crdt-diff.py` turns any parity failure into
-  a component + entity + schema field path, and `scripts/ischema-oracle.py` is
-  an independent Python reimplementation kept as a third opinion. In production,
-  `DCL_ONE_CRDT_VERIFY=1` runs the node data-layer alongside the native path and
-  logs a decoded diff on any divergence.
+  @dcl/protocol descriptors; everything else — `inspector::*`, `core-schema::*`,
+  `asset-packs::*` and user-named components — is serialized here against the
+  `jsonSchema` the composite itself carries, the only way a user-defined
+  component can be encoded at all. Driven by the golden fixtures in
+  `testdata/{opera,gather,gather2,museum}-main.{composite,crdt}` (each `.crdt`
+  regenerated through the node data-layer when it was committed, @dcl/ecs 7.26.0;
+  still byte-identical under 7.27.0) and by `tests/schema_parity.rs`, a seeded
+  differential fuzz against @dcl/ecs itself. `scripts/crdt-diff.py` turns any
+  parity failure into a component + entity + schema field path, and
+  `scripts/ischema-oracle.py` is an independent Python reimplementation kept as a
+  third opinion. In production, `DCL_ONE_CRDT_VERIFY=1` runs the node data-layer
+  alongside the native path and logs a decoded diff on any divergence.
 - **composite_norm.rs** 300-310, 213-221, 262-270 (~90 lines, 82%): normalizer
-  branches for component shapes absent from the tour composites. Same fix —
+  branches for component shapes absent from the tour composites. Same fix:
   broader composite fixtures (the `docs/composite-tojson-edge-cases.json` set).
 - **jsjson.rs** scattered (~39): `JSON.stringify` number/string formatting edge
   cases (exponent forms, control-char escapes). Drivable with a targeted value.
@@ -229,10 +230,10 @@ largest contiguous blocks per file (`llvm-cov show` / lcov `DA:` zeros).
 
 ### (b) Needs the external world (real services / browser / TTY)
 
-- **tunnel.rs** 497-513, 616-681, 530-553 (~195 lines, 72%): channel
-  read-error, local-preview-unreachable, and close-frame relay paths inside the
-  live trunk multiplexer. Case 94 drives the happy path against a local tunnel;
-  the failure/close paths need induced socket errors or a real disconnect.
+- **tunnel.rs** 497-513, 616-681, 530-553 (~195 lines, 72%): channel read-error,
+  local-preview-unreachable and close-frame relay paths inside the live trunk
+  multiplexer. Case 94 drives the happy path against a local tunnel; the
+  failure/close paths need induced socket errors or a real disconnect.
 - **linker.rs** 630-663: the `#[cfg(test)]` `sign_flow_completes_against_local_worlds`
   smoke test, gated on `DCL_ONE_SDK_LINKER_SMOKE_KEY` + a live worlds server.
 - **deploy/net.rs** 215-237 partial, 269-274: the interactive `Continue?`/public
@@ -253,7 +254,7 @@ largest contiguous blocks per file (`llvm-cov show` / lcov `DA:` zeros).
 - **ux.rs** 234-261: the slow-operation spinner thread body, which only paints
   after `SLOW_AFTER` seconds of a blocking op — timing-only, no assertion hook.
 - **deploy/mod.rs** 320-340, **build.rs** 195-211: `no_parcels()` / smart-chunk /
-  metadata-shape error constructors reached only on malformed input the earlier
+  metadata-shape error constructors reached only on malformed input earlier
   validation already rejects.
 - Scattered `.unwrap_or_else(PoisonError::into_inner)` and `map_err` arms across
   world.rs, world_linker.rs, data_layer.rs, run.rs — mutex-poison and
@@ -262,10 +263,10 @@ largest contiguous blocks per file (`llvm-cov show` / lcov `DA:` zeros).
 ### (d) Platform / build-config specific
 
 - **abgen_embed.rs**: no longer build-config specific. Every build embeds abgen
-  (see `abgen-release.lock`), so `FILES` is never empty and `extract_into` runs
-  in dev too; `the_binary_carries_an_abgen` and
-  `extraction_yields_a_runnable_binary_and_is_idempotent` cover it directly.
-  Case 116 still covers the external-`ABGEN_BIN` sidecar.
+  (see `abgen-release.lock`), so `FILES` is never empty and `extract_into` runs in
+  dev too; `the_binary_carries_an_abgen` and
+  `extraction_yields_a_runnable_binary_and_is_idempotent` cover it directly. Case
+  116 still covers the external-`ABGEN_BIN` sidecar.
 - **netinfo.rs** / **joinblock.rs** residuals: interface-class branches
   (overlay-VPN, virtual-bridge, NAT-VM guest) that depend on the host's actual
   network interfaces.

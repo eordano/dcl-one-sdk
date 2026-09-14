@@ -12,6 +12,7 @@ fn main() -> Result<()> {
     prost_build::Config::new().compile_fds(fds)?;
     generate_component_schema()?;
     generate_abgen_embed()?;
+    generate_livekit_embed()?;
     generate_skills_embed()?;
     Ok(())
 }
@@ -385,19 +386,20 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<()> 
     Ok(())
 }
 
-struct AbgenLock {
+/// A `*-release.lock`: `version`, a `url` template and one `<key> = <sha256>`
+/// per downloadable, comments and blank lines skipped.
+struct ReleaseLock {
     version: String,
     url: String,
-    /// abgen release target -> sha256 of its archive
-    targets: std::collections::BTreeMap<String, String>,
+    entries: std::collections::BTreeMap<String, String>,
 }
 
-impl AbgenLock {
-    fn read() -> Result<Self> {
-        let text = std::fs::read_to_string("abgen-release.lock")?;
+impl ReleaseLock {
+    fn read(path: &str) -> Result<Self> {
+        let text = std::fs::read_to_string(path)?;
         let mut version = String::new();
         let mut url = String::new();
-        let mut targets = std::collections::BTreeMap::new();
+        let mut entries = std::collections::BTreeMap::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -411,18 +413,36 @@ impl AbgenLock {
                 "version" => version = v,
                 "url" => url = v,
                 _ => {
-                    targets.insert(k, v);
+                    entries.insert(k, v);
                 }
             }
         }
         assert!(
-            !version.is_empty() && !url.is_empty() && !targets.is_empty(),
-            "abgen-release.lock is missing version, url or target hashes"
+            !version.is_empty() && !url.is_empty() && !entries.is_empty(),
+            "{path} is missing version, url or hashes"
         );
-        Ok(AbgenLock {
+        Ok(ReleaseLock {
             version,
             url,
-            targets,
+            entries,
+        })
+    }
+}
+
+struct AbgenLock {
+    version: String,
+    url: String,
+    /// abgen release target -> sha256 of its archive
+    targets: std::collections::BTreeMap<String, String>,
+}
+
+impl AbgenLock {
+    fn read() -> Result<Self> {
+        let lock = ReleaseLock::read("abgen-release.lock")?;
+        Ok(AbgenLock {
+            version: lock.version,
+            url: lock.url,
+            targets: lock.entries,
         })
     }
 
@@ -540,20 +560,210 @@ fn fetch_pinned_abgen(lock: &AbgenLock) -> Result<PathBuf> {
 /// Shared across every checkout and target dir on the machine — a 13 MB
 /// download per abgen release, not per `cargo clean`.
 fn abgen_cache_dir() -> PathBuf {
-    if let Ok(v) = std::env::var("ABGEN_EMBED_CACHE") {
+    embed_cache_dir("ABGEN_EMBED_CACHE", "dcl-one-sdk-abgen")
+}
+
+fn livekit_cache_dir() -> PathBuf {
+    embed_cache_dir("LIVEKIT_EMBED_CACHE", "dcl-one-sdk-livekit")
+}
+
+fn embed_cache_dir(env: &str, name: &str) -> PathBuf {
+    if let Ok(v) = std::env::var(env) {
         if !v.is_empty() {
             return PathBuf::from(v);
         }
     }
     if let Ok(v) = std::env::var("CARGO_HOME") {
         if !v.is_empty() {
-            return PathBuf::from(v).join("dcl-one-sdk-abgen");
+            return PathBuf::from(v).join(name);
         }
     }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".cache").join("dcl-one-sdk-abgen")
+    PathBuf::from(home).join(".cache").join(name)
+}
+
+/// livekit-release.lock (shared cache, sha256-verified), LIVEKIT_EMBED_BIN, or
+/// nothing: LiveKit publishes no macOS release, so a cargo build there embeds
+/// no server unless one is named (brew's, nix's) and `start` looks on PATH.
+/// Stored deflate-compressed like abgen: 47 MB of static Go on disk, 18 MB in
+/// the binary.
+fn generate_livekit_embed() -> Result<()> {
+    println!("cargo:rerun-if-env-changed=LIVEKIT_EMBED_BIN");
+    println!("cargo:rerun-if-env-changed=LIVEKIT_EMBED_CACHE");
+    println!("cargo:rerun-if-changed=livekit-release.lock");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let dest = out_dir.join("livekit_embed_data.rs");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let bin_name = if target_os == "windows" {
+        "livekit-server.exe"
+    } else {
+        "livekit-server"
+    };
+
+    let named = std::env::var("LIVEKIT_EMBED_BIN").unwrap_or_default();
+    let (bin_path, version): (Option<PathBuf>, String) = if named.eq_ignore_ascii_case("none")
+        || named.eq_ignore_ascii_case("off")
+    {
+        (None, "none".to_string())
+    } else if !named.is_empty() {
+        let p = PathBuf::from(&named);
+        if !p.is_file() {
+            panic!("LIVEKIT_EMBED_BIN={named} is not a file; it must point at a livekit-server executable, or be `none`");
+        }
+        (Some(p), "custom".to_string())
+    } else {
+        let lock = ReleaseLock::read("livekit-release.lock")?;
+        match livekit_release_asset(&target_os, &target_arch) {
+            Some(asset) => (
+                Some(fetch_pinned_livekit(&lock, asset, bin_name)?),
+                lock.version.clone(),
+            ),
+            None => {
+                println!(
+                        "cargo:warning=no livekit-server embedded for {target_os}/{target_arch}: LiveKit publishes no release for it. \
+                         `start` will run a livekit-server from PATH (brew install livekit) or LIVEKIT_SERVER_BIN, else comms stay on \
+                         the built-in ws-room without voice; set LIVEKIT_EMBED_BIN to embed one"
+                    );
+                (None, "none".to_string())
+            }
+        }
+    };
+
+    let mut code = String::new();
+    match bin_path {
+        Some(p) => {
+            println!("cargo:rerun-if-changed={}", p.display());
+            let raw = std::fs::read(&p)?;
+            let mut hash: u64 = 0xcbf29ce484222325;
+            fnv1a64(&mut hash, &raw);
+            let blob = out_dir.join("livekit-server.z");
+            std::fs::write(&blob, deflate(&raw))?;
+            code.push_str(&format!(
+                "/// The deflated livekit-server executable, empty when this build embeds none.\npub static PACKED: &[u8] = include_bytes!({:?});\n",
+                blob.display().to_string()
+            ));
+            code.push_str(&format!("pub const RAW_LEN: usize = {};\n", raw.len()));
+            code.push_str(&format!("pub const TAG: &str = \"{hash:016x}\";\n"));
+        }
+        None => {
+            code.push_str("/// The deflated livekit-server executable, empty when this build embeds none.\npub static PACKED: &[u8] = &[];\n");
+            code.push_str("pub const RAW_LEN: usize = 0;\n");
+            code.push_str("pub const TAG: &str = \"none\";\n");
+        }
+    }
+    code.push_str(&format!("pub const BIN_NAME: &str = {bin_name:?};\n"));
+    code.push_str(&format!("pub const VERSION: &str = {version:?};\n"));
+    std::fs::write(&dest, code)
+}
+
+/// The release asset suffix LiveKit publishes for the build target, none
+/// for macOS and the rest.
+fn livekit_release_asset(os: &str, arch: &str) -> Option<&'static str> {
+    Some(match (os, arch) {
+        ("linux", "x86_64") => "linux_amd64.tar.gz",
+        ("linux", "aarch64") => "linux_arm64.tar.gz",
+        ("linux", "arm") => "linux_armv7.tar.gz",
+        ("windows", "x86_64") => "windows_amd64.zip",
+        ("windows", "aarch64") => "windows_arm64.zip",
+        _ => return None,
+    })
+}
+
+fn fetch_pinned_livekit(lock: &ReleaseLock, asset: &str, bin_name: &str) -> Result<PathBuf> {
+    let sha = lock.entries.get(asset).unwrap_or_else(|| {
+        panic!("livekit-release.lock has no sha256 for asset {asset}");
+    });
+    let cache = livekit_cache_dir().join(&lock.version).join(asset);
+    let unpacked = cache.join("dist").join(bin_name);
+    if unpacked.is_file() {
+        return Ok(unpacked);
+    }
+    std::fs::create_dir_all(&cache)?;
+
+    let url = lock
+        .url
+        .replace("{version}", &lock.version)
+        .replace("{semver}", lock.version.trim_start_matches('v'))
+        .replace("{asset}", asset);
+    let archive = cache.join(format!("archive.{}", std::process::id()));
+    println!(
+        "cargo:warning=downloaded pinned livekit-server {} ({asset}) into {}",
+        lock.version,
+        cache.display()
+    );
+    let status = std::process::Command::new("curl")
+        .args(["-fsSL", "--retry", "3", "--retry-delay", "2", "-o"])
+        .arg(&archive)
+        .arg(&url)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        other => {
+            let _ = std::fs::remove_file(&archive);
+            panic!(
+                "could not download the pinned livekit-server from {url} ({other:?}).\n\
+                 to build without network access, unpack that archive yourself and set \
+                 LIVEKIT_EMBED_BIN=<dir>/{bin_name}, or LIVEKIT_EMBED_BIN=none to embed no server"
+            );
+        }
+    }
+    let got = sha256_hex(&std::fs::read(&archive)?);
+    if &got != sha {
+        let _ = std::fs::remove_file(&archive);
+        panic!("{url} hashed to {got}, but livekit-release.lock pins {sha}");
+    }
+
+    let stage = cache.join(format!("stage.{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)?;
+    let staged = stage.join(bin_name);
+    if asset.ends_with(".zip") {
+        unzip_member(&archive, bin_name, &staged)?;
+    } else {
+        let status = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&stage)
+            .status()?;
+        assert!(
+            status.success(),
+            "tar failed to unpack {}",
+            archive.display()
+        );
+        assert!(staged.is_file(), "no {bin_name} inside {url}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let dist = cache.join("dist");
+    std::fs::create_dir_all(&dist)?;
+    if std::fs::rename(&staged, &unpacked).is_err() && !unpacked.is_file() {
+        panic!("could not place {bin_name} into {}", dist.display());
+    }
+    let _ = std::fs::remove_dir_all(&stage);
+    let _ = std::fs::remove_file(&archive);
+    Ok(unpacked)
+}
+
+/// The one member of a zip whose file name is `name`, written to `dest`.
+fn unzip_member(archive: &Path, name: &str, dest: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive)?;
+    let mut zip = zip::ZipArchive::new(file).map_err(std::io::Error::other)?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(std::io::Error::other)?;
+        if entry.name().rsplit('/').next() == Some(name) {
+            let mut out = std::fs::File::create(dest)?;
+            std::io::copy(&mut entry, &mut out)?;
+            return Ok(());
+        }
+    }
+    panic!("no {name} inside {}", archive.display());
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

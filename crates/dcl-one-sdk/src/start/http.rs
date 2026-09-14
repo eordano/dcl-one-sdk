@@ -126,11 +126,7 @@ pub(super) async fn about(State(st): State<Arc<AppState>>, req: Request) -> Json
     let headers = req.headers();
     let host = preview_host(headers);
     let origin = preview_origin(headers);
-    let fixed_adapter = if st.offline_comms {
-        "offline:offline".to_string()
-    } else {
-        format!("ws-room:{}/mini-comms/room-1", preview_ws_origin(headers))
-    };
+    let fixed_adapter = realm_adapter(&st, headers);
     let projects = st.projects();
     let parcels: Vec<String> = projects.iter().flat_map(|p| p.parcels()).collect();
     let scenes_urn: Vec<String> = projects
@@ -164,25 +160,54 @@ pub(super) async fn about(State(st): State<Arc<AppState>>, req: Request) -> Json
     }))
 }
 
+/// How an explorer joins this preview's realm room: no comms at all, a
+/// mini-comms ws-room on this server (`--no-livekit`, or no LiveKit server
+/// could run), or a `signed-login:` it POSTs a signed fetch to and gets a
+/// LiveKit room for its own wallet back from (see `signed_login`).
+fn realm_adapter(st: &AppState, headers: &HeaderMap) -> String {
+    if st.offline_comms {
+        "offline:offline".to_string()
+    } else if st.livekit.is_some() {
+        format!("signed-login:{}/signed-login", preview_origin(headers))
+    } else {
+        format!("ws-room:{}/mini-comms/room-1", preview_ws_origin(headers))
+    }
+}
+
 pub(super) async fn scenes() -> Json<Value> {
     Json(json!({ "scenes": [], "total": 0 }))
 }
 
 /// The scene-room gatekeeper of this preview: the `POST /get-scene-adapter`
-/// an explorer signs when it loads a scene. A scene room is an ordinary
+/// an explorer signs when it loads a scene. With LiveKit the room is
+/// `scene:<realm room>:<sceneId>` on the SFU and the token names the wallet
+/// the signature recovers to. Otherwise a scene room is an ordinary
 /// mini-comms room named `scene-<sceneId>` on the origin `/about` advertises,
 /// so the same wallet holds its realm-room and scene-room sessions side by
-/// side. The preview trusts whoever can reach it: the signature is not
-/// verified, only the signer is logged, and a request naming no scene is 400.
-pub(super) async fn get_scene_adapter(headers: HeaderMap, body: Bytes) -> Response {
-    let metadata = header_json(&headers, AUTH_METADATA_HEADER);
+/// side, and the preview trusts whoever can reach it: the signature is not
+/// verified, only the signer is logged. A request naming no scene is 400.
+pub(super) async fn get_scene_adapter(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let body: Option<Value> = serde_json::from_slice(&body).ok();
+    if let Some(lk) = &st.livekit {
+        let (signer, metadata) = match verified_signer(&headers, "/get-scene-adapter").await {
+            Ok(v) => v,
+            Err(refused) => return refused,
+        };
+        let Some(scene_id) = scene_id_from(Some(&metadata), body.as_ref()) else {
+            return no_scene_id();
+        };
+        let room = lk.scene_room(&scene_id);
+        let adapter = lk.adapter(&signer, &room, &preview_host(&headers));
+        tracing::info!(scene_id, signer, room, "livekit scene adapter minted");
+        return Json(json!({ "adapter": adapter })).into_response();
+    }
+    let metadata = header_json(&headers, AUTH_METADATA_HEADER);
     let Some(scene_id) = scene_id_from(metadata.as_ref(), body.as_ref()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "no sceneId in x-identity-metadata or the request body\n",
-        )
-            .into_response();
+        return no_scene_id();
     };
     let adapter = format!(
         "ws-room:{}/mini-comms/scene-{scene_id}",
@@ -196,6 +221,67 @@ pub(super) async fn get_scene_adapter(headers: HeaderMap, body: Bytes) -> Respon
         "mini-comms scene adapter minted"
     );
     Json(json!({ "adapter": adapter })).into_response()
+}
+
+fn no_scene_id() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        "no sceneId in x-identity-metadata or the request body\n",
+    )
+        .into_response()
+}
+
+/// `POST /signed-login`: the realm room of a preview with a LiveKit server. The
+/// explorer signs the request with its wallet, guest or not, and the address
+/// the signature recovers to becomes its LiveKit identity, so the other
+/// peers resolve it to the profile they would see on a real realm. Bevy
+/// follows the `signed-login:` in `/about` as is; Unity reaches the same
+/// endpoint through its fixed-room path (over plain http only with its
+/// `--accept-untrusted-realm`, over a tunnel's https with nothing).
+pub(super) async fn signed_login(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let Some(lk) = &st.livekit else {
+        return (
+            StatusCode::NOT_FOUND,
+            "this preview has no LiveKit server (--no-livekit, or none could start)\n",
+        )
+            .into_response();
+    };
+    let (signer, _) = match verified_signer(&headers, "/signed-login").await {
+        Ok(v) => v,
+        Err(refused) => return refused,
+    };
+    let adapter = lk.adapter(&signer, lk.realm_room(), &preview_host(&headers));
+    tracing::info!(
+        signer,
+        room = lk.realm_room(),
+        "livekit realm adapter minted"
+    );
+    Json(json!({ "fixedAdapter": adapter })).into_response()
+}
+
+/// Explorers stamp their own clock on a signed fetch; a preview machine and a
+/// phone on the LAN can disagree by minutes without anyone noticing.
+const SIGNED_FETCH_TOLERANCE_SECS: i64 = 10 * 60;
+
+/// The wallet behind a signed fetch to `path` and its metadata, or the 4xx
+/// that refuses it. A LiveKit identity is what every other peer shows as
+/// this user, so unlike the ws-room gatekeeper this is verified, with the
+/// validator the production gatekeeper runs (it accepts the route path Unity
+/// signs and the public path bevy and the web sign alike).
+async fn verified_signer(headers: &HeaderMap, path: &str) -> Result<(String, Value), Response> {
+    use catalyrst_crypto::signed_fetch::verify_signed_fetch_meta;
+    match verify_signed_fetch_meta(headers, "post", path, SIGNED_FETCH_TOLERANCE_SECS).await {
+        Ok((signer, metadata)) => Ok((signer.as_str().to_lowercase(), metadata)),
+        Err(e) => {
+            let (status, message) = e.http_status_and_message();
+            tracing::warn!(path, status, message, "signed fetch refused");
+            Err((
+                StatusCode::from_u16(status).unwrap_or(StatusCode::UNAUTHORIZED),
+                format!("{message}\n"),
+            )
+                .into_response())
+        }
+    }
 }
 
 fn header_json(headers: &HeaderMap, name: &str) -> Option<Value> {
@@ -943,10 +1029,17 @@ mod tests {
         }
     }
 
+    /// A `testkit::state` with comms on the built-in ws-room.
+    fn ws_room_state() -> State<Arc<AppState>> {
+        let mut st = testkit::state(vec![]);
+        st.offline_comms = false;
+        State(Arc::new(st))
+    }
+
     #[tokio::test]
     async fn get_scene_adapter_mints_a_room_on_the_preview_ws_origin() {
         let headers = signed_fetch_headers(Some(EXPLORER_META), Some("0xABCDEF"));
-        let resp = get_scene_adapter(headers, Bytes::new()).await;
+        let resp = get_scene_adapter(ws_room_state(), headers, Bytes::new()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             adapter_of(resp).await,
@@ -964,7 +1057,7 @@ mod tests {
         );
         headers.insert("x-forwarded-prefix", HeaderValue::from_static("/p/"));
         assert_eq!(
-            adapter_of(get_scene_adapter(headers, Bytes::new()).await).await,
+            adapter_of(get_scene_adapter(ws_room_state(), headers, Bytes::new()).await).await,
             "ws-room:wss://preview.example/p/mini-comms/scene-bafkreimeta"
         );
     }
@@ -973,7 +1066,7 @@ mod tests {
     async fn get_scene_adapter_reads_the_body_when_the_metadata_names_no_scene() {
         let headers = signed_fetch_headers(None, None);
         let body = Bytes::from(r#"{"sceneId":"bafkreibody","realmName":"LocalPreview"}"#);
-        let resp = get_scene_adapter(headers, body).await;
+        let resp = get_scene_adapter(ws_room_state(), headers, body).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             adapter_of(resp).await,
@@ -983,13 +1076,221 @@ mod tests {
 
     #[tokio::test]
     async fn get_scene_adapter_without_a_scene_is_400_and_never_401() {
-        let resp = get_scene_adapter(signed_fetch_headers(None, None), Bytes::new()).await;
+        let resp = get_scene_adapter(
+            ws_room_state(),
+            signed_fetch_headers(None, None),
+            Bytes::new(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let unsigned = signed_fetch_headers(Some(r#"{"sceneId":"bafkreix"}"#), None);
         assert_eq!(
-            get_scene_adapter(unsigned, Bytes::new()).await.status(),
+            get_scene_adapter(ws_room_state(), unsigned, Bytes::new())
+                .await
+                .status(),
             StatusCode::OK,
-            "the preview never demands a signature"
+            "the ws-room preview never demands a signature"
+        );
+    }
+
+    /// A `testkit::state` whose comms are on a LiveKit SFU.
+    fn livekit_state() -> State<Arc<AppState>> {
+        let mut st = testkit::state(vec![]);
+        st.offline_comms = false;
+        st.livekit = Some(
+            crate::livekit::Livekit::new(
+                "ws://127.0.0.1:7880",
+                "devkey",
+                "devsecret",
+                "LocalPreview",
+            )
+            .unwrap(),
+        );
+        State(Arc::new(st))
+    }
+
+    /// Headers a real wallet signs for `POST path`, as an explorer would.
+    fn wallet_signed(wallet: &catalyrst_crypto::Wallet, path: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8000"));
+        for (k, v) in crate::world::signed_headers(wallet, "post", path).unwrap() {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(&v).unwrap(),
+            );
+        }
+        h
+    }
+
+    /// The claims of the JWT a `livekit:` adapter carries.
+    fn token_claims(adapter: &str) -> Value {
+        use base64::Engine;
+        let token = adapter.split_once("?access_token=").unwrap().1;
+        let payload = token.split('.').nth(1).unwrap();
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap();
+        serde_json::from_slice(&raw).unwrap()
+    }
+
+    async fn field_of(resp: Response, field: &str) -> String {
+        let v: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        v[field].as_str().unwrap_or_default().to_string()
+    }
+
+    #[tokio::test]
+    async fn about_with_livekit_advertises_a_signed_login_on_the_preview_origin() {
+        let State(st) = livekit_state();
+        let plain = Request::builder()
+            .header(header::HOST, "127.0.0.1:8000")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let Json(v) = about(State(st.clone()), plain).await;
+        assert_eq!(
+            v["comms"]["fixedAdapter"],
+            "signed-login:http://127.0.0.1:8000/signed-login"
+        );
+        assert_eq!(
+            v["comms"]["gatekeeperUrl"],
+            "http://127.0.0.1:8000/get-scene-adapter"
+        );
+        let tunneled = Request::builder()
+            .header(header::HOST, "127.0.0.1:8000")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-host", "preview.example")
+            .header("x-forwarded-prefix", "/p/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let Json(v) = about(State(st), tunneled).await;
+        assert_eq!(
+            v["comms"]["fixedAdapter"],
+            "signed-login:https://preview.example/p/signed-login"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_login_mints_the_realm_room_for_the_recovered_wallet() {
+        let wallet = crate::random_test_wallet();
+        let resp = signed_login(livekit_state(), wallet_signed(&wallet, "/signed-login")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let adapter = field_of(resp, "fixedAdapter").await;
+        assert!(
+            adapter.starts_with("livekit:ws://127.0.0.1:7880?access_token=eyJ"),
+            "{adapter}"
+        );
+        let claims = token_claims(&adapter);
+        assert_eq!(claims["sub"], wallet.address().to_lowercase());
+        assert_eq!(claims["iss"], "devkey");
+        assert_eq!(claims["video"]["room"], "LocalPreview");
+        assert_eq!(claims["video"]["canPublish"], true);
+    }
+
+    #[tokio::test]
+    async fn signed_login_refuses_what_it_cannot_verify() {
+        let claimed = signed_fetch_headers(None, Some("0xABCDEF"));
+        let resp = signed_login(livekit_state(), claimed).await;
+        assert!(
+            resp.status().is_client_error(),
+            "a bare SIGNER link minted a token: {}",
+            resp.status()
+        );
+        let wallet = crate::random_test_wallet();
+        let other_path = wallet_signed(&wallet, "/get-scene-adapter");
+        let resp = signed_login(livekit_state(), other_path).await;
+        assert!(
+            resp.status().is_client_error(),
+            "a signature over another path minted a token: {}",
+            resp.status()
+        );
+        let resp = signed_login(livekit_state(), signed_fetch_headers(None, None)).await;
+        assert!(resp.status().is_client_error());
+    }
+
+    /// The embedded server's adapter names the host the peer dialled the
+    /// preview on: a phone on the LAN must not be sent to 127.0.0.1.
+    #[tokio::test]
+    async fn an_embedded_server_is_advertised_on_the_host_the_peer_dialled() {
+        let mut st = testkit::state(vec![]);
+        st.offline_comms = false;
+        st.livekit = Some(
+            crate::livekit::Livekit::embedded(7880, "dcl-one-sdk", "devsecret", "LocalPreview")
+                .unwrap(),
+        );
+        let st = State(Arc::new(st));
+        let wallet = crate::random_test_wallet();
+        let mut lan = wallet_signed(&wallet, "/signed-login");
+        lan.insert(header::HOST, HeaderValue::from_static("192.0.2.9:8000"));
+        let resp = signed_login(st.clone(), lan).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let adapter = field_of(resp, "fixedAdapter").await;
+        assert!(
+            adapter.starts_with("livekit:ws://192.0.2.9:7880?access_token=eyJ"),
+            "{adapter}"
+        );
+        let mut scene = wallet_signed(&wallet, "/get-scene-adapter");
+        scene.insert(header::HOST, HeaderValue::from_static("[::1]:8000"));
+        let resp = get_scene_adapter(st, scene, Bytes::from(r#"{"sceneId":"bafk"}"#)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let adapter = field_of(resp, "adapter").await;
+        assert!(
+            adapter.starts_with("livekit:ws://[::1]:7880?access_token=eyJ"),
+            "{adapter}"
+        );
+        assert_eq!(
+            token_claims(&adapter)["video"]["room"],
+            "scene:LocalPreview:bafk"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_login_without_livekit_is_404() {
+        let wallet = crate::random_test_wallet();
+        let resp = signed_login(ws_room_state(), wallet_signed(&wallet, "/signed-login")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_scene_adapter_with_livekit_mints_a_scene_room_for_the_recovered_wallet() {
+        let wallet = crate::random_test_wallet();
+        let body = Bytes::from(r#"{"sceneId":"bafkreibody","realmName":"LocalPreview"}"#);
+        let resp = get_scene_adapter(
+            livekit_state(),
+            wallet_signed(&wallet, "/get-scene-adapter"),
+            body.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let adapter = adapter_of(resp).await;
+        assert!(
+            adapter.starts_with("livekit:ws://127.0.0.1:7880?access_token="),
+            "{adapter}"
+        );
+        let claims = token_claims(&adapter);
+        assert_eq!(claims["sub"], wallet.address().to_lowercase());
+        assert_eq!(claims["video"]["room"], "scene:LocalPreview:bafkreibody");
+
+        let unsigned = signed_fetch_headers(Some(r#"{"sceneId":"bafkreix"}"#), None);
+        let resp = get_scene_adapter(livekit_state(), unsigned, Bytes::new()).await;
+        assert!(
+            resp.status().is_client_error(),
+            "unsigned request got {}",
+            resp.status()
+        );
+        let body = body_text(resp).await;
+        assert!(
+            !body.contains("access_token"),
+            "unsigned request got a token: {body}"
+        );
+        let resp = get_scene_adapter(
+            livekit_state(),
+            wallet_signed(&wallet, "/get-scene-adapter"),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "signed but no scene"
         );
     }
 

@@ -777,8 +777,14 @@ fn an_answered_signer_publishes_instead_of_asking_again() {
     };
     let html = run_region_with("/t/abc", Some(&run), Some(PANEL), Some(&progress));
     assert!(html.contains(r#"data-state="running""#), "{html}");
-    assert!(!html.contains("data-signing"), "the shape changes so the script swaps: {html}");
-    assert!(!html.contains("sign-panel"), "no button to press again: {html}");
+    assert!(
+        !html.contains("data-signing"),
+        "the shape changes so the script swaps: {html}"
+    );
+    assert!(
+        !html.contains("sign-panel"),
+        "no button to press again: {html}"
+    );
     assert!(html.contains("Publishing"), "{html}");
     assert!(html.contains("Uploading 1 of 157 files"), "{html}");
     assert!(
@@ -794,7 +800,10 @@ fn an_answered_signer_publishes_instead_of_asking_again() {
     progress.phase = "done";
     let html = run_region_with("/t/abc", Some(&run), None, Some(&progress));
     assert!(html.contains("Uploaded and accepted"), "{html}");
-    assert!(!html.contains("Published</h2>"), "the run, not the upload, says published: {html}");
+    assert!(
+        !html.contains("Published</h2>"),
+        "the run, not the upload, says published: {html}"
+    );
 }
 
 /// The `<noscript>` meta refresh rides the Running state only, the region's

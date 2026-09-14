@@ -126,6 +126,45 @@ bundles are compiled into it, which `/health` confirms with
 escape hatch for building offline, for a musl host (the pinned Linux archives
 are glibc-linked), and for testing an abgen from source.
 
+## Voice (LiveKit)
+
+`start` runs a [livekit-server](https://github.com/livekit/livekit) of the
+preview's own and puts the realm's comms rooms on it, so peers in a preview
+hear each other with nothing installed: **every** dcl-one-sdk binary embeds
+`livekit-server` the way it embeds abgen, unpacked on first run into a temp
+directory keyed by a content hash. It binds every interface on 7880/7881/7882
+(signalling, media over TCP, media over UDP) or the next free trio, gets a
+fresh API secret each run, and dies with the preview (on Linux even when the
+preview is killed outright: the kernel delivers it a parent-death signal).
+`/about` then advertises a `signed-login:` adapter and the preview mints the
+room tokens itself, as the production comms gatekeeper does; the crate README
+has the client-side details (Unity's `--accept-untrusted-realm` and
+`--gatekeeper-url`).
+
+`--no-livekit` keeps the built-in ws-room, which is upstream `sdk-commands`
+behaviour: upstream has no LiveKit at all, its preview comms are the
+`@dcl/mini-comms` ws-room and carry no audio. `--livekit-url` (with
+`--livekit-api-key` and `--livekit-api-secret[-file]`, or the `lk` CLI's
+`LIVEKIT_*` variables) names a server elsewhere instead. `LIVEKIT_SERVER_BIN`
+runs a livekit-server other than the embedded one at run time.
+
+**Where the bytes come from.** `livekit-release.lock` pins an upstream release
+and the sha256 of its archive per asset (Linux amd64/arm64/armv7, Windows
+amd64/arm64: all LiveKit publishes). `build.rs` downloads the one for the build
+target into a shared cache (`$CARGO_HOME/dcl-one-sdk-livekit`, or
+`LIVEKIT_EMBED_CACHE`), verifies the hash, and embeds the executable
+deflate-compressed — 18 MB in the binary for 56 MB on disk. On Linux `nix
+build` parses the same lock file and fetches the same archive, so a nix-built
+binary and a `cargo build` one carry identical bytes. Repin with
+`scripts/pin-livekit.sh <tag>`.
+
+LiveKit publishes no macOS release. A `cargo build` there embeds no server and
+`start` runs the `livekit-server` on PATH (`brew install livekit`) or, saying
+so, none; the nix build embeds nixpkgs' `livekit` there (built from source, a
+version behind the lock). `LIVEKIT_EMBED_BIN=<path>` embeds a given executable
+on any platform — offline builds, a musl host, a livekit-server from source —
+and `LIVEKIT_EMBED_BIN=none` embeds nothing.
+
 ## Upstream parity notes
 
 `start` serves the same preview surface as `@dcl/sdk-commands` 7.27.0, with two
@@ -152,3 +191,9 @@ upstream's own source marks it for removal in favour of
 AGPL-3.0. See [LICENSE](./LICENSE).
 
 Not affiliated with the Decentraland Foundation.
+
+### v0.25.0 preview voice
+
+`start` now launches an embedded LiveKit server on supported platforms and mints signed realm and scene room tokens. Use `--no-livekit` for the built-in ws-room, or `--livekit-url` with credentials for an external SFU. Cargo builds on macOS require a LiveKit server on PATH; Nix builds embed one.
+
+Token acceptance and preview shutdown are tested against the embedded server. Explorer audio and LAN media connectivity remain unverified. Authoritative multiplayer hosts still use mini-comms: use `--no-livekit` for those scenes until the host transport supports LiveKit.

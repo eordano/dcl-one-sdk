@@ -114,6 +114,8 @@ generating the loader stub.
 ```
 dcl-one-sdk start [--dir D] [-p|--port N] [--skip-build] [--no-watch]
                   [-m|--mobile] [--data-layer] [--offline-comms]
+                  [--no-livekit | --livekit-url WS_URL --livekit-api-key KEY
+                   --livekit-api-secret SECRET] [--livekit-room NAME]
                   [--no-asset-bundles] [--no-mcp] [--mcp-port N]
                   [--tunnel WSS_URL] [-- EXPLORER_PARAMS...]
 ```
@@ -122,6 +124,50 @@ Builds the scene, serves it as a local realm on port 8000 (or the next free
 port), and reloads it in the running client when you save. Comms is on by
 default. `--skip-install` and `--no-browser` are accepted and ignored, so
 supervisors passing upstream's flags keep working.
+
+### Voice
+
+Voice is on by default. `start` runs a LiveKit server of the preview's own
+— every dcl-one-sdk binary embeds `livekit-server` the way it embeds abgen,
+so there is nothing to install — and puts the realm's comms rooms on it:
+positions, chat and scene messages as before, now with audio. `/about`
+advertises a `signed-login:` adapter; the explorer signs a request with its
+wallet, the preview answers with a LiveKit token for that wallet in the realm
+room, and `/get-scene-adapter` does the same per scene. Identities in the
+rooms are wallet addresses, so peers resolve to their usual profiles.
+
+The server binds every interface on 7880 (signalling), 7881 (media over TCP)
+and 7882 (media over UDP), or the next free trio, with a fresh API secret each
+run, and dies with the preview. A peer on the LAN is handed the server on
+whatever address it reached the preview on. `--no-livekit` keeps the built-in
+ws-room instead (no audio); `LIVEKIT_SERVER_BIN` runs a livekit-server other
+than the embedded one. A `--tunnel` preview stays on the ws-room, because the
+tunnel forwards the preview port alone and never media ports.
+
+To use a LiveKit server elsewhere — a public one for a tunnel's peers, a
+shared one on the LAN — name it:
+
+```
+dcl-one-sdk start --livekit-url wss://sfu.example \
+                  --livekit-api-key KEY --livekit-api-secret-file secret.txt
+```
+
+`LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` (the names the `lk`
+CLI reads) fill in whichever flags are absent, and `--livekit-api-secret-file`
+keeps the secret out of `ps`. The URL is what the explorer dials, so it must
+be reachable from the explorer's machine, not just this one. Rooms are
+`LocalPreview` and `scene:LocalPreview:<sceneId>` on either kind of server;
+`--livekit-room` renames them so two previews on one server stay apart.
+
+Per client: bevy follows the adapter as is. Unity refuses a cleartext
+adapter unless launched with `--accept-untrusted-realm` (a `--tunnel`
+preview is https and needs nothing), and takes its scene room from
+`--gatekeeper-url http://127.0.0.1:8000/get-scene-adapter` rather than
+from `/about`.
+
+LiveKit publishes no macOS release, so a `cargo build` there embeds no server
+and `start` runs the `livekit-server` on PATH (`brew install livekit`) or none,
+saying so; the nix build embeds one on every platform.
 
 The banner prints the ways in: a `decentraland://` deep link for the desktop
 client, LAN addresses for another device, a web-explorer URL, and with `-m` a QR
@@ -379,3 +425,9 @@ scene actually publishes, so a `.dclignored` file cannot be read back out; that
 check is on the path the hash names, not its digest, so a hash grants access to
 a file, not one version of it, and keeps working until that file stops being
 published.
+
+### v0.25.0 preview voice
+
+`start` now launches an embedded LiveKit server on supported platforms and mints signed realm and scene room tokens. Use `--no-livekit` for the built-in ws-room, or `--livekit-url` with credentials for an external SFU. Cargo builds on macOS require a LiveKit server on PATH; Nix builds embed one.
+
+Token acceptance and preview shutdown are tested against the embedded server. Explorer audio and LAN media connectivity remain unverified. Authoritative multiplayer hosts still use mini-comms: use `--no-livekit` for those scenes until the host transport supports LiveKit.

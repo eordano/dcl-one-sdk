@@ -12,9 +12,10 @@
         (system: f (import nixpkgs { inherit system; }));
       lib = nixpkgs.lib;
 
-      abgenLock =
+      # A `*-release.lock`: `key = value` lines, comments and blanks skipped.
+      readLock = path:
         let
-          text = builtins.readFile ./crates/dcl-one-sdk/abgen-release.lock;
+          text = builtins.readFile path;
           isEntry = l: builtins.match "[[:space:]]*[^#[:space:]][^=]*=.*" l != null;
           entry = l:
             let parts = lib.splitString "=" l;
@@ -23,6 +24,16 @@
               (lib.trim (lib.concatStringsSep "=" (builtins.tail parts)));
         in
         builtins.listToAttrs (map entry (builtins.filter isEntry (lib.splitString "\n" text)));
+
+      abgenLock = readLock ./crates/dcl-one-sdk/abgen-release.lock;
+      livekitLock = readLock ./crates/dcl-one-sdk/livekit-release.lock;
+
+      # The release asset LiveKit publishes per system; none for macOS, which
+      # gets nixpkgs' livekit (built from source) instead.
+      livekitAssets = {
+        aarch64-linux = "linux_arm64.tar.gz";
+        x86_64-linux = "linux_amd64.tar.gz";
+      };
 
       abgenTargets = {
         aarch64-darwin = "aarch64-apple-darwin";
@@ -53,9 +64,32 @@
               test -x $out/abgen
             '';
 
+          # The livekit-server `start` runs for voice: the pinned release on
+          # Linux (the same bytes a `cargo build` embeds), nixpkgs' on macOS.
+          livekit-dist =
+            if livekitAssets ? ${system} then
+              let
+                asset = livekitAssets.${system};
+                archive = pkgs.fetchurl {
+                  url = builtins.replaceStrings
+                    [ "{version}" "{semver}" "{asset}" ]
+                    [ livekitLock.version (lib.removePrefix "v" livekitLock.version) asset ]
+                    livekitLock.url;
+                  sha256 = livekitLock.${asset};
+                };
+              in
+              pkgs.runCommand "livekit-server-${livekitLock.version}-${asset}" { } ''
+                mkdir -p $out/bin
+                tar -xzf ${archive} -C $out/bin livekit-server
+                chmod +x $out/bin/livekit-server
+                test -x $out/bin/livekit-server
+              ''
+            else
+              pkgs.livekit;
+
           sdkCraneArgs = {
             pname = "dcl-one-sdk";
-            version = "0.24.2";
+            version = "0.25.0";
             src = ./.;
             strictDeps = true;
             cargoExtraArgs = "--locked -p dcl-one-sdk --bin dcl-one-sdk";
@@ -65,6 +99,7 @@
               ++ nixpkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
             OPENSSL_NO_VENDOR = "1";
             ABGEN_EMBED_BIN = "${abgen-dist}/abgen";
+            LIVEKIT_EMBED_BIN = "${livekit-dist}/bin/livekit-server";
           };
 
           dcl-one-sdk-deps = craneLib.buildDepsOnly sdkCraneArgs;
@@ -75,7 +110,7 @@
           });
         in
         {
-          inherit abgen-dist dcl-one-sdk-deps dcl-one-sdk;
+          inherit abgen-dist livekit-dist dcl-one-sdk-deps dcl-one-sdk;
           default = dcl-one-sdk;
         });
 

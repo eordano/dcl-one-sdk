@@ -33,7 +33,7 @@ use axum::{
 use editor::{data_layer_ws, inspector_asset, inspector_index, inspector_redirect, mobile_preview};
 use http::{
     about, contents, entities_active, entities_scene, feature_flags, get_scene_adapter,
-    preview_wearables, root, scene_id_for, scene_json, scenes,
+    preview_wearables, root, scene_id_for, scene_json, scenes, signed_login,
 };
 use proxy::{
     catalyst_proxy, lambdas_contracts_servers, lambdas_explore_realms, world_about, world_content,
@@ -61,6 +61,13 @@ pub struct StartOptions {
     pub no_watch: bool,
     pub ignore_composite: bool,
     pub offline_comms: bool,
+    /// Comms (and so voice) on a LiveKit SFU elsewhere (`--livekit-url`).
+    pub livekit: Option<crate::livekit::Livekit>,
+    /// Run a livekit-server of this preview's own when `livekit` names none:
+    /// the default; `--no-livekit` keeps the built-in ws-room.
+    pub embedded_livekit: bool,
+    /// The realm room of that embedded server.
+    pub livekit_room: String,
     pub mobile: bool,
     pub ab_sidecar: bool,
     /// Forward `local-ab=true` in the desktop deep link (tracks `ab_sidecar`):
@@ -113,6 +120,9 @@ pub(crate) struct AppState {
     machine: String,
     reload_tx: broadcast::Sender<ReloadFrame>,
     offline_comms: bool,
+    /// Set: `/about` hands out `signed-login:` and the signed endpoints mint
+    /// LiveKit tokens; unset: mini-comms ws-rooms on this server.
+    livekit: Option<crate::livekit::Livekit>,
     port: u16,
     data_layer: Option<DataLayerState>,
     entity_cache: Mutex<HashMap<PathBuf, (Instant, Value)>>,
@@ -145,6 +155,7 @@ impl AppState {
             machine: machine_id(),
             reload_tx,
             offline_comms: false,
+            livekit: None,
             port,
             data_layer: None,
             entity_cache: Mutex::new(HashMap::new()),
@@ -325,6 +336,31 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     crate::deploy::forget_remembered_target(&first.root);
     let (port, listener) = bind_preview_port(opts.port).await?;
 
+    // Voice by default: a livekit-server of this preview's own, unless comms
+    // are off, on a server elsewhere, or the preview is reached through a
+    // tunnel, which forwards the preview port alone and never media ports.
+    let mut livekit = opts.livekit.clone();
+    let mut livekit_server = None;
+    if opts.embedded_livekit && livekit.is_none() && !opts.offline_comms {
+        crate::livekit::validate_room(&opts.livekit_room)?;
+        if trunk_url.is_some() {
+            ux::note(
+                "voice off over a tunnel: the built-in livekit-server is reachable from this machine and its LAN only; \
+                 pass --livekit-url with a LiveKit server the tunnel's peers can reach",
+            );
+        } else if let Some(running) =
+            crate::livekit_server::spawn(crate::livekit_server::DEFAULT_PORT).await
+        {
+            livekit = Some(crate::livekit::Livekit::embedded(
+                running.port,
+                crate::livekit_server::API_KEY,
+                running.api_secret(),
+                &opts.livekit_room,
+            )?);
+            livekit_server = Some(running);
+        }
+    }
+
     let data_layer = if opts.data_layer {
         let public_dir = data_layer::locate_inspector_public(&first.root)?;
         if public_dir.is_none() {
@@ -344,6 +380,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
 
     let mut state = AppState::new(workspace.projects.clone(), port, broadcast::channel(32).0);
     state.offline_comms = opts.offline_comms;
+    state.livekit = livekit.clone();
     state.data_layer = data_layer;
     state.local_ab = opts.local_ab;
     state.mcp = opts.mcp;
@@ -368,6 +405,19 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     };
 
     let app = build_router(state.clone(), comms_state);
+
+    if let Some(lk) = &livekit {
+        let server = match &livekit_server {
+            Some(running) => {
+                crate::livekit_server::describe(running, crate::livekit_embed::VERSION)
+            }
+            None => format!("LiveKit at {}", lk.describe_url()),
+        };
+        ux::note_arrow(format!(
+            "voice on: comms rooms live on the {server}; realm room {}, scene rooms scene:{}:<sceneId>",
+            lk.room, lk.room
+        ));
+    }
 
     let _host_isolate = if !opts.no_host && crate::entrypoint::authoritative_multiplayer(&first) {
         match crate::host::spawn_isolate(&first.root, &format!("http://127.0.0.1:{port}"), "room-1")
@@ -469,6 +519,8 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         _ = shutdown_signal() => Ok(()),
     };
     crate::asset_bundles::kill_sidecar_group();
+    crate::livekit_server::kill_group();
+    drop(livekit_server);
     result
 }
 
@@ -540,6 +592,7 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
         .route("/", get(root))
         .route("/about", get(about))
         .route("/get-scene-adapter", post(get_scene_adapter))
+        .route("/signed-login", post(signed_login))
         .route("/scenes", get(scenes))
         .route("/scene.json", get(scene_json))
         .route("/preview-wearables", get(preview_wearables))

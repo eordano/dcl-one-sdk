@@ -166,7 +166,7 @@ fn absorb_gpu_chatter(line: &str, qual: &std::sync::Mutex<GpuQual>) -> bool {
 static SIDECAR_PGID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(unix)]
-fn kill_process_group(pgid: i32) {
+pub(crate) fn kill_process_group(pgid: i32) {
     if pgid <= 0 {
         return;
     }

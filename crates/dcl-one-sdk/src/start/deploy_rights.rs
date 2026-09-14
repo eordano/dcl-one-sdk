@@ -123,7 +123,7 @@ pub(super) struct AuthBases {
 
 /// The configured target's own pair when its sites tier serves `/auth/native`
 /// (a stale self-hosted realm 404s it, and a sign-in on a 404 helps nobody),
-/// else the dcl.one pair, which grants dcl.one no authority.
+/// else the catalyst.example.com pair, which grants catalyst.example.com no authority.
 pub(super) async fn working_auth_bases(default_target: Option<&str>) -> AuthBases {
     let own = auth_bases(default_target);
     let public = auth_bases(None);
@@ -148,7 +148,7 @@ pub(super) fn auth_bases(default_target: Option<&str>) -> AuthBases {
             let base = deploy::sanitize_catalyst_url(t);
             base.trim_end_matches("/content").to_string()
         }
-        None => "https://dcl.one".to_string(),
+        None => "https://catalyst.example.com".to_string(),
     };
     AuthBases {
         page: format!("{root}/auth/native"),
@@ -1019,7 +1019,7 @@ mod tests {
 
     /// A configured target keeps the sign-in on its own domain only while it
     /// serves the authorize page: a 404 and an unreachable host both fall
-    /// back to the dcl.one pair.
+    /// back to the catalyst.example.com pair.
     #[tokio::test]
     async fn the_connect_bases_fall_back_when_the_target_page_is_missing() {
         let serve_page = |ok: bool| {
@@ -1044,13 +1044,13 @@ mod tests {
         let stale = serve_page(false).await;
         let bases = working_auth_bases(Some(&stale)).await;
         assert_eq!(
-            bases.page, "https://dcl.one/auth/native",
+            bases.page, "https://catalyst.example.com/auth/native",
             "a 404 falls back"
         );
 
         let bases = working_auth_bases(Some("http://127.0.0.1:9")).await;
         assert_eq!(
-            bases.page, "https://dcl.one/auth/native",
+            bases.page, "https://catalyst.example.com/auth/native",
             "unreachable falls back"
         );
     }
@@ -1111,12 +1111,12 @@ mod tests {
     #[test]
     fn the_auth_bases_follow_the_target() {
         let public = auth_bases(None);
-        let public_relay = "https://dcl.one/internal/native-auth-relay";
-        assert_eq!(public.page, "https://dcl.one/auth/native");
+        let public_relay = "https://catalyst.example.com/internal/native-auth-relay";
+        assert_eq!(public.page, "https://catalyst.example.com/auth/native");
         assert_eq!(public.relay, public_relay);
-        let own = auth_bases(Some("peer.dcl.social/content"));
-        let own_relay = "https://peer.dcl.social/internal/native-auth-relay";
-        assert_eq!(own.page, "https://peer.dcl.social/auth/native");
+        let own = auth_bases(Some("peer.example.net/content"));
+        let own_relay = "https://peer.example.net/internal/native-auth-relay";
+        assert_eq!(own.page, "https://peer.example.net/auth/native");
         assert_eq!(own.relay, own_relay);
         assert_eq!(auth_bases(Some("  ")).page, public.page, "blank is unset");
     }

@@ -136,5 +136,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "dcl-one-sdk $GITHUB_REF_NAME" \
-            --notes "Self-contained npm-free toolchain binaries. Each binary embeds the abgen asset-bundle server ($ABGEN_TAG from https://github.com/decentraland/abgen/releases): \`start\` extracts it on first use and serves optimized preview asset bundles with zero extra installs. Sidecar resolution order: \`ABGEN_BIN\` env, the embedded copy, the scene's \`@dcl/abgen\` npm package, then PATH. Toolchain: rust 1.97.0 (pinned), \`--locked\` against the committed Cargo.lock." \
+            --notes-file RELEASE_NOTES.md \
             dist/*.tar.gz dist/SHA256SUMS.txt

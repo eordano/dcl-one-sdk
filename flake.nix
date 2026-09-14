@@ -55,7 +55,7 @@
 
           sdkCraneArgs = {
             pname = "dcl-one-sdk";
-            version = "0.24.1";
+            version = "0.24.2";
             src = ./.;
             strictDeps = true;
             cargoExtraArgs = "--locked -p dcl-one-sdk --bin dcl-one-sdk";

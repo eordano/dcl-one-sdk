@@ -321,10 +321,30 @@ pub(super) fn adopt_cli_signing(st: &AppState, signer: Arc<crate::linker::Linker
 /// render: the id drawn is the id the wallet signs.
 pub(super) fn pending_sign_panel(st: &AppState, prefix: &str) -> Option<String> {
     let state = signer_slot(st).clone()?;
+    // Once the wallet has answered, the panel's job is done: re-rendering it
+    // (button re-armed, progress block replayed) while the run finishes is the
+    // "intermediate state" a reader should never see. `publishing_progress`
+    // takes over from here until the run writes its terminal state.
+    if signer_answered(&state) {
+        return None;
+    }
     Some(crate::linker::sign_section(
         &state,
         &format!("{prefix}/deploy/sign"),
     ))
+}
+
+/// A signer that has named its wallet, or whose upload has left `idle`, has
+/// been answered: nothing about it may be asked again.
+fn signer_answered(state: &crate::linker::LinkerState) -> bool {
+    state.signer_address().is_some() || state.progress().phase != "idle"
+}
+
+/// The upload snapshot to narrate while the run is between the wallet's
+/// answer and its terminal state; `None` before the wallet answers.
+fn publishing_progress(st: &AppState) -> Option<deploy::ProgressState> {
+    let state = signer_slot(st).clone()?;
+    signer_answered(&state).then(|| state.progress())
 }
 
 pub(super) fn known_account(st: &AppState) -> Option<String> {
@@ -1390,15 +1410,36 @@ const SCRIPT: &str = concat!(
 /// `sign_submit` would accept.
 fn run_region(st: &AppState, prefix: &str, show_sign: bool) -> String {
     let sign_panel = show_sign.then(|| pending_sign_panel(st, prefix)).flatten();
-    run_region_for(prefix, runs(st).as_ref(), sign_panel.as_deref())
+    let publishing = publishing_progress(st);
+    run_region_with(
+        prefix,
+        runs(st).as_ref(),
+        sign_panel.as_deref(),
+        publishing.as_ref(),
+    )
 }
 
 /// Pure over the run state, so a test can render every state without
 /// mutating the slot other tests read through `served`. While running, the
 /// region carries a `<noscript>` meta refresh and the signing path as a data
 /// attribute — part of the shape the script compares before swapping, so a
-/// live wallet panel is never wiped mid-flow.
+/// live wallet panel is never wiped mid-flow. Test-only: the page renders
+/// through [`run_region_with`], which also knows the publishing snapshot.
+#[cfg(test)]
 fn run_region_for(prefix: &str, run: Option<&Run>, sign_panel: Option<&str>) -> String {
+    run_region_with(prefix, run, sign_panel, None)
+}
+
+/// [`run_region_for`] with the upload snapshot of an answered signer. While
+/// that snapshot exists the region drops `data-signing`: the shape changes, so
+/// the page script swaps the finished wallet panel for the publishing panel
+/// instead of holding on to it.
+fn run_region_with(
+    prefix: &str,
+    run: Option<&Run>,
+    sign_panel: Option<&str>,
+    publishing: Option<&deploy::ProgressState>,
+) -> String {
     let state = match run.map(|r| &r.state) {
         None => "idle",
         Some(RunState::Running) => "running",
@@ -1407,23 +1448,63 @@ fn run_region_for(prefix: &str, run: Option<&Run>, sign_panel: Option<&str>) -> 
         Some(RunState::Stale(_)) => "stale",
     };
     let signing = run
-        .filter(|r| matches!(r.state, RunState::Running))
+        .filter(|r| matches!(r.state, RunState::Running) && publishing.is_none())
         .and_then(|r| r.signing.as_deref())
         .map(|path| format!(r#" data-signing="{}""#, esc(&format!("{prefix}{path}"))))
         .unwrap_or_default();
     format!(
         r#"<div id="run-status" data-state="{state}"{signing}>{panel}</div>"#,
-        panel = run_panel_for(run, sign_panel)
+        panel = run_panel_for(run, sign_panel, publishing)
     )
 }
 
-fn run_panel_for(run: Option<&Run>, sign_panel: Option<&str>) -> String {
+/// The publishing panel: what the upload is doing between the wallet's
+/// answer and the run's terminal state, with no button to press again.
+fn publishing_body(p: &deploy::ProgressState) -> String {
+    let files = format!("{} of {} file{}", p.files_sent, p.files, plural(p.files));
+    let line = match p.phase {
+        "uploading" => match p.carrier {
+            "curl" => format!(
+                "Uploading {files} \u{2014} curl carries this upload and reports no byte counts."
+            ),
+            _ => format!(
+                "Uploading {files} \u{2014} {} of {}.",
+                deploy::human_size(p.sent),
+                deploy::human_size(p.total)
+            ),
+        },
+        "validating" => format!(
+            "Uploaded {files} ({}). The content server is checking the deployment.",
+            deploy::human_size(p.total)
+        ),
+        "done" => "Uploaded and accepted. Recording the result\u{2026}".to_string(),
+        "failed" => "The upload failed. The run is writing up why\u{2026}".to_string(),
+        _ => "The wallet answered. Uploading\u{2026}".to_string(),
+    };
+    format!(
+        "<div class=\"dep__wait\"><div class=\"spin\" role=\"status\" aria-label=\"publishing\"></div>\
+         <p class=\"note\">{}</p></div>",
+        esc(&line)
+    )
+}
+
+fn run_panel_for(
+    run: Option<&Run>,
+    sign_panel: Option<&str>,
+    publishing: Option<&deploy::ProgressState>,
+) -> String {
     let Some(r) = run else {
         return String::new();
     };
     let (title, body, refresh, tone) = match &r.state {
         RunState::Running => {
             let refresh = r#"<noscript><meta http-equiv="refresh" content="2"></noscript>"#;
+            if let Some(p) = publishing {
+                return format!(
+                    r#"{refresh}<div class="panel"><h2>Publishing</h2>{}</div>"#,
+                    publishing_body(p)
+                );
+            }
             if let Some(panel) = sign_panel {
                 return format!("{refresh}{panel}");
             }

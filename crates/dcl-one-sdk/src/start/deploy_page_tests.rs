@@ -754,6 +754,49 @@ fn ago_reads_like_a_person() {
     );
 }
 
+/// Once the wallet has answered, the region must not ask again: no wallet
+/// panel, no `data-signing` (so the page script swaps the region), a
+/// publishing panel narrating the upload instead, until the run ends.
+#[test]
+fn an_answered_signer_publishes_instead_of_asking_again() {
+    const PANEL: &str =
+        r#"<div class="panel" id="sign-panel" data-api="/t/abc/deploy/sign">…</div>"#;
+    let run = Run {
+        signing: Some("/deploy".into()),
+        ..Run::new(1, WORLDS_CONTENT_SERVER.into(), false, "abc123".into())
+    };
+    let mut progress = deploy::ProgressState {
+        phase: "uploading",
+        carrier: "reqwest",
+        total: 81_408,
+        sent: 22_733,
+        files: 157,
+        files_sent: 1,
+        current: Some("bin/scene.js".into()),
+        ..deploy::ProgressState::default()
+    };
+    let html = run_region_with("/t/abc", Some(&run), Some(PANEL), Some(&progress));
+    assert!(html.contains(r#"data-state="running""#), "{html}");
+    assert!(!html.contains("data-signing"), "the shape changes so the script swaps: {html}");
+    assert!(!html.contains("sign-panel"), "no button to press again: {html}");
+    assert!(html.contains("Publishing"), "{html}");
+    assert!(html.contains("Uploading 1 of 157 files"), "{html}");
+    assert!(
+        html.contains(r#"<noscript><meta http-equiv="refresh" content="2"></noscript>"#),
+        "still a running state for a reader without JavaScript: {html}"
+    );
+
+    progress.phase = "validating";
+    progress.files_sent = 157;
+    let html = run_region_with("/t/abc", Some(&run), None, Some(&progress));
+    assert!(html.contains("checking the deployment"), "{html}");
+
+    progress.phase = "done";
+    let html = run_region_with("/t/abc", Some(&run), None, Some(&progress));
+    assert!(html.contains("Uploaded and accepted"), "{html}");
+    assert!(!html.contains("Published</h2>"), "the run, not the upload, says published: {html}");
+}
+
 /// The `<noscript>` meta refresh rides the Running state only, the region's
 /// `data-state`/`data-signing` are the shape the script compares before
 /// swapping, and a live signer renders the wallet panel inline.

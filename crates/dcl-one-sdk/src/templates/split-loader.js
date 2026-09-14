@@ -19,9 +19,9 @@ var __dclOneSceneModule = null
 // the sdk-runtime chunk bytes independent of composite content (cache contract).
 globalThis.DCL_MAX_COMPOSITE_ENTITY = __DCL_ONE_MAX_COMPOSITE_ENTITY__
 
-// Chunks are esbuild --charset=ascii output (pure ASCII bytes), and TextDecoder is
-// not a sandbox contract on either runtime, so decode with chunked
-// String.fromCharCode and only opportunistically prefer TextDecoder when it exists.
+// Bundle bytes are UTF-8; TextDecoder is not guaranteed in Explorer sandboxes.
+// Keep a dependency-free fallback with the native decoder's replacement and BOM
+// behavior. Flush UTF-16 code units in bounded chunks to avoid argument limits.
 function __dclOneDecode(__dclOneBytes) {
   if (typeof TextDecoder === 'function') {
     try {
@@ -29,12 +29,47 @@ function __dclOneDecode(__dclOneBytes) {
     } catch (__dclOneErr) {}
   }
   var __dclOneParts = []
-  for (var __dclOneI = 0; __dclOneI < __dclOneBytes.length; __dclOneI += 32768) {
-    var __dclOneSlice = __dclOneBytes.subarray
-      ? __dclOneBytes.subarray(__dclOneI, __dclOneI + 32768)
-      : __dclOneBytes.slice(__dclOneI, __dclOneI + 32768)
-    __dclOneParts.push(String.fromCharCode.apply(null, __dclOneSlice))
+  var __dclOneUnits = []
+  var __dclOneI =
+    __dclOneBytes[0] === 0xef && __dclOneBytes[1] === 0xbb && __dclOneBytes[2] === 0xbf ? 3 : 0
+  while (__dclOneI < __dclOneBytes.length) {
+    var __dclOneFirst = __dclOneBytes[__dclOneI++]
+    var __dclOnePoint = __dclOneFirst
+    if (__dclOneFirst >= 0x80) {
+      var __dclOneCount =
+        __dclOneFirst >= 0xc2 && __dclOneFirst <= 0xdf ? 1 :
+        __dclOneFirst >= 0xe0 && __dclOneFirst <= 0xef ? 2 :
+        __dclOneFirst >= 0xf0 && __dclOneFirst <= 0xf4 ? 3 : 0
+      __dclOnePoint = __dclOneFirst & (0x7f >> __dclOneCount)
+      var __dclOneValid = __dclOneCount !== 0
+      for (var __dclOneN = 0; __dclOneN < __dclOneCount; __dclOneN++) {
+        var __dclOneNext = __dclOneBytes[__dclOneI]
+        if (__dclOneNext === undefined || __dclOneNext < 0x80 || __dclOneNext > 0xbf ||
+            (__dclOneN === 0 && (
+              (__dclOneFirst === 0xe0 && __dclOneNext < 0xa0) ||
+              (__dclOneFirst === 0xed && __dclOneNext > 0x9f) ||
+              (__dclOneFirst === 0xf0 && __dclOneNext < 0x90) ||
+              (__dclOneFirst === 0xf4 && __dclOneNext > 0x8f)))) {
+          __dclOneValid = false
+          break
+        }
+        __dclOnePoint = (__dclOnePoint << 6) | (__dclOneNext & 0x3f)
+        __dclOneI++
+      }
+      if (!__dclOneValid) __dclOnePoint = 0xfffd
+    }
+    if (__dclOnePoint > 0xffff) {
+      __dclOnePoint -= 0x10000
+      __dclOneUnits.push(0xd800 + (__dclOnePoint >> 10), 0xdc00 + (__dclOnePoint & 0x3ff))
+    } else {
+      __dclOneUnits.push(__dclOnePoint)
+    }
+    if (__dclOneUnits.length >= 32768) {
+      __dclOneParts.push(String.fromCharCode.apply(null, __dclOneUnits))
+      __dclOneUnits = []
+    }
   }
+  if (__dclOneUnits.length) __dclOneParts.push(String.fromCharCode.apply(null, __dclOneUnits))
   return __dclOneParts.join('')
 }
 

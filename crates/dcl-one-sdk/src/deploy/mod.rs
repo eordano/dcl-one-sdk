@@ -7,10 +7,10 @@ mod world_gate;
 pub(crate) use net::ENV_LOCK;
 
 pub use net::{
-    build_delete_payload, configured_target_server, encode_segment, forget_remembered_target,
-    jump_in_url, non_upstream_note, play_url, sanitize_catalyst_url, scenes_on_other_parcels,
-    send_world_delete, simple_auth_chain, upload_entity, PermissionGate, Reuse, WorldScene,
-    WORLDS_CONTENT_SERVER,
+    build_delete_payload, configured_target_server, encode_segment, ephemeral_auth_chain,
+    forget_remembered_target, jump_in_url, non_upstream_note, play_url, sanitize_catalyst_url,
+    scenes_on_other_parcels, send_world_delete, simple_auth_chain, upload_entity, PermissionGate,
+    Reuse, WorldScene, WORLDS_CONTENT_SERVER,
 };
 pub(crate) use net::{
     client, denied_parcels_in, deployment_permission_in_doc, entity_content_hashes, entity_title,

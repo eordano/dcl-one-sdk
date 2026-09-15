@@ -1,6 +1,6 @@
 [package]
 name = "dcl-one-sdk"
-version = "0.25.1"
+version = "0.26.0"
 edition = "2021"
 description = "Binary-compatible Rust replacement for @dcl/sdk-commands: bundle (rolldown, in-process), preview-serve, and deploy Decentraland SDK7 scenes"
 # Same dual terms as abgen, so embedding the converter in-process later is a
@@ -53,6 +53,10 @@ rolldown_common = { version = "=1.2.7", optional = true }
 rolldown_utils = { version = "=1.2.7", optional = true }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 chrono = { workspace = true }
+# The scene's server-side storage (`dcl-one-sdk storage`, the preview's /values
+# routes): one SQLite file per project. 0.39 is the release sharing the
+# workspace's libsqlite3-sys 0.37; `bundled` keeps the binary self-contained.
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

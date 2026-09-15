@@ -11,6 +11,7 @@ mod land_picker;
 mod landing;
 pub(crate) mod proxy;
 pub(crate) mod scene_logs;
+mod storage_page;
 
 use crate::build::{self, BuildOptions};
 use crate::data_layer::{self, DataLayerState};
@@ -420,6 +421,16 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         ux::note_arrow(format!("Voice: comms on {server}, {rooms}"));
     }
 
+    // where Storage/EnvVar reads and writes go, before the host that uses them
+    match crate::storage::open(&first.root).and_then(|db| db.target()) {
+        Ok(target) => ux::note_arrow(storage_page::start_line(
+            &target,
+            storage_page::signer(&state).as_ref(),
+            &format!("http://127.0.0.1:{port}"),
+        )),
+        Err(e) => ux::report_watch(&e.context("reading the storage target")),
+    }
+
     let _host_isolate = if !opts.no_host && crate::entrypoint::authoritative_multiplayer(&first) {
         match crate::host::spawn_isolate(&first.root, &format!("http://127.0.0.1:{port}"), "room-1")
         {
@@ -543,7 +554,7 @@ pub(crate) async fn serve_signing(
     let mut state = AppState::new(workspace.projects.clone(), port, broadcast::channel(32).0);
     state.allow_remote_deploy = allow_remote;
     let state = Arc::new(state);
-    deploy_page::adopt_cli_signing(&state, signer);
+    deploy_page::adopt_cli_signing(&state, signer.clone());
     let app = build_router(state.clone(), Arc::new(crate::comms::CommsState::default()));
     let url = format!("http://localhost:{port}/deploy");
     println!();
@@ -577,6 +588,12 @@ pub(crate) async fn serve_signing(
         }
         outcome = crate::linker::await_outcome(rx, timeout, &url) => {
             deploy_page::finish_cli_signing(&state, &outcome);
+            // An unanswered CLI request must finish on its deadline. Once
+            // a wallet submits, keep the preview available to inspect the
+            // deployment result (including an upload failure) and retry.
+            if outcome.is_err() && signer.signer_address().is_none() {
+                return outcome;
+            }
             match &outcome {
                 Ok(message) => println!("{message}"),
                 Err(error) => eprintln!("{error}"),
@@ -654,6 +671,7 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
                 .route("/deploy/progress", get(deploy_page::sign_progress))
                 .route("/scene-json", post(edit::scene_json))
                 .route("/scene-thumbnail", post(edit::thumbnail))
+                .merge(storage_page::routes())
                 .with_state(state.clone()),
         )
         .layer(middleware::from_fn_with_state(state, access_log))
@@ -1188,3 +1206,7 @@ fn data_layer_origin_allowed(headers: &HeaderMap) -> bool {
 #[cfg(test)]
 #[path = "start_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "storage_page_tests.rs"]
+mod storage_page_tests;

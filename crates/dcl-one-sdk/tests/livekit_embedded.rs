@@ -189,8 +189,8 @@ async fn assert_voice(base: &str, client: &reqwest::Client, log: &Path) -> Optio
     );
     let banner = log_text(log);
     assert!(
-        banner.contains("voice on") && banner.contains("livekit-server"),
-        "the banner must say voice is on and which server carries it:\n{banner}"
+        banner.contains("Voice: comms on ") && banner.contains(", scene:"),
+        "the banner must say voice is on, which server carries it and the scene room:\n{banner}"
     );
     println!("PASS start advertises signed-login on {base}");
 

@@ -3,24 +3,25 @@
 // preview's mini-comms room through the JSON host door. Pure node built-ins:
 // the only modules loaded are the scene's own bundle and chunks.
 //
-//   node host-runtime.mjs <sceneRoot> <doorWsUrl> <storagePath>
+//   node host-runtime.mjs <sceneRoot> <doorWsUrl>
 //
 // The ~system table is the golden harness's grown live: readFile serves the
 // real files (and grafts the auth-server API surface onto the sdk chunk it
 // serves -- see PATCH below), CommunicationsController bridges the room, and
-// Storage/EnvVar land on disk. Room messages ride a "DCLR" magic-prefixed
+// Storage/EnvVar ride the preview's storage routes (host-storage.mjs beside
+// this file). Room messages ride a "DCLR" magic-prefixed
 // JSON envelope so they never collide with the sync transport's CRDT bytes;
 // the relay stamps every inbound frame with the handshake-verified sender.
 'use strict'
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { createServerModule } from './host-storage.mjs'
 
 const root = path.resolve(process.argv[2] ?? '.')
 const doorUrl = process.argv[3]
-const storagePath = path.resolve(process.argv[4] ?? path.join(root, '.dcl-one', 'storage.json'))
 if (!doorUrl) {
-  console.error('usage: host-runtime.mjs <sceneRoot> <doorWsUrl> <storagePath>')
+  console.error('usage: host-runtime.mjs <sceneRoot> <doorWsUrl>')
   process.exit(2)
 }
 const sceneJson = JSON.parse(fs.readFileSync(path.join(root, 'scene.json'), 'utf8'))
@@ -282,63 +283,11 @@ function hostRegisterMessages(_schemas) {
   return roomSingleton
 }
 
-// storage: one JSON file, world + per-player namespaces, debounced writes
-let store = { world: {}, player: {} }
-try {
-  store = JSON.parse(fs.readFileSync(storagePath, 'utf8'))
-  store.world ??= {}
-  store.player ??= {}
-} catch {}
-let storeTimer = null
-function persistStore() {
-  if (storeTimer) return
-  storeTimer = setTimeout(() => {
-    storeTimer = null
-    try {
-      fs.mkdirSync(path.dirname(storagePath), { recursive: true })
-      const tmp = storagePath + '.tmp'
-      fs.writeFileSync(tmp, JSON.stringify(store))
-      fs.renameSync(tmp, storagePath)
-    } catch (e) {
-      console.error('[multiplayer] storage write failed:', e)
-    }
-  }, 500)
-}
-const Storage = {
-  async get(key) {
-    return key in store.world ? store.world[key] : null
-  },
-  async set(key, value) {
-    store.world[key] = String(value)
-    persistStore()
-    return true
-  },
-  player: {
-    async get(address, key) {
-      const p = store.player[String(address).toLowerCase()]
-      return p && key in p ? p[key] : null
-    },
-    async set(address, key, value) {
-      const a = String(address).toLowerCase()
-      store.player[a] ??= {}
-      store.player[a][key] = String(value)
-      persistStore()
-      return true
-    }
-  }
-}
-const EnvVar = {
-  async get(name) {
-    if (name in process.env) return process.env[name]
-    try {
-      for (const line of fs.readFileSync(path.join(root, '.env'), 'utf8').split('\n')) {
-        const eq = line.indexOf('=')
-        if (eq > 0 && line.slice(0, eq).trim() === name) return line.slice(eq + 1).trim()
-      }
-    } catch {}
-    return null
-  }
-}
+// storage: the preview server owns the file and serves upstream's routes;
+// this side is upstream's client semantics (host-storage.mjs), bound to the
+// preview the door URL names (its path prefix kept, the door suffix dropped)
+const previewBase = doorUrl.replace(/^ws/, 'http').replace(/\/mini-comms\/[^/]+\/host$/, '')
+const { Storage, EnvVar } = createServerModule({ baseUrl: previewBase })
 
 // presence -> the sdk players lib, best effort: once the chunks are loaded the
 // registry hook exposes the bundle's engine, and joins/leaves become

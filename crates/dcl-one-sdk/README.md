@@ -266,6 +266,58 @@ request would break a fetch already in flight when the watcher rewrote the file.
 If you need the exact bytes a hash was minted for, this server cannot give them
 to you.
 
+### Storage
+
+```
+dcl-one-sdk storage scene|player|env get|set|delete|list|clear [KEY]
+                    [--value V] [--address 0x…] [--prefix P]
+                    [--limit N] [--offset N] [--confirm] [--json]
+                    [--dir D] [--target local|preview|org|zone|URL]
+                    [--preview http://127.0.0.1:8000] [--sign-key FILE]
+dcl-one-sdk storage target [local|org|zone|URL] [--dir D]
+dcl-one-sdk storage export [--out FILE] | import FILE [--merge]
+```
+
+Server-side scenes (`authoritativeMultiplayer` in scene.json) read and write
+`Storage`, `Storage.player` and `EnvVar` from `@dcl/sdk/server`. The preview is
+their storage service: it serves the production service's routes
+(`/values[/{key}]`, `/players[/{address}/values[/{key}]]`, `/env[/{key}]` and
+`/usage/world|players/{address}|env`) with its bodies, status codes, error
+messages, pagination (`limit` 1–100, default 100) and size rules (keys 1–255
+characters; values up to 512 KB scene / 100 KB player / 10 KB env, totals
+10 MB / 1 MB / 256 KB) from `.dcl-one/storage.sqlite`, one database per scene,
+so the host isolate, the CLI and the page always agree. A pre-0.26
+`.dcl-one/storage.json` is imported the first time the database opens and kept
+as `storage.json.imported`. The host's client keeps upstream's semantics — a
+60 s read cache with negative entries, coalesced in-flight reads, per-key write
+queues that collapse rapid writes to two requests, unchanged writes skipped,
+listing pages that seed the cache, and boolean results that never throw.
+
+The **Storage** tab of the preview lists each scope, edits values in place,
+shows who last wrote each one (`scene`, `cli`, `ui`, `http`) and keeps the last
+200 writes. Its **Use upstream storage** switch points the same routes at
+`storage.decentraland.org`, `storage.decentraland.zone` or any storage service
+URL (a local `world_storage`, say): the preview then forwards every request
+with ADR-44 signed-fetch headers and the scene's realm/parcel metadata, signed
+by `DCL_PRIVATE_KEY` when set or by the wallet connected on the Deploy page.
+The choice is remembered in the database, so a running host follows it, and
+`start` says so up front (`Storage: local SQLite (.dcl-one/storage.sqlite);
+switch at http://127.0.0.1:8000/storage`, or the service and who signs for
+it). Writes and every request bound for a service are accepted from this
+machine only, never cross-origin.
+
+`storage` takes `sdk-commands storage`'s verbs and flags, with one deliberate
+difference: a bare command acts where the page points (upstream defaults to
+`storage.decentraland.org`). `--target local` edits the database directly,
+`--target preview` goes through a running preview, and `org`, `zone` or a URL
+sign with `--sign-key` or `DCL_PRIVATE_KEY` (a `localhost` URL is local
+development and goes unsigned). `--value` is stored as text, as upstream sends
+it; `--json` parses it instead. `player clear` without `--address` clears every
+player. `clear` needs `--confirm`. Upstream's `-p/--port`, `-b/--no-browser`
+and `--https` are accepted and ignored: there is no linker dApp here.
+Snapshots use upstream's `{ env, world, players }` file shape; imports keep
+whatever addresses the file names.
+
 ---
 
 ## Edit it visually
@@ -373,8 +425,8 @@ permissions on a worlds content server.
 5141 a local catalyrst if you run one.
 
 **Files written into the scene.** `bin/` holds the built chunks; `.dcl-one/` the
-generated entrypoint and composite index, ignoring itself with its own
-`.gitignore`; `.dcl-cache/` the tsc info file, the type-check stamp and fetched
+generated entrypoint, composite index and `storage.sqlite`, ignoring itself
+with its own `.gitignore`; `.dcl-cache/` the tsc info file, the type-check stamp and fetched
 upstream content; `.dcl-optimized-assets/` abgen's output and JIT cache. All are
 watcher-ignored, none are deployed.
 
@@ -385,7 +437,8 @@ the client shows no avatars. `DCL_ONE_SDK_CATALYST_ROTATION` overrides the
 deploy rotation. `DCL_ONE_SDK_WORLD_BASE` names a worlds host for the
 `/world/…` mirror. `DCL_ONE_SDK_FEATURE_FLAGS` names a feature-flag host.
 `DCL_ONE_SDK_CONTENT_CACHE_MAX` bounds the fetched-content LRU.
-`DCL_ONE_SDK_WEB_EXPLORER` overrides the web explorer URL.
+`DCL_ONE_SDK_WEB_EXPLORER` overrides the web explorer URL. `DCL_PRIVATE_KEY`
+signs headless deploys and storage requests bound for a storage service.
 `DCL_ONE_SDK_ALLOWED_ORIGINS` widens CORS. `ABGEN_BIN` runs a different
 sidecar; every other `ABGEN_*` variable this binary sets is env-wins, so
 exporting one overrides it.

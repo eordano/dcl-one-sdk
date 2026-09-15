@@ -60,7 +60,7 @@ testing; a bare `host` serves headless.
   verified senders; hexabricks lay/break/notice work, no persistence.
 - M2: syncEntity LWW + late-join snapshot -- BrickData/Builders/LayLog
   mirror; the builders panel goes live.
-- M3: Storage -- snapshots survive restarts; visit stamps work.
+- M3: Storage -- snapshots survive restarts; visit stamps work. (landed 2026-09-15, below)
 - M4: `start --host` integration + reconnect behaviour; document in the
   README beside the preview section.
 
@@ -159,9 +159,54 @@ The loop is closed end to end, verified headlessly:
 - The acceptance scene pauses building with a notice when the host goes
   silent (heartbeat grace covers joining) instead of dropping lays.
 
+## Landed (2026-09-15): M3 storage
+
+Storage moved from a JSON file the isolate owned to a service the preview
+runs, which is what upstream's hosted server sees:
+
+- **One authority.** `src/storage.rs` keeps each scene's values in
+  `.dcl-one/storage.sqlite` (table `kv(scope, address, key, value,
+  updated_at, source)` plus `settings` and a 200-row `activity` log; WAL,
+  5 s busy timeout, a connection per request). A legacy `storage.json` is
+  imported once on first open.
+- **The production wire shape.** The preview serves `/values[/{key}]`,
+  `/players[/{address}/values[/{key}]]`, `/env[/{key}]` and `/usage/*` as
+  `world-storage-service` does (audited 2026-09-15 against its handlers,
+  OpenAPI and integration tests): `{ error, message }` error bodies, `Value
+  not found` 404s, `Invalid player address` for anything but `0x` + 40 hex,
+  `Key must be between 1 and 255 characters`, per-scope value and total
+  ceilings in its words, `limit` clamped to 1–100 (default 100) and echoed
+  in `pagination`, `GET /players` and `GET /env` as arrays of names, and the
+  `X-Confirm-Delete-All` guard (`src/start/storage_page.rs`). `Page::to_json`
+  emits only `key`/`value`, so a scene never sees the bookkeeping columns.
+  Local extras ride on separate routes (`/storage/*`) or headers
+  (`x-dcl-one-storage-source`), never on the service's shapes.
+- **Upstream's client.** The isolate's `@dcl/sdk/server` is
+  `templates/host-storage.mjs`, a port of the auth-server branch's client:
+  512-entry/60 s read cache with negative entries, coalesced GETs, per-key
+  write queue capped at two requests, `skipIfUnchanged`, `fresh`, list pages
+  that seed the cache, `getValues` queries built from truthy options only,
+  a 404 that is an outcome rather than an error line (upstream's
+  `fix/storage-404-not-an-error`), async methods that reject off-server, and
+  boolean results that never throw. `scripts/host-storage.test.mjs` pins it.
+- **A service behind the switch.** The page's "Use upstream storage" and
+  `storage target` point the same routes at `storage.decentraland.org`,
+  `.zone` or a custom URL; `src/storage_remote.rs` forwards with ADR-44
+  signed-fetch headers (simple chain from `DCL_PRIVATE_KEY`, or the Deploy
+  page's delegated identity) and `{ realm, realmName, parcel }` metadata.
+  Reads and writes bound for a service are gated to this machine.
+- **Ops surface.** `dcl-one-sdk storage scene|player|env get|set|delete|
+  list|clear`, `target`, `export`, `import` (`src/storage_cli.rs`) cover
+  upstream's `sdk-commands storage` (text values unless `--json`, `player
+  clear` for everyone, `localhost` as local development, the `World:` /
+  `Genesis City scene at parcel` line, its ignored dApp flags) and the local
+  extras. The one intentional divergence: the default target is the
+  project's remembered one, not `storage.decentraland.org`.
+
 Remaining: in-world verification with a real explorer client (the one step a
-headless harness cannot take), M3 restart-survival exercises, and the hardening
-list below. Client-side inbound sender identity is not verifiable (the platform
+headless harness cannot take), signing a remote CLI request with a browser
+wallet (today: a private key, or the preview's proxy with the Deploy page's
+session), and the hardening list below. Client-side inbound sender identity is not verifiable (the platform
 hands scenes bytes, not senders) -- state authority lives server-side where the
 relay stamps addresses.
 

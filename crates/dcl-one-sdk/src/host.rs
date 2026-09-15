@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 const HOST_TEMPLATE: &str = include_str!("templates/host-runtime.mjs");
+const HOST_STORAGE_TEMPLATE: &str = include_str!("templates/host-storage.mjs");
 
 pub struct HostOptions {
     pub dir: PathBuf,
@@ -37,11 +38,13 @@ pub fn spawn_isolate(root: &Path, preview: &str, room: &str) -> Result<Isolate> 
     let harness = dir.join("host-runtime.mjs");
     std::fs::write(&harness, HOST_TEMPLATE)
         .with_context(|| format!("writing {}", harness.display()))?;
+    let storage = dir.join("host-storage.mjs");
+    std::fs::write(&storage, HOST_STORAGE_TEMPLATE)
+        .with_context(|| format!("writing {}", storage.display()))?;
     let mut child = tokio::process::Command::new(&node)
         .arg(&harness)
         .arg(root)
         .arg(door_url(preview, room))
-        .arg(storage_path(root))
         .current_dir(root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -71,10 +74,6 @@ async fn forward_output(stdout: tokio::process::ChildStdout) {
             println!("{line}");
         }
     }
-}
-
-fn storage_path(root: &Path) -> PathBuf {
-    root.join(".dcl-one").join("storage.json")
 }
 
 fn door_url(preview: &str, room: &str) -> String {
@@ -117,8 +116,9 @@ pub async fn host(opts: &HostOptions) -> Result<()> {
     let url = door_url(&opts.preview, &opts.room);
     crate::ux::note_arrow(format!("hosting {main} against {url}"));
     crate::ux::note(format!(
-        "storage: {}",
-        storage_path(&project.root).display()
+        "storage: served by the preview at {} from its .dcl-one/{}",
+        opts.preview.trim_end_matches('/'),
+        crate::storage::DB_FILE
     ));
     let mut isolate = spawn_isolate(&project.root, &opts.preview, &opts.room)?;
     let status = isolate

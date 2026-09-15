@@ -73,9 +73,10 @@ pub(crate) fn short_account(addr: &str) -> String {
     }
 }
 
-const SECTIONS: [(&str, &str, &str); 4] = [
+const SECTIONS: [(&str, &str, &str); 5] = [
     ("preview", "/", "Preview"),
     ("scene", "/scene", "Scene"),
+    ("storage", "/storage", "Storage"),
     ("target", "/target", "Target"),
     ("deploy", "/deploy", "Deploy"),
 ];

@@ -2782,49 +2782,62 @@ fn cli_publish_releases_the_signer_and_allows_another_web_publish() {
 
 #[tokio::test]
 async fn standalone_browser_server_stays_available_after_publish() {
-    let (_tree, project) = scene(
-        "persistent-signing",
-        json!({"runtimeVersion": "7", "scene": {"parcels": ["0,0"], "base": "0,0"}}),
-    );
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let signer = parked_signer();
-    let root = project.root;
-    let task = tokio::spawn(async move {
-        super::super::serve_signing(&root, Some(port), false, Duration::from_secs(5), signer, rx)
+    for outcome in [
+        Ok("Published test scene".to_string()),
+        Err(anyhow::anyhow!("Upload rejected")),
+    ] {
+        let (_tree, project) = scene(
+            "persistent-signing",
+            json!({"runtimeVersion": "7", "scene": {"parcels": ["0,0"], "base": "0,0"}}),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let signer = parked_signer();
+        signer.note_signer_for_tests(ADDR);
+        let root = project.root;
+        let task = tokio::spawn(async move {
+            super::super::serve_signing(
+                &root,
+                Some(port),
+                false,
+                Duration::from_secs(5),
+                signer,
+                rx,
+            )
             .await
-    });
-    tx.send(Ok("Published test scene".to_string())).unwrap();
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/about");
-    let mut available = false;
-    for _ in 0..50 {
-        if client
-            .get(&url)
-            .send()
-            .await
-            .is_ok_and(|r| r.status().is_success())
-        {
-            available = true;
-            break;
+        });
+        tx.send(outcome).unwrap();
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/about");
+        let mut available = false;
+        for _ in 0..50 {
+            if client
+                .get(&url)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+            {
+                available = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        if task.is_finished() {
+            panic!("preview ended early: {:?}", task.await);
+        }
+        assert!(
+            available,
+            "preview remains available after the completion signal"
+        );
+        assert!(
+            !task.is_finished(),
+            "publishing must not stop the HTTP server"
+        );
+        task.abort();
+        let _ = task.await;
     }
-    if task.is_finished() {
-        panic!("preview ended early: {:?}", task.await);
-    }
-    assert!(
-        available,
-        "preview remains available after the completion signal"
-    );
-    assert!(
-        !task.is_finished(),
-        "publishing must not stop the HTTP server"
-    );
-    task.abort();
-    let _ = task.await;
 }
 
 #[test]

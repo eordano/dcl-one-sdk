@@ -324,8 +324,8 @@ async fn root_serves_a_landing_page_to_browsers() {
     );
     assert_eq!(
         body.matches(r#"class="pgnav__lnk""#).count(),
-        4,
-        "Preview, Scene, Target, Deploy: {body}"
+        5,
+        "Preview, Scene, Storage, Target, Deploy: {body}"
     );
     assert!(
         body.contains(r#"href="/" aria-current="page">Preview"#),

@@ -390,6 +390,13 @@ enum Command {
         #[command(subcommand)]
         command: WorldCommand,
     },
+    #[command(
+        about = "Read and write the scene's server-side storage (scene, player and env values), locally or on a storage service"
+    )]
+    Storage {
+        #[command(subcommand)]
+        command: dcl_one_sdk::storage_cli::StorageCommand,
+    },
     /// Generate main.crdt from a scene's composites into an arbitrary file, so
     /// the native generator's bytes can be diffed against a node data-layer dump.
     #[command(hide = true)]
@@ -826,6 +833,7 @@ async fn run(command: Command) -> Result<()> {
             pack::pack(&pack::PackOptions { dir, skip_build }).await
         }
         Command::World { command } => run_world(command).await,
+        Command::Storage { command } => dcl_one_sdk::storage_cli::run(command).await,
     }
 }
 

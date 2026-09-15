@@ -60,7 +60,7 @@ pub(super) fn nav_badge(st: &AppState) -> &'static str {
 /// Layout the shared sheet has no rule for. Tokens only — no colour, size or
 /// case of its own — so the page cannot drift into looking like a different
 /// server than `/`.
-const PAGE_CSS: &str = "
+pub(super) const PAGE_CSS: &str = "
 #deploy, #target { gap: var(--s-5); }
 .jn2__col > .knob__k + * { margin-top: calc(-1 * var(--s-2)); }
 .datum__unit + .datum__num { margin-left: var(--s-3); }
@@ -165,7 +165,7 @@ slot! {
 
 /// The live delegated identity; an expired one is dropped here so the page
 /// falls back to the wallet.
-fn live_identity(st: &AppState) -> Option<deploy::DeployIdentity> {
+pub(super) fn live_identity(st: &AppState) -> Option<deploy::DeployIdentity> {
     let mut slot = identity_slot(st);
     match slot.as_ref() {
         Some(id) if id.expired(deploy::now_ms()) => {
@@ -501,7 +501,7 @@ fn moved_since(root: &Path, p: &deploy::DeployPreview) -> Vec<String> {
     out
 }
 
-fn reply(status: StatusCode, why: &str) -> Response {
+pub(super) fn reply(status: StatusCode, why: &str) -> Response {
     (status, format!("{why}\n")).into_response()
 }
 
@@ -513,7 +513,7 @@ fn forbidden(why: &str) -> Response {
 /// peer that is not a tunnel replay (the agent stamps
 /// [`crate::tunnel::FORWARDED_HEADER`]); same origin, because with CORS the
 /// token was fetchable out of the page HTML; and the token itself.
-fn post_gate(
+pub(super) fn post_gate(
     st: &AppState,
     allow_remote: bool,
     peer: SocketAddr,
@@ -1650,14 +1650,20 @@ fn run_panel_for(
     format!(r#"{refresh}<div class="panel{tone}"><h2>{title}</h2>{body}</div>"#)
 }
 
-fn deploy_document(st: &AppState, title: &str, prefix: &str, active: &str, body: &str) -> Response {
+pub(super) fn deploy_document(
+    st: &AppState,
+    title: &str,
+    prefix: &str,
+    active: &str,
+    body: &str,
+) -> Response {
     super::chrome::html(document(
         title,
         prefix,
-        if active == "target" {
-            target_css()
-        } else {
-            PAGE_CSS
+        match active {
+            "target" => target_css(),
+            "storage" => super::storage_page::css(),
+            _ => PAGE_CSS,
         },
         &format!("#{active}"),
         "Skip to the section",

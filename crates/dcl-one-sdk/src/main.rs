@@ -416,6 +416,18 @@ enum Command {
 
 #[derive(Subcommand)]
 enum WorldCommand {
+    #[command(about = "Remove one reviewed World scene; keep all other scenes")]
+    RemoveScene {
+        name: String,
+        coordinate: String,
+        #[arg(
+            long = "entity",
+            help = "Expected deployed entity ID; removal is refused if it changed"
+        )]
+        entity_id: String,
+        #[command(flatten)]
+        signed: SignedWriteArgs,
+    },
     #[command(about = "Get or set world metadata (title, spawn, skybox, categories, ...)")]
     Settings {
         #[command(subcommand)]
@@ -819,6 +831,22 @@ async fn run(command: Command) -> Result<()> {
 
 async fn run_world(command: WorldCommand) -> Result<()> {
     match command {
+        WorldCommand::RemoveScene {
+            name,
+            coordinate,
+            entity_id,
+            signed,
+        } => {
+            signed
+                .run(
+                    &name,
+                    world::WorldAction::SceneRemove {
+                        coordinate,
+                        entity_id,
+                    },
+                )
+                .await
+        }
         WorldCommand::Settings { command } => match command {
             WorldSettingsCommand::Get {
                 name,

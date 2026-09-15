@@ -595,6 +595,70 @@ fn resolve_sdk_version(root: &Path) -> String {
     "unknown".to_string()
 }
 
+/// Mirror the conditional media permission in the Decentraland Scene schema.
+pub(crate) fn validate_media_permissions(scene: &serde_json::Value) -> Result<()> {
+    let enabled = scene["requiredPermissions"].as_array().is_some_and(|p| {
+        p.iter()
+            .any(|v| v.as_str() == Some("ALLOW_MEDIA_HOSTNAMES"))
+    });
+    let hosts = scene.get("allowedMediaHostnames");
+    let valid = match hosts {
+        None | Some(serde_json::Value::Null) => !enabled,
+        Some(serde_json::Value::Array(values)) => {
+            values
+                .iter()
+                .all(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+                && (if enabled {
+                    !values.is_empty()
+                } else {
+                    values.is_empty()
+                })
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(UserError::new(
+            "External media permission and allowedMediaHostnames do not match",
+            TrySteps::one("in Scene → Permissions, enter the media hostnames and enable External media, or disable it and clear the list")
+                .and("in scene.json, ALLOW_MEDIA_HOSTNAMES requires a non-empty allowedMediaHostnames array of strings"),
+        ).into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod media_permission_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn media_schema_dependency_is_checked_before_signing() {
+        for hosts in [
+            json!(null),
+            json!([]),
+            json!("example.org"),
+            json!([1]),
+            json!([""]),
+        ] {
+            assert!(validate_media_permissions(&json!({
+                "requiredPermissions": ["ALLOW_MEDIA_HOSTNAMES"],
+                "allowedMediaHostnames": hosts
+            }))
+            .is_err());
+        }
+        assert!(validate_media_permissions(
+            &json!({"requiredPermissions": ["ALLOW_MEDIA_HOSTNAMES"]})
+        )
+        .is_err());
+        assert!(validate_media_permissions(&json!({"requiredPermissions": ["ALLOW_MEDIA_HOSTNAMES"], "allowedMediaHostnames": ["example.org"]})).is_ok());
+        assert!(validate_media_permissions(
+            &json!({"requiredPermissions": [], "allowedMediaHostnames": ["example.org"]})
+        )
+        .is_err());
+        assert!(validate_media_permissions(&json!({})).is_ok());
+    }
+}
+
 pub fn build_metadata(project: &Project) -> Result<JsValue> {
     let scene_path = project.root.join("scene.json");
     let raw = std::fs::read_to_string(&scene_path)
@@ -608,6 +672,7 @@ pub fn build_metadata(project: &Project) -> Result<JsValue> {
             .why("deploy uses a strict parser to hash-match the upstream toolchain"),
         )
     })?;
+    validate_media_permissions(&serde_json::from_str::<serde_json::Value>(&raw)?)?;
     let JsValue::Object(entries) = scene else {
         return Err(UserError::new(
             "scene.json must be a JSON object",
@@ -639,7 +704,7 @@ pub fn extract_pointers(metadata: &JsValue) -> Result<Vec<String>> {
                     "scene.parcels entries must be strings",
                     TrySteps::one("write parcels as strings: \"0,0\" not [0,0]"),
                 )
-                .into())
+                .into());
             }
         }
     }

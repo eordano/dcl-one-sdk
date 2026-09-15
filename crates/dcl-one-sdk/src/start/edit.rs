@@ -60,7 +60,9 @@ pub(super) struct SceneEdit {
     tags: Option<Vec<String>>,
     parcels: Option<Vec<String>>,
     base: Option<String>,
+    move_base: Option<String>,
     required_permissions: Option<Vec<String>>,
+    allowed_media_hostnames: Option<Vec<String>>,
     spawn_points: Option<Vec<SpawnEdit>>,
 }
 
@@ -219,11 +221,37 @@ fn apply(scene: &mut Value, edit: &SceneEdit) -> Result<(), String> {
         }
         set_key(scene, "tags", (!clean.is_empty()).then(|| json!(clean)));
     }
+    if let Some(base) = &edit.move_base {
+        if edit.parcels.is_some() || edit.base.is_some() {
+            return Err("Move the scene separately from editing its parcel shape or anchor".into());
+        }
+        let coords = catalyrst_auth_chain::pointer::parse_pointer(base.trim())
+            .filter(|(x, y)| (-150..=163).contains(x) && (-150..=163).contains(y))
+            .ok_or_else(|| "Enter a base parcel as x,y within -150 to 163".to_string())?;
+        super::deploy_page::translate_footprint(scene, coords)?;
+    }
     if edit.parcels.is_some() || edit.base.is_some() {
         apply_parcels(scene, edit)?;
     }
     if let Some(permissions) = &edit.required_permissions {
         apply_permissions(scene, permissions)?;
+    }
+    if let Some(hosts) = &edit.allowed_media_hostnames {
+        let mut clean: Vec<String> = hosts
+            .iter()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .collect();
+        clean.sort();
+        clean.dedup();
+        set_key(
+            scene,
+            "allowedMediaHostnames",
+            (!clean.is_empty()).then(|| json!(clean)),
+        );
+    }
+    if edit.required_permissions.is_some() || edit.allowed_media_hostnames.is_some() {
+        crate::deploy::validate_media_permissions(scene).map_err(|e| e.to_string())?;
     }
     if let Some(spawns) = &edit.spawn_points {
         set_key(scene, "spawnPoints", spawn_values(spawns)?);
@@ -590,6 +618,27 @@ mod tests {
         assert_eq!(scene["tags"], json!(["events", "theatre"]));
     }
 
+    #[test]
+    fn moving_the_base_translates_the_whole_scene_and_keeps_spawn_points() {
+        let mut scene = json!({
+            "scene": { "base": "45,83", "parcels": ["45,83", "46,83", "46,84"] },
+            "spawnPoints": [{ "name": "Entry", "position": { "x": 8, "y": 0, "z": 8 } }]
+        });
+        let spawns = scene["spawnPoints"].clone();
+        let edit: SceneEdit = serde_json::from_value(json!({"moveBase": "0,0"})).unwrap();
+        apply(&mut scene, &edit).unwrap();
+        assert_eq!(scene["scene"]["base"], "0,0");
+        assert_eq!(scene["scene"]["parcels"], json!(["0,0", "1,0", "1,1"]));
+        assert_eq!(scene["spawnPoints"], spawns);
+        let before = scene.clone();
+        let outside: SceneEdit = serde_json::from_value(json!({"moveBase": "163,163"})).unwrap();
+        assert!(apply(&mut scene, &outside).is_err());
+        assert_eq!(scene, before);
+        let conflict: SceneEdit =
+            serde_json::from_value(json!({"moveBase":"1,1", "base":"0,0"})).unwrap();
+        assert!(apply(&mut scene, &conflict).is_err());
+    }
+
     fn parcels(parcels: &[&str]) -> SceneEdit {
         SceneEdit {
             parcels: Some(parcels.iter().map(|p| p.to_string()).collect()),
@@ -669,6 +718,30 @@ mod tests {
 
         apply(&mut scene, &perms(&[])).unwrap();
         assert!(scene.get("requiredPermissions").is_none());
+    }
+
+    #[test]
+    fn media_permission_requires_hosts_and_can_be_revoked() {
+        let mut scene = json!({});
+        let enable = |hosts| SceneEdit {
+            required_permissions: Some(vec!["ALLOW_MEDIA_HOSTNAMES".into()]),
+            allowed_media_hostnames: hosts,
+            ..Default::default()
+        };
+        assert!(apply(&mut scene.clone(), &enable(None)).is_err());
+        assert!(apply(&mut scene.clone(), &enable(Some(vec![]))).is_err());
+        apply(&mut scene, &enable(Some(vec!["media.example.org".into()]))).unwrap();
+        assert_eq!(scene["allowedMediaHostnames"], json!(["media.example.org"]));
+        apply(
+            &mut scene,
+            &SceneEdit {
+                required_permissions: Some(vec![]),
+                allowed_media_hostnames: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(scene.get("allowedMediaHostnames").is_none());
     }
 
     fn xyz(x: f64, y: f64, z: f64) -> Xyz {

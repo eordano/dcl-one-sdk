@@ -316,7 +316,7 @@ body.editing .lay--parcels .lay__cell--in:hover { background: var(--brand-cta-ho
 body.editing .lay--parcels .lay__cell--add:hover { border-color: var(--ink-45); background: var(--fill-1); }
 body.editing .lay--spawns .lay__grid { cursor: crosshair; }
 body.editing .lay--spawns .lay__cell--add { opacity: .5; }
-.lay--pick .lay__cell--base { outline: 2px solid var(--brand-ink); outline-offset: 2px; }
+
 .lay__area {
   position: absolute; pointer-events: none; border-radius: var(--s-1);
   border: 2px solid var(--brand-ink); background: color-mix(in srgb, var(--brand-ink) 14%, transparent);
@@ -518,3 +518,13 @@ body.editing .cover-edit:hover .cover { border-color: var(--ink-45); }
 .ansi-35, .ansi-95 { color: #c65ad3; }
 .ansi-36, .ansi-96 { color: #1fa5b8; }
 .ansi-37, .ansi-97 { color: inherit; }
+
+#lay-base-input { width: 9ch; padding: var(--s-2); border: 1px solid var(--line-ctl); border-radius: var(--r-control); background: var(--panel); font: inherit; }
+
+/* External media is edited below the map and permissions, using the full card width. */
+.lay__media { display: none; padding: var(--s-5) var(--s-6); border-top: 1px solid var(--line); gap: var(--s-3); }
+.lay--perms:has([data-perm="ALLOW_MEDIA_HOSTNAMES"]:checked) .lay__media { display: grid; }
+.lay__media .knob__k { padding: 0; }
+.lay__media-fields { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-3); }
+.lay__media-fields input { flex: 1 1 280px; min-width: 0; }
+@media (max-width: 600px) { .lay__media { padding: var(--s-4); } }

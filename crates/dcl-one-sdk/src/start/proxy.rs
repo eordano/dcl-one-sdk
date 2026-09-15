@@ -335,7 +335,7 @@ pub(super) async fn catalyst_proxy(req: Request) -> Response {
     let body = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, format!("proxy body: {e}")).into_response()
+            return (StatusCode::PAYLOAD_TOO_LARGE, format!("proxy body: {e}")).into_response();
         }
     };
     match forward_to_catalyst(method, path_and_query, &headers, body).await {

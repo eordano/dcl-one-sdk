@@ -93,6 +93,7 @@ async fn served_target(st: &Arc<AppState>) -> String {
 
 fn status(remote: Remote) -> LiveStatus {
     LiveStatus {
+        world_spawn: None,
         remote,
         reuse: None,
     }
@@ -186,6 +187,7 @@ fn remote_state(current: Option<CurrentScene>, others: Vec<RemoteScene>) -> Remo
 
 fn status_with(remote: Remote, r: Reuse) -> LiveStatus {
     LiveStatus {
+        world_spawn: None,
         remote,
         reuse: Some(r),
     }
@@ -225,7 +227,7 @@ fn between<'a>(html: &'a str, from: &str, to: &str) -> &'a str {
 }
 
 fn land_pane(card: &str) -> &str {
-    between(card, "tgt__pane--land\">", "tgt__pane--multi\">")
+    between(card, "tgt__pane--land\">", "tgt__pane--history\">")
 }
 
 fn scene_on_disk(root: &Path) -> serde_json::Value {
@@ -310,6 +312,7 @@ fn demo_card(
         rights,
         None,
         history,
+        "test-print",
     )
 }
 
@@ -356,6 +359,8 @@ async fn a_peer_off_this_machine_cannot_publish() {
         &st,
         LAN,
         Form(DeployForm {
+            world_revision: String::new(),
+            replace_world: String::new(),
             token: token(&st).to_string(),
             fingerprint: String::new(),
         }),
@@ -668,28 +673,34 @@ fn the_reuse_split_counts_files_and_bytes_by_server_hash() {
 
 /// ...and only when there is a split to say.
 #[test]
-fn the_upload_column_says_the_split_in_one_line() {
+fn the_upload_column_separates_upload_and_already_stored_bytes() {
     let (_dir, project) = gather("upline");
     let p = deploy::preview(&project).unwrap();
-    let with = status_with(Remote::Empty, reuse(2, 2000, 1, 79));
+    let with = status_with(Remote::Empty, reuse(154, 20_800_000, 1, 2_200_000));
     let html = upload_panel(&p, &with);
-    assert!(
-        html.contains("2 of 3 files are already on the server"),
-        "{html}"
+    for text in [
+        "1/155",
+        "2.2/23.0",
+        "On server already",
+        "154",
+        "20.8",
+        "aria-valuenow=\"9.6\"",
+        "aria-valuenow=\"90.4\"",
+    ] {
+        assert!(html.contains(text), "missing {text}: {html}");
+    }
+    assert_eq!(html.matches("role=\"meter\"").count(), 2);
+    assert!(!html.contains("republishing only"));
+    let all_stored = upload_panel(
+        &p,
+        &status_with(Remote::Empty, reuse(155, 23_000_000, 0, 0)),
     );
-    assert!(html.contains("1 to upload (79 bytes)"), "{html}");
-
-    let fresh = status_with(Remote::Empty, reuse(0, 0, 3, 2079));
-    let html = upload_panel(&p, &fresh);
-    assert!(html.contains("All 3 files upload"), "{html}");
-
-    let unknown = LiveStatus::unknown("off");
-    let html = upload_panel(&p, &unknown);
-    assert!(!html.contains("to upload"), "no fake split: {html}");
-    assert!(
-        html.contains(r#"<span class="datum__num">3</span>"#),
-        "{html}"
-    );
+    assert!(all_stored.contains("0/155") && all_stored.contains("0.0/23.0"));
+    let empty = upload_panel(&p, &status_with(Remote::Empty, reuse(0, 0, 0, 0)));
+    assert!(!empty.contains("NaN"));
+    let unknown = upload_panel(&p, &LiveStatus::unknown("off"));
+    assert!(unknown.contains("Checking which files need uploading"));
+    assert!(!unknown.contains("role=\"meter\""));
 }
 
 /// The same fixture bytes the deploy golden test pins must hash to the same
@@ -1019,34 +1030,23 @@ async fn the_target_page_separates_destinations_from_world_details_and_history()
         html.contains(r#"value="world" checked"#),
         "a world scene lands on the World tab: {html}"
     );
-    assert_eq!(html.matches("name=\"tgt\"").count(), 5);
+    assert_eq!(html.matches("name=\"tgt\"").count(), 4);
     assert!(
-        html.contains("name=\"tgt\" value=\"multi\">Multiscene world")
+        !html.contains("name=\"tgt\" value=\"multi\"")
             && html.contains("name=\"tgt\" value=\"history\">History")
             && html.contains("name=\"tgt\" value=\"help\">Help"),
-        "the design's four segments plus Help: {html}"
+        "two destinations, History and Help: {html}"
     );
     assert!(
         !html.contains("<details class=\"tgt__advanced\"")
             && !html.contains("<details class=\"tgt__history\""),
-        "Multiscene and History are tabs, not folds: {html}"
+        "History remains a tab: {html}"
     );
-    for pane in [
-        "tgt__pane--world",
-        "tgt__pane--land",
-        "tgt__pane--multi",
-        "tgt__pane--history",
-    ] {
+    for pane in ["tgt__pane--world", "tgt__pane--land", "tgt__pane--history"] {
         assert!(html.contains(pane), "missing {pane}: {html}");
     }
-    let multi = between(&html, "tgt__pane--multi\">", "tgt__pane--history\">");
     assert!(
-        !multi.contains("/target/point") && !multi.contains("/target/base"),
-        "a view of the destination carries no select form: {multi}"
-    );
-    assert!(
-        html.contains(r#"<span class="knob__k">On the server now</span>"#)
-            && html.contains(r#"<span class="knob__k">Upload</span>"#),
+        html.contains(r#"<span class="knob__k">Upload</span>"#),
         "the live/upload split lives here now: {html}"
     );
     assert!(
@@ -1614,10 +1614,9 @@ fn the_after_map_draws_kept_replaced_and_ours() {
     assert!(html.contains(r#"style="--lay-cols:3""#), "{html}");
 
     let sprawling = remote_state(None, vec![remote_scene("Far", vec![(0, 0), (40, 40)])]);
-    assert_eq!(
-        after_map(&sprawling, &ours, (0, 0)),
-        "",
-        "past the span cap the rows tell the story alone"
+    assert!(
+        after_map(&sprawling, &ours, (0, 0)).contains("tgt__world-plot"),
+        "a spread-out World explains why the map is unavailable"
     );
 }
 
@@ -1637,27 +1636,18 @@ fn the_multiscene_pane_sums_only_reported_sizes() {
         &json!({ "worldConfiguration": { "name": "w.dcl.eth" }, "scene": { "parcels": ["0,0"], "base": "0,0" } }),
     );
     let status = status_with(world_remote(&body, &dest.pointers), reuse(0, 0, 1, 500));
-    let html = multiscene_pane(&dest, &status);
+    let html = multiscene_pane(&dest, &status, "", "token");
     assert!(
         html.contains(&format!(
-            "Scenes in this world hold {}",
+            "{} stored across 3 scenes",
             deploy::human_size(2048 + 4096)
         )),
         "the sum is only what was reported: {html}"
     );
-    assert!(
-        html.contains(&format!(
-            "uploads {} of new content",
-            deploy::human_size(500)
-        )),
-        "{html}"
-    );
-    assert!(html.contains("replaced by this publish"), "{html}");
-    assert!(html.contains("kept"), "{html}");
-    assert!(
-        html.contains("After this publish"),
-        "the map column is there: {html}"
-    );
+    assert!(html.contains("1 updated · 2 kept"), "{html}");
+    assert!(html.contains("Updated by this publish"), "{html}");
+    assert!(html.contains("Kept"), "{html}");
+    assert!(html.contains("World map"), "{html}");
 }
 
 /// Pointing the scene rewrites the file a deploy reads: a world name lands
@@ -2183,16 +2173,12 @@ fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
         ..Rights::unchecked(ADDR, "")
     };
     let html = land_rights_col("", "token", Some(&rights));
-    assert!(html.contains("Parcels you may publish to"), "{html}");
+    assert!(html.contains("5,-3") && html.contains("6,-3"));
+    assert!(html.contains("owner"));
     assert!(
-        html.contains("5,-3 \u{b7} 6,-3 \u{b7} 100,7"),
-        "owned, in order: {html}"
+        !html.contains("100,7") && !html.contains("Operated"),
+        "holdings are shown once in Your LAND"
     );
-    assert!(
-        html.contains("and 8 more"),
-        "past the cap the rest is a count: {html}"
-    );
-    assert!(html.contains("Operated") && html.contains("9,9"), "{html}");
     assert!(
         html.contains("parcel rights read from peer.decentraland.org"),
         "the rows say whose answer they are: {html}"
@@ -2211,10 +2197,8 @@ fn the_rights_column_lists_the_parcels_the_wallet_may_publish_to() {
     assert!(!html.contains("parcel rights read from"), "{html}");
 }
 
-/// The LAND view carries the clustered picker: folded over the scene's own
-/// published parcels, a Move here on every other area, and the flat
-/// per-parcel list gone. A World target shows it too, open, because a scene
-/// coming back from a World has no LAND under it yet.
+/// The selected LAND view offers placements. Browsing LAND from a World
+/// offers selection first, without showing holdings for an inactive destination.
 #[test]
 fn the_land_view_offers_the_wallets_areas_to_move_to() {
     let (coords, _, _dir, project) = hexabricks("land-picker");
@@ -2250,10 +2234,7 @@ fn the_land_view_offers_the_wallets_areas_to_move_to() {
         "folded over its own published scene: {land}"
     );
     assert!(land.contains("Scene is here"), "{land}");
-    assert!(
-        land.contains(r#"name="base" value="40,40"><button class="deep__copy" type="submit">Move here</button>"#),
-        "{land}"
-    );
+    assert!(!land.contains(r#"name="base" value="40,40""#), "{land}");
     assert!(
         land.contains("too small for this 24-parcel scene"),
         "{land}"
@@ -2276,13 +2257,10 @@ fn the_land_view_offers_the_wallets_areas_to_move_to() {
     let card = demo_card(&dest, &preview, &live, Some(&rights), &[]);
     let land = land_pane(&card);
     assert!(
-        land.contains(r#"<details class="tgt__picker" open>"#),
-        "a World target shows the picker open: {land}"
+        !land.contains("Your LAND"),
+        "holdings stay hidden until LAND is selected: {land}"
     );
-    assert!(
-        land.contains("Select LAND then makes Genesis City the target"),
-        "{land}"
-    );
+    assert!(land.contains("Select LAND"), "{land}");
 }
 
 #[test]
@@ -2344,11 +2322,8 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
         }
         let card = demo_card(&dest, &preview, &live, Some(&rights), &history);
         let land = land_pane(&card);
-        assert!(land.contains("Selected destination: LAND · Base 2,12"));
-        assert!(
-            card.contains("The deploy target is Genesis City LAND. Multiscene applies to Worlds"),
-            "{card}"
-        );
+        assert!(land.contains("<h1 class=\"page__title\">LAND (Genesis City)</h1>"));
+        assert!(!card.contains("tgt__pane--multi"), "{card}");
         assert!(land.contains("action=\"/t/demo/target/base\""));
         assert!(land.contains("name=\"token\" value=\"test-token\""));
         assert_eq!(land.contains("href=\"/t/demo/deploy\""), !denied);
@@ -2371,8 +2346,8 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
             "the base cell keeps its coordinates whichever class it wears: {land}"
         );
         assert!(
-            land.contains(r#"<details class="tgt__move"><summary><span class="tgt__coord tgt__coord--base">2,12</span><span class="deep__copy">Move scene</span></summary><form class="tgt__base""#),
-            "the base parcel is a chip; Move scene reveals the form: {land}"
+            land.contains(r#"<div class="tgt__base-row"><span class="knob__k">Base parcel</span><form class="tgt__base""#),
+            "the base coordinate is editable without opening a picker: {land}"
         );
         assert_eq!(
             land.contains("You can't publish to 1 of 24 parcels")
@@ -2401,6 +2376,7 @@ fn target_design_keeps_live_actions_and_distinguishes_denied_rights() {
         None,
         None,
         &[],
+        "test-print",
     );
     assert!(!unchecked.contains("Deploy blocked"));
     assert!(unchecked.contains("&lt;Scene&gt;") && unchecked.contains("Connect an account"));
@@ -2446,14 +2422,10 @@ fn every_overlapping_world_scene_is_shown_as_replaced_in_full() {
     let panel = server_panel(&dest, &live);
     assert!(panel.contains("Second overlap — replaced by this publish"));
     assert!(panel.contains("Neighbor — kept in place by this publish"));
-    let details = multiscene_pane(&dest, &live);
-    assert_eq!(
-        details
-            .matches("2 parcels · replaced by this publish")
-            .count(),
-        2
-    );
-    assert!(details.contains("including its parcels outside the footprint"));
+    let details = multiscene_pane(&dest, &live, "", "token");
+    assert_eq!(details.matches("Updated by this publish").count(), 2);
+    assert!(details.contains("Parcels 0,0 → 0,1"));
+    assert!(details.contains("Parcels 1,0 → 1,1"));
 }
 
 #[test]
@@ -2463,11 +2435,13 @@ fn unavailable_world_layout_is_not_presented_as_an_empty_world() {
         Remote::Unknown("Still checking".into()),
         Remote::Unreachable("HTTP 503".into()),
     ] {
-        let html = multiscene_pane(&dest, &status(remote));
+        let html = multiscene_pane(&dest, &status(remote), "", "token");
         assert!(html.contains("World layout unavailable"));
         assert!(!html.contains("No scenes published") && !html.contains("No other scenes"));
     }
-    assert!(multiscene_pane(&dest, &status(Remote::Empty)).contains("No scenes published"));
+    assert!(
+        multiscene_pane(&dest, &status(Remote::Empty), "", "token").contains("No scenes published")
+    );
 }
 
 #[test]
@@ -2507,17 +2481,18 @@ fn world_selection_shows_coordinates_server_and_review_without_inferring_a_mode(
         Some(&rights),
         None,
         &[],
+        "test-print",
     );
-    assert!(html.contains("Selected destination: World example.eth · Base 0,0"));
+    assert!(html.contains("<h1 class=\"page__title\">example.eth</h1>"));
     assert!(html.contains("Publishing on custom.example.org"));
     assert!(html.contains(r#"href="/t/demo/deploy">Deploy <span"#));
     assert!(!html.contains("Deploy 0 changes"));
     assert!(!html.contains("· Multiscene World"));
-    assert!(html.contains("assigned coordinates") && html.contains("Permission to visit a World"));
+    assert!(!html.contains("Permission to visit a World"));
     assert!(html.contains(r#"href="/t/demo/scene"#));
     assert!(
-        !html.contains(r#"action="/t/demo/deploy""#),
-        "selection never publishes"
+        html.contains(r#"name="replace_world" value="example.eth" required"#),
+        "whole-world replacement requires an explicit choice"
     );
     capture_design("world.html", "", "token", &html);
 }
@@ -2544,5 +2519,414 @@ async fn reviewing_with_a_delegated_identity_waits_for_the_publish_button() {
     assert!(
         live_identity(&st).is_some(),
         "the explicit Publish can still use the session"
+    );
+}
+
+#[test]
+fn world_arrival_and_replacement_explain_the_gather_case() {
+    let dest = dest_of(&json!({
+        "worldConfiguration": { "name": "gather.dcl.eth" },
+        "scene": { "base": "45,83", "parcels": ["45,83"] }
+    }));
+    let mut live = LiveStatus::unknown("fixture");
+    live.remote = Remote::Known(RemoteState {
+        current: Some(CurrentScene {
+            title: "New scene".into(),
+            coords: vec![(45, 83)],
+            parcels: 1,
+            timestamp: None,
+            size: None,
+        }),
+        others: vec![RemoteScene {
+            title: "Old entrance".into(),
+            coords: vec![(0, 0)],
+            parcels: 1,
+            size: None,
+        }],
+        hashes: HashSet::new(),
+    });
+    live.world_spawn = Some("0,0".into());
+    let html = world_actions("/t/test", "token", &dest, &live, "print");
+    assert!(html.contains("Entrance is in another scene"));
+    assert!(html.contains("realm=gather.dcl.eth&amp;position=45%2C83"));
+    assert!(multiscene_pane(&dest, &live, "/t/test", "token").contains("Make 45,83 the entrance"));
+    assert!(html.contains("Old entrance — 0,0") && html.contains("New scene — 45,83"));
+    assert!(html.contains("name=\"replace_world\" value=\"gather.dcl.eth\" required"));
+    assert!(html.contains("not restored automatically"));
+    live.world_spawn = Some("45,83".into());
+    assert!(world_actions("", "", &dest, &live, "").contains("Visitors arrive in this scene"));
+    let unknown = world_actions("", "", &dest, &LiveStatus::unknown("offline"), "");
+    assert!(unknown.contains("Entrance unavailable"));
+    assert!(!unknown.contains("name=\"replace_world\""));
+    assert!(!unknown.contains("class=\"tgt__entrance\""));
+}
+
+#[test]
+fn replacement_review_changes_when_world_content_or_layout_changes() {
+    let mut remote = Remote::Known(RemoteState {
+        current: None,
+        others: vec![],
+        hashes: HashSet::new(),
+    });
+    let before = replacement_revision(&remote).unwrap();
+    if let Remote::Known(state) = &mut remote {
+        state.others.push(RemoteScene {
+            title: "Another scene".into(),
+            coords: vec![(9, 9)],
+            parcels: 1,
+            size: None,
+        });
+    }
+    let added = replacement_revision(&remote).unwrap();
+    assert_ne!(before, added);
+    if let Remote::Known(state) = &mut remote {
+        state.hashes.insert("changed-content".into());
+    }
+    assert_ne!(added, replacement_revision(&remote).unwrap());
+    assert!(replacement_revision(&Remote::Unknown("offline".into())).is_none());
+}
+
+#[test]
+fn replacement_supersedes_only_unsigned_automatic_reviews() {
+    let (_dir, project) = gather("replacement-claim");
+    let st = state(project);
+    let old = claim_world(&st, true, "print").unwrap();
+    *signer_slot(&st) = Some(parked_signer());
+    let new = claim_replacement(&st, WORLD.into(), "print".into()).unwrap();
+    assert_ne!(old, new);
+    assert!(runs(&st).as_ref().unwrap().replace_world);
+    assert!(signer_slot(&st).is_none());
+    assert!(claim_replacement(&st, WORLD.into(), "print".into()).is_none());
+    *runs(&st) = None;
+    claim_world(&st, true, "print").unwrap();
+    let signer = parked_signer();
+    signer.note_signer_for_tests(ADDR);
+    *signer_slot(&st) = Some(signer);
+    assert!(claim_replacement(&st, WORLD.into(), "print".into()).is_none());
+}
+
+#[tokio::test]
+async fn entrance_updates_are_gated_and_bound_to_the_selected_destination() {
+    let _guard = crate::deploy::ENV_LOCK.lock().await;
+    let (_dir, project) = world_scene("entrance-gates");
+    let mut st = state(project);
+    Arc::get_mut(&mut st).unwrap().deploy_dry_run = false;
+    let dest = scene_dest(&st.first_project().unwrap());
+    let form = || EntranceForm {
+        token: token(&st).into(),
+        world: dest.world.clone().unwrap(),
+        base: dest.base_pointer.clone(),
+        timestamp: 0,
+        address: String::new(),
+        signature: String::new(),
+    };
+    assert_eq!(
+        post(&st, LAN, Form(form()), target_entrance).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut wrong = form();
+    wrong.token = "wrong".into();
+    assert_eq!(
+        post(&st, LOCAL, Form(wrong), target_entrance)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut changed = form();
+    changed.world = "different.dcl.eth".into();
+    assert_eq!(
+        post(&st, LOCAL, Form(changed), target_entrance)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let prepared = json_of(post(&st, LOCAL, Form(form()), target_entrance).await).await;
+    assert!(prepared["payload"].as_str().unwrap().contains("/settings:"));
+    let mut expired = form();
+    expired.signature = "signed".into();
+    assert_eq!(
+        post(&st, LOCAL, Form(expired), target_entrance)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn entrance_update_sends_only_spawn_coordinates_with_a_valid_wallet_signature() {
+    use axum::{body::Bytes, routing::put, Router};
+    use catalyrst_crypto::signed_fetch::verify_signed_fetch;
+    let wallet = crate::random_test_wallet();
+    let address = wallet.address().to_lowercase();
+    let expected = address.clone();
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = requests.clone();
+    let app = Router::new().route(
+        "/content/world/gather.dcl.eth/settings",
+        put(move |headers: HeaderMap, body: Bytes| {
+            let expected = expected.clone();
+            let count = count.clone();
+            async move {
+                let signer = verify_signed_fetch(
+                    &headers,
+                    "put",
+                    "/content/world/gather.dcl.eth/settings",
+                    60,
+                )
+                .await
+                .unwrap();
+                assert_eq!(signer, expected);
+                let body = String::from_utf8(body.to_vec()).unwrap();
+                assert!(body.contains("name=\"spawn_coordinates\"\r\n\r\n45,83\r\n"));
+                assert_eq!(
+                    body.matches("Content-Disposition:").count(),
+                    1,
+                    "only the entrance is updated"
+                );
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(json!({"message": "World settings updated successfully"}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = format!("http://{}/content", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let dest = resolve_dest(
+        &json!({"worldConfiguration": {"name": "gather.dcl.eth"}, "scene": {"base": "45,83", "parcels": ["45,83"]}}),
+        Some(&target),
+        None,
+    );
+    let form = || EntranceForm {
+        token: "token".into(),
+        world: "gather.dcl.eth".into(),
+        base: "45,83".into(),
+        timestamp: 0,
+        address: String::new(),
+        signature: String::new(),
+    };
+    let prepared = json_of(entrance_request(&dest, form()).await).await;
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "preparing never changes settings"
+    );
+    let mut signed = form();
+    signed.timestamp = prepared["timestamp"].as_i64().unwrap();
+    signed.address = address;
+    signed.signature = wallet
+        .sign_message(prepared["payload"].as_str().unwrap().as_bytes())
+        .unwrap();
+    let result = json_of(entrance_request(&dest, signed).await).await;
+    assert_eq!(result["ok"], true);
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn moving_to_land_selects_land_but_a_world_coordinate_edit_keeps_its_world() {
+    let (_dir, project) = scene(
+        "move-land-selection",
+        json!({
+            "worldConfiguration": {"name": "gather.dcl.eth"},
+            "scene": {"base":"45,83", "parcels":["45,83", "46,83"]}
+        }),
+    );
+    let st = state(project);
+    for (destination, base) in [("", "10,10"), ("land", "0,0")] {
+        let response = post(
+            &st,
+            LOCAL,
+            Form(BaseForm {
+                token: token(&st).into(),
+                base: base.into(),
+                destination: destination.into(),
+            }),
+            target_base,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let project = st.first_project().unwrap();
+        assert_eq!(project.scene_json["scene"]["base"], base);
+        assert_eq!(
+            project.scene_json.get("worldConfiguration").is_none(),
+            destination == "land"
+        );
+    }
+    assert_eq!(
+        st.first_project().unwrap().scene_json["scene"]["parcels"],
+        json!(["0,0", "1,0"])
+    );
+    let html = served_target(&st).await;
+    assert!(html.contains(r#"value="land" checked"#));
+    assert!(html.contains("<h1 class=\"page__title\">LAND (Genesis City)</h1>"));
+}
+
+#[test]
+fn cli_publish_releases_the_signer_and_allows_another_web_publish() {
+    for outcome in [
+        Ok("Published".to_string()),
+        Err(anyhow::anyhow!("Upload failed")),
+    ] {
+        let st = AppState::new(vec![], 8000, tokio::sync::broadcast::channel(32).0);
+        adopt_cli_signing(&st, parked_signer());
+        finish_cli_signing(&st, &outcome);
+        assert!(signer_slot(&st).is_none());
+        assert!(!matches!(
+            runs(&st).as_ref().unwrap().state,
+            RunState::Running
+        ));
+    }
+}
+
+#[tokio::test]
+async fn standalone_browser_server_stays_available_after_publish() {
+    let (_tree, project) = scene(
+        "persistent-signing",
+        json!({"runtimeVersion": "7", "scene": {"parcels": ["0,0"], "base": "0,0"}}),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let signer = parked_signer();
+    let root = project.root;
+    let task = tokio::spawn(async move {
+        super::super::serve_signing(&root, Some(port), false, Duration::from_secs(5), signer, rx)
+            .await
+    });
+    tx.send(Ok("Published test scene".to_string())).unwrap();
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/about");
+    let mut available = false;
+    for _ in 0..50 {
+        if client
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            available = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if task.is_finished() {
+        panic!("preview ended early: {:?}", task.await);
+    }
+    assert!(
+        available,
+        "preview remains available after the completion signal"
+    );
+    assert!(
+        !task.is_finished(),
+        "publishing must not stop the HTTP server"
+    );
+    task.abort();
+    let _ = task.await;
+}
+
+#[test]
+fn gather_management_shows_both_locations_and_scoped_actions() {
+    let parcels: Vec<String> = (45..=50)
+        .flat_map(|x| (81..=86).map(move |y| format!("{x},{y}")))
+        .collect();
+    let old: Vec<(i64, i64)> = (0..=6).flat_map(|x| (0..=6).map(move |y| (x, y))).collect();
+    let new: Vec<(i64, i64)> = (45..=50)
+        .flat_map(|x| (81..=86).map(move |y| (x, y)))
+        .collect();
+    let (_dir, project) = scene(
+        "gather-management",
+        json!({"worldConfiguration":{"name":"gather.dcl.eth"},"scene":{"base":"45,81","parcels":parcels}}),
+    );
+    let dest = dest_of(&project.scene_json);
+    let preview = deploy::preview(&project).unwrap();
+    let mut current = current_scene("Forest Keynote Theater", None, new);
+    current.size = Some(23_000_000);
+    let mut previous = remote_scene("Forest Keynote Theater", old);
+    previous.size = Some(18_000_000);
+    let mut live = status_with(
+        Remote::Known(remote_state(Some(current), vec![previous])),
+        reuse(154, 20_800_000, 1, 2_200_000),
+    );
+    live.world_spawn = Some("0,0".into());
+    let html = target_card(
+        "Forest Keynote Theater",
+        "/t/demo",
+        "token",
+        &dest,
+        &preview,
+        &live,
+        None,
+        None,
+        &[],
+        "print",
+    );
+    for text in [
+        "Select Multiscene World",
+        "tgt__world-plot",
+        "world-scene-0-0",
+        "world-scene-45-81",
+        "1 updated · 1 kept",
+        "Remove scene at 0,0",
+        "World entrance",
+        "Make 45,81 the entrance",
+        "On server already",
+        "1/155",
+        "2.2/23.0",
+    ] {
+        assert!(html.contains(text), "missing {text}");
+    }
+    assert!(!html.contains("too far apart"));
+    capture_design("gather-world.html", "", "token", &html);
+}
+
+#[tokio::test]
+async fn scene_removal_is_gated_and_bound_to_the_selected_world() {
+    let _guard = crate::deploy::ENV_LOCK.lock().await;
+    let (_dir, project) = world_scene("remove-gates");
+    let mut st = state(project);
+    Arc::get_mut(&mut st).unwrap().deploy_dry_run = false;
+    let dest = scene_dest(&st.first_project().unwrap());
+    let form = || RemoveSceneForm {
+        token: token(&st).into(),
+        world: dest.world.clone().unwrap(),
+        coordinate: "0,0".into(),
+        world_revision: "review".into(),
+        entity_id: String::new(),
+        timestamp: 0,
+        address: String::new(),
+        signature: String::new(),
+    };
+    assert_eq!(
+        post(&st, LAN, Form(form()), target_remove_scene)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut wrong = form();
+    wrong.token = "wrong".into();
+    assert_eq!(
+        post(&st, LOCAL, Form(wrong), target_remove_scene)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut changed = form();
+    changed.world = "different.dcl.eth".into();
+    assert_eq!(
+        post(&st, LOCAL, Form(changed), target_remove_scene)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let mut expired = form();
+    expired.signature = "signed".into();
+    assert_eq!(
+        post(&st, LOCAL, Form(expired), target_remove_scene)
+            .await
+            .status(),
+        StatusCode::CONFLICT
     );
 }

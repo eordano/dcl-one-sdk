@@ -17,6 +17,7 @@
 
   const morph = (html) => {
     const doc = parsePage(html);
+    pageSyncHeader(doc);
     const live = shape(document);
     const next = shape(doc);
     const signing = live.startsWith('running|') && live !== 'running|';
@@ -36,9 +37,6 @@
     const nextMain = doc.querySelector('main.dash');
     const liveMain = document.querySelector('main.dash');
     if (nextMain && liveMain) liveMain.replaceWith(nextMain);
-    const nextBadge = doc.getElementById('deploy-badge');
-    const liveBadge = document.getElementById('deploy-badge');
-    if (nextBadge && liveBadge) liveBadge.textContent = nextBadge.textContent;
     signInit();
     settle();
   };

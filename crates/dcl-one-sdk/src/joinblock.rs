@@ -356,10 +356,7 @@ impl JoinBlock {
                 IfaceClass::Loopback => ("Local:", ""),
                 IfaceClass::Lan => ("Network:", ""),
                 IfaceClass::Overlay => ("Network:", "overlay/VPN network"),
-                IfaceClass::Bridge => (
-                    "Network:",
-                    "virtual bridge \u{2014} usually unreachable from your LAN",
-                ),
+                IfaceClass::Bridge => ("Network:", ""),
                 IfaceClass::LinkLocal => continue,
             };
             rows.push((label, self.realm(i.ip), note));
@@ -625,7 +622,7 @@ mod tests {
         assert!(out.contains("  Local:    http://127.0.0.1:5600\n"));
         assert!(out.contains("  Network:  http://10.1.2.20:5600"));
         assert!(out.contains("(overlay/VPN network)"));
-        assert!(out.contains("(virtual bridge \u{2014} usually unreachable from your LAN)"));
+        assert!(!out.contains("virtual bridge"));
         assert!(!out.contains("169.254.7.42"));
     }
 

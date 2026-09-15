@@ -101,6 +101,11 @@ impl SettingsUpdate {
 /// the `x-identity-*` headers.
 pub enum WorldAction {
     SettingsSet(SettingsUpdate),
+    /// Remove exactly the reviewed deployment containing this coordinate.
+    SceneRemove {
+        coordinate: String,
+        entity_id: String,
+    },
     Permission {
         permission: String,
         address: String,
@@ -111,6 +116,23 @@ pub enum WorldAction {
 impl WorldAction {
     pub fn validate(&self) -> Result<()> {
         match self {
+            WorldAction::SceneRemove {
+                coordinate,
+                entity_id,
+            } => {
+                anyhow::ensure!(
+                    catalyrst_auth_chain::pointer::parse_pointer(coordinate)
+                        .map(|(x, y)| format!("{x},{y}"))
+                        .as_deref()
+                        == Some(coordinate.as_str()),
+                    "use a canonical parcel coordinate such as 0,0"
+                );
+                anyhow::ensure!(
+                    !entity_id.trim().is_empty(),
+                    "an expected scene entity ID is required"
+                );
+                Ok(())
+            }
             WorldAction::SettingsSet(update) => {
                 if update.is_empty() {
                     return Err(UserError::new(
@@ -136,13 +158,18 @@ impl WorldAction {
 
     pub fn method(&self) -> &'static str {
         match self {
-            WorldAction::Permission { revoke: true, .. } => "delete",
+            WorldAction::SceneRemove { .. } | WorldAction::Permission { revoke: true, .. } => {
+                "delete"
+            }
             _ => "put",
         }
     }
 
     pub fn path(&self, name: &str) -> String {
         match self {
+            WorldAction::SceneRemove { coordinate, .. } => {
+                format!("/world/{}/scenes/{coordinate}", encode_segment(name))
+            }
             WorldAction::SettingsSet(_) => format!("/world/{}/settings", encode_segment(name)),
             WorldAction::Permission {
                 permission,
@@ -159,6 +186,9 @@ impl WorldAction {
 
     pub fn summary(&self) -> String {
         match self {
+            WorldAction::SceneRemove { coordinate, .. } => format!(
+                "remove only the scene containing {coordinate} (other scenes stay published)"
+            ),
             WorldAction::SettingsSet(update) => {
                 format!(
                     "update the settings ({})",
@@ -180,6 +210,9 @@ impl WorldAction {
 
     pub fn success(&self, name: &str) -> String {
         match self {
+            WorldAction::SceneRemove { coordinate, .. } => {
+                format!("Removed the scene at {coordinate} from {name}; other scenes were kept")
+            }
             WorldAction::SettingsSet(_) => format!("Settings updated for {name}"),
             WorldAction::Permission {
                 permission,
@@ -200,6 +233,25 @@ impl WorldAction {
         name: &str,
         headers: Vec<(String, String)>,
     ) -> Result<(u16, String)> {
+        if let WorldAction::SceneRemove {
+            coordinate,
+            entity_id,
+        } = self
+        {
+            self.validate()?;
+            let url = format!("{base}/world/{}/scenes", encode_segment(name));
+            let (status, body) = send_text(
+                client()?
+                    .post(&url)
+                    .json(&serde_json::json!({ "coordinates": [coordinate] })),
+            )
+            .await?;
+            anyhow::ensure!(
+                (200..300).contains(&status),
+                "Could not verify the scene before removal (HTTP {status}): {body}"
+            );
+            verify_scene_removal(&serde_json::from_str(&body)?, coordinate, entity_id)?;
+        }
         let url = format!("{base}{}", self.path(name));
         let method = match self.method() {
             "delete" => reqwest::Method::DELETE,
@@ -225,6 +277,53 @@ impl WorldAction {
             }
         }
     }
+}
+
+pub async fn scene_at(base: &str, world: &str, coordinate: &str) -> Result<String> {
+    anyhow::ensure!(
+        catalyrst_auth_chain::pointer::parse_pointer(coordinate).is_some(),
+        "Invalid parcel coordinate"
+    );
+    let url = format!("{base}/world/{}/scenes", encode_segment(world));
+    let (status, body) = send_text(
+        client()?
+            .post(&url)
+            .json(&serde_json::json!({"coordinates":[coordinate]})),
+    )
+    .await?;
+    anyhow::ensure!(
+        (200..300).contains(&status),
+        "Could not read scene at {coordinate} (HTTP {status}): {body}"
+    );
+    let body: Value = serde_json::from_str(&body)?;
+    let id = body
+        .pointer("/scenes/0/entityId")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/scenes/0/entity/id").and_then(Value::as_str))
+        .context("No deployed scene found at this coordinate")?;
+    verify_scene_removal(&body, coordinate, id)?;
+    Ok(id.to_string())
+}
+
+/// Refuse stale reviews, ambiguous responses and ignored coordinate filters.
+fn verify_scene_removal(body: &Value, coordinate: &str, expected: &str) -> Result<()> {
+    let scenes = body
+        .get("scenes")
+        .and_then(Value::as_array)
+        .context("The server did not return a scene list; nothing was removed")?;
+    anyhow::ensure!(
+        scenes.len() == 1,
+        "Expected exactly one scene at {coordinate}; nothing was removed"
+    );
+    let scene = &scenes[0];
+    let id = scene
+        .get("entityId")
+        .and_then(Value::as_str)
+        .or_else(|| scene.pointer("/entity/id").and_then(Value::as_str));
+    let parcels = scene.get("parcels").and_then(Value::as_array);
+    anyhow::ensure!(id == Some(expected) && parcels.is_some_and(|p| p.iter().any(|v| v.as_str() == Some(coordinate))),
+        "The scene at {coordinate} changed since review; nothing was removed. Review the live scene again");
+    Ok(())
 }
 
 pub struct BrowserOptions {
@@ -546,6 +645,103 @@ mod tests {
         let empty = WorldAction::SettingsSet(SettingsUpdate::default());
         assert!(empty.validate().is_err());
         assert_eq!(empty.method(), "put");
+    }
+
+    #[tokio::test]
+    async fn removal_rechecks_the_entity_then_sends_only_the_coordinate_delete() {
+        use axum::{
+            routing::{delete, post},
+            Json, Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let deleted = Arc::new(AtomicUsize::new(0));
+        let count = deleted.clone();
+        let app = Router::new()
+            .route(
+                "/world/gather.dcl.eth/scenes",
+                post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({"coordinates":["0,0"]}));
+                    Json(json!({"scenes":[{"entityId":"reviewed","parcels":["0,0","0,1"]}]}))
+                }),
+            )
+            .route(
+                "/world/gather.dcl.eth/scenes/0,0",
+                delete(move |headers: HeaderMap| {
+                    let count = count.clone();
+                    async move {
+                        catalyrst_crypto::signed_fetch::verify_signed_fetch(
+                            &headers,
+                            "delete",
+                            "/world/gather.dcl.eth/scenes/0,0",
+                            60,
+                        )
+                        .await
+                        .unwrap();
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok":true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let signer = crate::random_test_wallet();
+        let action = WorldAction::SceneRemove {
+            coordinate: "0,0".into(),
+            entity_id: "stale".into(),
+        };
+        assert!(action.send(&base, "gather.dcl.eth", vec![]).await.is_err());
+        assert_eq!(deleted.load(Ordering::SeqCst), 0);
+        let action = WorldAction::SceneRemove {
+            coordinate: "0,0".into(),
+            entity_id: "reviewed".into(),
+        };
+        let headers =
+            signed_headers(&signer, action.method(), &action.path("gather.dcl.eth")).unwrap();
+        assert_eq!(
+            action
+                .send(&base, "gather.dcl.eth", headers)
+                .await
+                .unwrap()
+                .0,
+            200
+        );
+        assert_eq!(deleted.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[test]
+    fn remove_scene_targets_only_the_reviewed_deployment() {
+        let action = WorldAction::SceneRemove {
+            coordinate: "0,0".into(),
+            entity_id: "reviewed".into(),
+        };
+        assert!(action.validate().is_ok());
+        assert_eq!(action.method(), "delete");
+        assert_eq!(
+            action.path("gather.dcl.eth"),
+            "/world/gather.dcl.eth/scenes/0,0"
+        );
+        let reviewed = json!({"scenes":[{"entityId":"reviewed","parcels":["0,0","0,1"]}]});
+        assert!(verify_scene_removal(&reviewed, "0,0", "reviewed").is_ok());
+        assert!(verify_scene_removal(&reviewed, "0,0", "changed").is_err());
+        assert!(verify_scene_removal(&reviewed, "45,81", "reviewed").is_err());
+        assert!(verify_scene_removal(&json!({"scenes":[]}), "0,0", "reviewed").is_err());
+        assert!(verify_scene_removal(
+            &json!({"scenes":[reviewed["scenes"][0], reviewed["scenes"][0]]}),
+            "0,0",
+            "reviewed"
+        )
+        .is_err());
+        assert!(WorldAction::SceneRemove {
+            coordinate: "../settings".into(),
+            entity_id: "reviewed".into()
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

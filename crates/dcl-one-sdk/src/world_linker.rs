@@ -80,6 +80,14 @@ async fn info(State(st): State<Arc<WorldLinkerState>>) -> Json<Value> {
     }
     let details = match &r.action {
         WorldAction::SettingsSet(update) => update.changed_fields(),
+        WorldAction::SceneRemove {
+            coordinate,
+            entity_id,
+        } => vec![
+            format!("remove scene at {coordinate}"),
+            format!("expected deployment={entity_id}"),
+            "Other scenes remain published. No replacement scene will be uploaded.".to_string(),
+        ],
         WorldAction::Permission {
             permission,
             address,
@@ -304,7 +312,7 @@ function show(cls,msg){const s=$("status");s.className=cls;s.style.display="bloc
 function render(){
   $("world").textContent=INFO.world;
   $("summary").textContent=INFO.summary;
-  $("details").innerHTML=INFO.details.map(d=>`<li>${d}</li>`).join("");
+  $("details").replaceChildren(...INFO.details.map(d=>{const li=document.createElement("li");li.textContent=d;return li;}));
   $("req").textContent=INFO.method+" "+INFO.path;
   $("cs").textContent=INFO.targetContent;
 }

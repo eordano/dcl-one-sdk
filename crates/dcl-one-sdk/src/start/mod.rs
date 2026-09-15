@@ -408,15 +408,16 @@ pub async fn start(opts: StartOptions) -> Result<()> {
 
     if let Some(lk) = &livekit {
         let server = match &livekit_server {
-            Some(running) => {
-                crate::livekit_server::describe(running, crate::livekit_embed::VERSION)
-            }
-            None => format!("LiveKit at {}", lk.describe_url()),
+            Some(running) => format!("0.0.0.0:{}", running.port),
+            None => lk.describe_url(),
         };
-        ux::note_arrow(format!(
-            "voice on: comms rooms live on the {server}; realm room {}, scene rooms scene:{}:<sceneId>",
-            lk.room, lk.room
-        ));
+        let rooms = workspace
+            .projects
+            .iter()
+            .map(|project| lk.scene_room(&scene_id_for(project, &state.machine)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ux::note_arrow(format!("Voice: comms on {server}, {rooms}"));
     }
 
     let _host_isolate = if !opts.no_host && crate::entrypoint::authoritative_multiplayer(&first) {
@@ -527,7 +528,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
 /// A CLI publish waiting on its wallet signature, served as the normal preview
 /// server: the printed URL is /deploy, which carries the signing panel, and the
 /// scene about to go up can be walked from the same origin meanwhile. Resolves
-/// when the signature lands or the wait runs out.
+/// after the browser publish completes and the user stops the preview.
 pub(crate) async fn serve_signing(
     dir: &Path,
     port: Option<u16>,
@@ -543,7 +544,7 @@ pub(crate) async fn serve_signing(
     state.allow_remote_deploy = allow_remote;
     let state = Arc::new(state);
     deploy_page::adopt_cli_signing(&state, signer);
-    let app = build_router(state, Arc::new(crate::comms::CommsState::default()));
+    let app = build_router(state.clone(), Arc::new(crate::comms::CommsState::default()));
     let url = format!("http://localhost:{port}/deploy");
     println!();
     println!("Sign the deployment with your wallet in a browser:");
@@ -563,8 +564,10 @@ pub(crate) async fn serve_signing(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     );
+    let serve = std::future::IntoFuture::into_future(serve);
+    tokio::pin!(serve);
     tokio::select! {
-        r = serve => {
+        r = &mut serve => {
             r.context("serving the signing page")?;
             Err(UserError::new(
                 "the signing page stopped before a signature arrived",
@@ -572,7 +575,20 @@ pub(crate) async fn serve_signing(
             )
             .into())
         }
-        outcome = crate::linker::await_outcome(rx, timeout, &url) => outcome,
+        outcome = crate::linker::await_outcome(rx, timeout, &url) => {
+            deploy_page::finish_cli_signing(&state, &outcome);
+            match &outcome {
+                Ok(message) => println!("{message}"),
+                Err(error) => eprintln!("{error}"),
+            }
+            ux::note(format!("preview remains available at {url} — press Ctrl+C to stop"));
+            tokio::select! {
+                result = &mut serve => { result.context("serving the preview")?; }
+                _ = shutdown_signal() => {}
+            }
+            outcome
+        },
+        _ = shutdown_signal() => Err(anyhow::anyhow!("publishing cancelled")),
     }
 }
 
@@ -626,6 +642,11 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
                 .route("/target/address", post(deploy_page::target_address))
                 .route("/target/connect", post(deploy_page::target_connect))
                 .route("/target/point", post(deploy_page::target_point))
+                .route("/target/entrance", post(deploy_page::target_entrance))
+                .route(
+                    "/target/scene/remove",
+                    post(deploy_page::target_remove_scene),
+                )
                 .route("/target/base", post(deploy_page::target_base))
                 .route("/deploy/preflight", post(deploy_page::preflight))
                 .route("/scene", get(scene_route))

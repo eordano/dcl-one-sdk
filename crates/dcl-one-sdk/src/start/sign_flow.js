@@ -139,7 +139,7 @@ const signInit = () => {
   };
 
   const rebuild = async () => {
-    status('info', 'That signing request expired on the server. Rebuilding it…');
+    status('info', 'The scene or signing request changed. Refreshing the review before asking for another signature…');
     let doc = null;
     try {
       const res = await fetch(location.href, { headers: { accept: 'text/html' } });
@@ -151,7 +151,8 @@ const signInit = () => {
       signInit();
       const again = $('sign-go');
       again.textContent = 'Sign again';
-      status('info', 'Rebuilt with a fresh entity id — press Sign again and approve the wallet prompt.');
+      status('info', 'The previous request was not published. Review the refreshed scene details, then press Sign again.');
+      pageToast('The signing request changed before publication. Review the refreshed details before signing again.', false, 15000);
       again.focus();
       return;
     }
@@ -173,6 +174,7 @@ const signInit = () => {
       status('info', 'Requesting wallet…');
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       const address = accounts[0];
+      if (typeof pageRememberWallet === 'function') await pageRememberWallet(address);
       try {
         const pf = await (
           await fetch(panel.dataset.api.replace(/\/sign$/, '/preflight'), {
@@ -187,14 +189,23 @@ const signInit = () => {
           return;
         }
       } catch {}
-      status('info', 'Signing with ' + address + '…');
+      // A rebuild while the wallet is opening can retire the prepared entity.
+      // Check before asking for a signature that the server would reject.
+      const review = await fetch(location.href, { headers: { accept: 'text/html' } });
+      if (!review.ok) throw new Error('Could not refresh the signing review. Try again.');
+      const current = parsePage(await review.text()).getElementById('sign-panel');
+      if (!current || current.dataset.entityId !== panel.dataset.entityId) {
+        await rebuild();
+        return;
+      }
+      status('info', (panel.dataset.deletePayload ? 'Signature 1 of 2: publish this scene with ' : 'Sign to publish this scene with ') + address + '…');
       const signature = await window.ethereum.request({
         method: 'personal_sign',
         params: [panel.dataset.entityId, address],
       });
       let deleteSignature = null;
       if (panel.dataset.deletePayload) {
-        status('info', 'Signing the scene-removal authorization…');
+        status('info', 'Signature 2 of 2: authorize removal of the World’s existing scenes. The first signature succeeded.');
         deleteSignature = await window.ethereum.request({
           method: 'personal_sign',
           params: [panel.dataset.deletePayload, address],
@@ -223,11 +234,13 @@ const signInit = () => {
         await rebuild();
       } else {
         status('err', '✗ ' + r.error);
+        pageToast('Publication failed: ' + r.error, true, 15000);
         if (!r.fatal) go.disabled = false;
       }
     } catch (e) {
       stopPolling();
       status('err', '✗ ' + (e && e.message ? e.message : e));
+      pageToast('Signing or publication stopped: ' + (e && e.message ? e.message : e), true, 15000);
       go.disabled = false;
     } finally {
       stopPolling();

@@ -20,6 +20,27 @@ const parsePage = (html) => {
   for (const n of doc.querySelectorAll('noscript')) n.remove();
   return doc;
 };
+const pageSyncHeader = (doc) => {
+  for (const selector of ['.bar__acct', '#deploy-badge']) {
+    const current = document.querySelector(selector);
+    const next = doc.querySelector(selector);
+    if (current && next && current.outerHTML !== next.outerHTML) current.replaceWith(next);
+  }
+};
+const pageRememberWallet = async (address) => {
+  if (!/^0x[0-9a-f]{40}$/i.test(address || '')) throw new Error('The wallet returned no account');
+  const form = document.querySelector('.bar__acct form');
+  if (!form) return;
+  const token = form.querySelector('input[name="token"]').value;
+  const action = form.getAttribute('action').replace(/\/target\/connect$/, '/target/address');
+  const res = await fetch(action, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token, address }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  pageSyncHeader(parsePage(await res.text()));
+};
 (() => {
   const wallets = document.querySelectorAll('[data-wallet]');
   if (!wallets.length) return;
@@ -33,21 +54,16 @@ const parsePage = (html) => {
   const connect = async (wallet) => {
     try {
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      const form = wallet.nextElementSibling;
-      const token = form.querySelector('input[name="token"]').value;
-      const action = form.getAttribute('action').replace(/\/target\/connect$/, '/target/address');
-      const res = await fetch(action, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ token, address: accounts[0] }),
-      });
-      if (res.ok) location.reload();
-      else pageToast(await res.text(), true);
+      await pageRememberWallet(accounts[0]);
+      if (!document.getElementById('run-status')) location.reload();
     } catch {
       pageToast('The wallet did not answer', true);
     }
   };
-  for (const wallet of wallets) wallet.addEventListener('click', () => connect(wallet));
+  document.addEventListener('click', (event) => {
+    const wallet = event.target.closest('[data-wallet]');
+    if (wallet && !wallet.disabled) connect(wallet);
+  });
 })();
 
 (() => {

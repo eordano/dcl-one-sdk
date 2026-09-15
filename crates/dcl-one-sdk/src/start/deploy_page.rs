@@ -13,7 +13,7 @@
 //! it is.
 
 use super::chrome::{document, esc, kv};
-use super::deploy_rights::{self, Holdings, Rights, Verdict};
+use super::deploy_rights::{self, Rights, Verdict};
 use super::deploy_status::{
     self, ago, cache_get, cache_put, cached_status, lock, plural, resolve_dest, Dest, LiveStatus,
     Remote, RemoteScene, RemoteState,
@@ -317,6 +317,14 @@ pub(super) fn adopt_cli_signing(st: &AppState, signer: Arc<crate::linker::Linker
     });
 }
 
+pub(super) fn finish_cli_signing(st: &AppState, outcome: &anyhow::Result<String>) {
+    let state = match outcome {
+        Ok(message) => RunState::Done(message.clone()),
+        Err(error) => RunState::Failed(format!("{error:#}")),
+    };
+    finish(st, 0, state);
+}
+
 /// The signing panel when a publish is waiting on a wallet, minted fresh per
 /// render: the id drawn is the id the wallet signs.
 pub(super) fn pending_sign_panel(st: &AppState, prefix: &str) -> Option<String> {
@@ -365,6 +373,7 @@ pub(super) fn token(st: &AppState) -> &str {
 }
 
 struct Run {
+    replace_world: bool,
     /// Which claim this is; the completion path presents it before writing a
     /// terminal state, so a slow deploy cannot stamp a run that replaced it.
     id: u64,
@@ -386,6 +395,7 @@ struct Run {
 impl Run {
     fn new(id: u64, target: String, auto: bool, print: String) -> Self {
         Run {
+            replace_world: false,
             id,
             started: Instant::now(),
             target,
@@ -423,6 +433,10 @@ enum RunState {
 
 #[derive(serde::Deserialize)]
 pub(super) struct DeployForm {
+    #[serde(default)]
+    world_revision: String,
+    #[serde(default)]
+    replace_world: String,
     token: String,
     #[serde(default)]
     fingerprint: String,
@@ -557,8 +571,36 @@ pub(super) async fn start(
         return back;
     };
     let dest = scene_dest(&project);
-    let Some(id) = claim(&st, dest.headline.clone(), false, form.fingerprint.clone()) else {
-        return back;
+    let replacement = !form.replace_world.is_empty();
+    if replacement && dest.world.as_deref() != Some(form.replace_world.as_str()) {
+        return reply(
+            StatusCode::CONFLICT,
+            "The selected World changed. Review the target again.",
+        );
+    }
+    if replacement {
+        let (remote, _) = deploy_status::fetch_remote(&dest).await;
+        if replacement_revision(&remote).as_deref() != Some(form.world_revision.as_str()) {
+            return reply(
+                StatusCode::CONFLICT,
+                "The World's scenes changed or could not be checked. Reload Target and review the removal list again.",
+            );
+        }
+    }
+    let claimed = if replacement {
+        claim_replacement(&st, dest.headline.clone(), form.fingerprint.clone())
+    } else {
+        claim(&st, dest.headline.clone(), false, form.fingerprint.clone())
+    };
+    let Some(id) = claimed else {
+        return if replacement {
+            reply(
+                StatusCode::CONFLICT,
+                "A publication is already in progress. Wait for its result before replacing the World.",
+            )
+        } else {
+            back
+        };
     };
     let root = project.root.clone();
     let owned = project.clone();
@@ -576,6 +618,9 @@ pub(super) async fn start(
     if form.fingerprint.is_empty() || fingerprint(&root, &fresh) != form.fingerprint {
         finish(&st, id, RunState::Stale(moved_since(&root, &fresh)));
         return back;
+    }
+    if let Some(run) = runs(&st).as_mut().filter(|run| run.id == id) {
+        run.replace_world = replacement;
     }
     launch(st, root, id);
     back
@@ -603,13 +648,20 @@ fn reanchor_preview(st: &AppState) -> Option<String> {
 /// Everything past the gates, shared by the button and the page's own
 /// auto-start. A live delegated identity signs the deploy itself; otherwise
 /// the linker hands its signing state to THIS server, and the signing URL is
-/// set on the run only once the signer is live. `multi_scene: true` is
-/// load-bearing (false silently deletes the world's other scenes), and the
+/// set on the run only once the signer is live. Additive publishing is the
+/// default; only an explicit replacement POST can remove other scenes. The
 /// inner JoinHandle is awaited so a deploy panic still reaches a terminal
 /// state.
 fn launch(st: Arc<AppState>, root: PathBuf, id: u64) {
     let automatic = runs(&st).as_ref().is_some_and(|r| r.id == id && r.auto);
-    let identity = if automatic { None } else { live_identity(&st) };
+    let replace_world = runs(&st)
+        .as_ref()
+        .is_some_and(|r| r.id == id && r.replace_world);
+    let identity = if automatic || replace_world {
+        None
+    } else {
+        live_identity(&st)
+    };
     let host_signer = identity.is_none().then(|| {
         let register_st = st.clone();
         crate::linker::HostSigner {
@@ -638,7 +690,7 @@ fn launch(st: Arc<AppState>, root: PathBuf, id: u64) {
         dry_run: st.deploy_dry_run,
         timestamp: None,
         entity_out: None,
-        multi_scene: true,
+        multi_scene: !replace_world,
         check_permissions: false,
         yes: true,
         no_browser: true,
@@ -795,6 +847,28 @@ fn claim(st: &AppState, target: String, auto: bool, print: String) -> Option<u64
     Some(id)
 }
 
+/// An unsigned automatic review can be superseded by an explicit replacement.
+/// Once its wallet answered, the existing upload must finish first.
+fn claim_replacement(st: &AppState, target: String, print: String) -> Option<u64> {
+    let mut slot = runs(st);
+    let mut signer = signer_slot(st);
+    if let Some(run) = slot
+        .as_ref()
+        .filter(|r| matches!(r.state, RunState::Running))
+    {
+        if !run.auto || signer.as_ref().is_some_and(|s| signer_answered(s)) {
+            return None;
+        }
+    }
+    *signer = None;
+    let id = next_run_id();
+    *slot = Some(Run {
+        replace_world: true,
+        ..Run::new(id, target, false, print)
+    });
+    Some(id)
+}
+
 /// A pending run whose payload moved is a signature waiting to be wrong.
 /// This replaces such a run — new id, current fingerprint, signer slot
 /// emptied — but only where a re-mint is safe: the old build finished (its
@@ -803,14 +877,14 @@ fn claim(st: &AppState, target: String, auto: bool, print: String) -> Option<u64
 /// fingerprint). The provenance survives: an auto run re-mints auto.
 fn drift_reclaim(st: &AppState, target: String, print: &str) -> Option<u64> {
     let mut slot = runs(st);
-    let (auto, remints) = match slot.as_ref() {
+    let (auto, remints, replace_world) = match slot.as_ref() {
         Some(r)
             if matches!(r.state, RunState::Running)
                 && r.signing.is_some()
                 && !r.print.is_empty()
                 && r.print != print =>
         {
-            (r.auto, r.remints)
+            (r.auto, r.remints, r.replace_world)
         }
         _ => return None,
     };
@@ -836,6 +910,7 @@ fn drift_reclaim(st: &AppState, target: String, print: &str) -> Option<u64> {
     let id = next_run_id();
     *slot = Some(Run {
         remints: remints + 1,
+        replace_world,
         ..Run::new(id, target, auto, print.to_string())
     });
     Some(id)
@@ -1182,6 +1257,8 @@ pub(super) async fn target_point(
 
 #[derive(serde::Deserialize)]
 pub(super) struct BaseForm {
+    #[serde(default)]
+    destination: String,
     token: String,
     #[serde(default)]
     base: String,
@@ -1196,7 +1273,10 @@ fn in_genesis(p: (i64, i64)) -> bool {
 
 /// Translates every parcel by the same delta so the base lands on `new_base`;
 /// spawn points ride along because they are metres from the base.
-fn translate_footprint(scene: &mut serde_json::Value, new_base: (i64, i64)) -> Result<(), String> {
+pub(super) fn translate_footprint(
+    scene: &mut serde_json::Value,
+    new_base: (i64, i64),
+) -> Result<(), String> {
     let obj = scene.as_object_mut().expect("edit_scene_json checked");
     let sc = obj
         .get_mut("scene")
@@ -1263,6 +1343,9 @@ pub(super) async fn target_base(
     ) {
         return refused;
     }
+    if !matches!(form.destination.as_str(), "" | "land") {
+        return reply(StatusCode::UNPROCESSABLE_ENTITY, "Unknown destination");
+    }
     let Some(project) = st.first_project() else {
         return reply(StatusCode::NOT_FOUND, "no scene loaded");
     };
@@ -1282,7 +1365,16 @@ pub(super) async fn target_base(
         &st,
         &forwarded_prefix(&headers),
         project.root.clone(),
-        move |scene| translate_footprint(scene, new_base),
+        move |scene| {
+            translate_footprint(scene, new_base)?;
+            if form.destination == "land" {
+                scene
+                    .as_object_mut()
+                    .expect("validated scene")
+                    .remove("worldConfiguration");
+            }
+            Ok(())
+        },
     )
     .await
 }
@@ -1580,23 +1672,10 @@ fn deploy_document(st: &AppState, title: &str, prefix: &str, active: &str, body:
     ))
 }
 
-/// Keep the design fonts self-contained, including behind a preview tunnel.
+/// Add only Target's layout to the shared page styles.
 fn target_css() -> &'static str {
     static CSS: OnceLock<String> = OnceLock::new();
-    CSS.get_or_init(|| {
-        use base64::Engine;
-        let mut css = PAGE_CSS.to_string();
-        for (weight, bytes) in [
-            (400, include_bytes!("fonts/Inter-UI-Regular.otf").as_slice()),
-            (600, include_bytes!("fonts/Inter-UI-SemiBold.otf").as_slice()),
-            (700, include_bytes!("fonts/Inter-UI-Bold.otf").as_slice()),
-        ] {
-            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-            css.push_str(&format!("@font-face{{font-family:'Inter UI';src:url(data:font/otf;base64,{data}) format('opentype');font-weight:{weight};font-display:swap;}}"));
-        }
-        css.push_str(include_str!("target.css"));
-        css
-    })
+    CSS.get_or_init(|| format!("{PAGE_CSS}{}", include_str!("target.css")))
 }
 
 /// The error branch both pages share, held to the same rule as the rest:
@@ -1918,24 +1997,48 @@ fn server_panel(dest: &Dest, status: &LiveStatus) -> String {
 /// The right column: the payload totals and, when the server answered, how
 /// much of it transfers at all.
 fn upload_panel(p: &deploy::DeployPreview, status: &LiveStatus) -> String {
-    let (size_num, size_unit) = split_size(p.total_bytes);
-    let datum = format!(
-        r#"<div class="datum"><div class="datum__v"><span class="datum__num">{files}</span><span
-          class="datum__unit">file{s}</span><span class="datum__num">{size_num}</span><span
-          class="datum__unit">{size_unit}</span></div></div>"#,
-        files = p.files.len(),
-        s = plural(p.files.len()),
-    );
-    let reuse_line = match &status.reuse {
-        Some(r) => format!(r#"<span class="note">{}.</span>"#, esc(&r.sentence())),
-        None => String::new(),
+    let datum = |files: String, bytes: String, unit: String| {
+        format!(
+            r#"<div class="datum"><div class="datum__v"><span class="datum__num">{files}</span><span class="datum__unit">files</span><span class="datum__num">{bytes}</span><span class="datum__unit">{unit}</span></div></div>"#
+        )
     };
-    let meter = status.reuse.as_ref().map(|r| {
-        let total = r.reused_files + r.upload_files;
-        let percent = (r.reused_files * 100).checked_div(total).unwrap_or(0);
-        format!(r#"<div class="tgt__reuse" role="meter" aria-label="Files already on the server" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{percent}"><span style="width:{percent}%"></span></div>"#)
-    }).unwrap_or_default();
-    format!("{datum}{meter}{reuse_line}")
+    let Some(r) = &status.reuse else {
+        let (bytes, unit) = split_size(p.total_bytes);
+        return format!(
+            r#"{}<span class="note">Checking which files need uploading…</span>"#,
+            datum(p.files.len().to_string(), bytes, unit)
+        );
+    };
+    let total_files = r.upload_files + r.reused_files;
+    let total_bytes = r.upload_bytes + r.reused_bytes;
+    let (total_size, unit) = split_size(total_bytes);
+    let upload_size = match unit.as_str() {
+        "MB" => format!("{:.1}", r.upload_bytes as f64 / 1_000_000.0),
+        "KB" => format!("{:.1}", r.upload_bytes as f64 / 1_000.0),
+        _ => r.upload_bytes.to_string(),
+    };
+    let meter = |label: &str, bytes: u64| {
+        let percent = if total_bytes == 0 {
+            0.0
+        } else {
+            bytes as f64 / total_bytes as f64 * 100.0
+        };
+        format!(
+            r#"<div class="tgt__reuse" role="meter" aria-label="{label}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{percent:.1}"><span style="width:{percent:.1}%"></span></div>"#
+        )
+    };
+    let upload = datum(
+        format!("{}/{total_files}", r.upload_files),
+        format!("{upload_size}/{total_size}"),
+        unit,
+    );
+    let (stored_size, stored_unit) = split_size(r.reused_bytes);
+    let stored = datum(r.reused_files.to_string(), stored_size, stored_unit);
+    format!(
+        r#"{upload}{}<span class="knob__k">On server already</span>{stored}{}"#,
+        meter("Upload bytes", r.upload_bytes),
+        meter("Bytes already on server", r.reused_bytes)
+    )
 }
 
 /// The card's footer: the primary button and the terminal line — or, for a
@@ -2222,6 +2325,7 @@ fn account_row(rights: Option<&Rights>, connect: Option<&Connect>) -> String {
 /// The shared bar behaviour plus following a pending sign-in by reloading.
 const TARGET_SCRIPT: &str = concat!(
     include_str!("page_common.js"),
+    include_str!("target.js"),
     r#"(() => {
   if (document.getElementById('connect-pending')) setTimeout(() => location.reload(), 3000);
 })();"#
@@ -2239,12 +2343,10 @@ fn point_form(prefix: &str, tok: &str, world: &str, label: &str) -> String {
     )
 }
 
-/// The base parcel as a chip with "Move scene" beside it; opening it reveals
-/// the one-row form that moves the scene's footprint. Land only — a world
-/// positions its scenes internally.
+/// Direct coordinate entry moves the whole footprint without a picker mode.
 fn base_form(prefix: &str, tok: &str, dest: &Dest) -> String {
     format!(
-        r#"<div class="tgt__base-row"><span class="knob__k">Base parcel</span><details class="tgt__move"><summary><span class="tgt__coord tgt__coord--base">{base_esc}</span><span class="deep__copy">Move scene</span></summary><form class="tgt__base" method="post" action="{prefix_esc}/target/base"><input type="hidden" name="token" value="{tok_esc}"><input name="base" value="{base_esc}" aria-label="base parcel x,y" spellcheck="false" autocomplete="off"><button class="deep__copy" type="submit">Set base parcel</button><span class="jn__hint">Shifts this project's entire footprint. Publish to apply the new location.</span></form></details></div>"#,
+        r#"<div class="tgt__base-row"><span class="knob__k">Base parcel</span><form class="tgt__base" method="post" action="{prefix_esc}/target/base"><input type="hidden" name="token" value="{tok_esc}"><input name="base" value="{base_esc}" aria-label="base parcel x,y" spellcheck="false" autocomplete="off"><button class="deep__copy" type="submit">Move</button></form></div>"#,
         prefix_esc = esc(prefix),
         tok_esc = esc(tok),
         base_esc = esc(&dest.base_pointer),
@@ -2332,21 +2434,19 @@ fn your_worlds(prefix: &str, tok: &str, dest: &Dest, rights: Option<&Rights>) ->
                 plural(empty.len())
             )
         };
-        let nothing = if populated.is_empty() && empty.is_empty() {
-            r#"<span class="note">No worlds to show.</span>"#
-        } else {
-            ""
-        };
+        if populated.is_empty() && empty.is_empty() {
+            return String::new();
+        }
         col(
             if owned {
                 "Your worlds"
             } else {
                 "Shared with you"
             },
-            &format!(r#"<div class="wl">{rows}</div>{folded}{nothing}"#),
+            &format!(r#"<div class="wl">{rows}</div>{folded}"#),
         )
     };
-    format!("{}{}{}{note}", group(true), group(false), note_span("A collaborator may publish to all parcels or only assigned coordinates. Permission to visit a World does not grant permission to publish."))
+    format!("{}{}{note}", group(true), group(false))
 }
 
 fn span(vs: impl Iterator<Item = i64>) -> (i64, i64) {
@@ -2529,57 +2629,7 @@ fn land_rights_col(prefix: &str, tok: &str, rights: Option<&Rights>) -> String {
             format!(r#"<div class="kvs">{rows}</div>{unchecked}{note}"#)
         }
     };
-    let holdings = match r.holdings.as_ref() {
-        Some(h) => format!(
-            r#"<span class="note">{} holds {} parcel{}, {} estate{} and operates {} more.</span>{}"#,
-            esc(&short_addr(&r.address)),
-            h.parcels,
-            plural(h.parcels as usize),
-            h.estates,
-            plural(h.estates as usize),
-            h.operated,
-            permitted_parcels(h)
-        ),
-        None => String::new(),
-    };
-    col("Your rights here", &format!("{body}{holdings}"))
-}
-
-const PARCELS_LISTED: usize = 24;
-
-/// Owned then operated coordinates, each capped with the remainder counted.
-fn permitted_parcels(h: &Holdings) -> String {
-    let spell = |coords: &[(i64, i64)]| -> String {
-        let named: Vec<String> = coords
-            .iter()
-            .take(PARCELS_LISTED)
-            .map(|(x, y)| format!("{x},{y}"))
-            .collect();
-        let rest = coords.len().saturating_sub(PARCELS_LISTED);
-        match rest {
-            0 => named.join(" \u{b7} "),
-            n => format!("{} and {n} more", named.join(" \u{b7} ")),
-        }
-    };
-    if h.owned.is_empty() && h.operated_coords.is_empty() {
-        return String::new();
-    }
-    let mut rows = String::new();
-    if !h.owned.is_empty() {
-        rows.push_str(&kv(
-            "Owned",
-            format!("<span>{}</span>", esc(&spell(&h.owned))),
-        ));
-    }
-    if !h.operated_coords.is_empty() {
-        rows.push_str(&kv(
-            "Operated",
-            format!("<span>{}</span>", esc(&spell(&h.operated_coords))),
-        ));
-    }
-    format!(
-        r#"<span class="knob__k">Parcels you may publish to</span><div class="kvs">{rows}</div>"#
-    )
+    col("Your rights here", &body)
 }
 
 /// Two destination views, matching the publishing docs. Multi-scene details
@@ -2595,6 +2645,7 @@ fn target_card(
     rights: Option<&Rights>,
     connect: Option<&Connect>,
     history: &[PastRun],
+    print: &str,
 ) -> String {
     let world = dest.world.as_deref();
     let tab = |value: &str, label: &str, checked: bool| {
@@ -2610,24 +2661,26 @@ fn target_card(
             "Deploy"
         )
     };
-    let current = match world {
-        Some(w) => format!(
-            "Selected destination: World {w} · Base {}",
-            dest.base_pointer
-        ),
-        None => format!("Selected destination: LAND · Base {}", dest.base_pointer),
-    };
     let server = dest
         .server_line
         .split(" — ")
         .next()
         .unwrap_or(&dest.server_line);
     let header = |overline: &str, action: &str| {
+        let heading = match overline {
+            "Publish to a World" => world.unwrap_or("Choose a World"),
+            "Publish to LAND" => "LAND (Genesis City)",
+            _ => overline,
+        };
+        let selection_label = if overline == "Publish to a World" {
+            r#"<span class="knob__k">Select Multiscene World</span>"#
+        } else {
+            ""
+        };
         format!(
-            r#"<div class="tgt__head"><div class="tgt__title"><span class="knob__k">{}</span><h1>{}</h1><span class="tgt__current"><i></i>{}</span><span class="note">Publishing {}</span></div>{action}</div>"#,
-            esc(overline),
+            r#"<div class="tgt__head"><div class="tgt__title">{selection_label}<h1 class="page__title">{}</h1><span class="tgt__current">Scene: {}</span><span class="note">Publishing {}</span></div>{action}</div>"#,
+            esc(heading),
             esc(title),
-            esc(&current),
             esc(server)
         )
     };
@@ -2685,23 +2738,18 @@ fn target_card(
     } else {
         deploy_action.clone()
     };
-    let land_pane = if let Some(world) = world {
+    let land_pane = if world.is_some() {
         format!(
-            r#"{}<p class="tgt__inactive"><b aria-hidden="true">·</b><span>The deploy target is World {}. Select LAND to deploy to Genesis City with this scene's parcel coordinates. You need deployment permission on every parcel.</span></p><div class="tgt__map-panel tgt__map-panel--solo">{}</div>"#,
+            r#"{}<p class="tgt__inactive">Use this scene's parcel coordinates in Genesis City.</p>"#,
             header("Publish to LAND", &land_action),
-            esc(world),
-            super::land_picker::land_picker(prefix, tok, dest, rights, status)
         )
     } else {
         format!(
-            r#"{}{}<div class="tgt__land">{summary}<div class="tgt__map-panel">{}{}</div></div>"#,
+            r#"{}{}<div class="tgt__land">{summary}<div class="tgt__map-panel">{}<details class="tgt__rights-detail"><summary>Publishing permissions</summary>{}</details></div></div>"#,
             header("Publish to LAND", &land_action),
             verdict,
             target_land_map(prefix, tok, dest, rights, status),
-            format_args!(
-                r#"<details class="tgt__rights-detail"><summary>Parcel rights and holdings</summary>{}</details>"#,
-                land_rights_col(prefix, tok, rights)
-            )
+            land_rights_col(prefix, tok, rights),
         )
     };
     let world_action = if world.is_some() {
@@ -2709,26 +2757,9 @@ fn target_card(
     } else {
         note_span("Select a World below")
     };
-    let record_action = if world.is_some() || !p.nameless_world {
-        deploy_action.clone()
-    } else {
-        note_span("Select a World or LAND first")
-    };
-    let multi_pane = match world {
-        Some(_) => format!(
-            r#"{}<div class="tgt__advanced-body"><p class="note">A World can contain multiple scenes. Publishing from this preview preserves scenes that do not overlap this project's parcels. World settings and collaborator permissions are managed by the World owner.</p><p class="note">These coordinates are inside the selected World; they are not Genesis City LAND. <a href="{}/scene">Edit this scene's parcel layout</a>.</p>{}<a href="https://docs.decentraland.org/creator/scene-editor/publish/publish-scene#multi-scene-worlds">About Multi-Scene Worlds</a></div>"#,
-            header("Multiscene world", &record_action),
-            esc(prefix),
-            multiscene_pane(dest, status)
-        ),
-        None => format!(
-            r#"{}<p class="tgt__inactive"><b aria-hidden="true">·</b><span>The deploy target is Genesis City LAND. Multiscene applies to Worlds: select a World first.</span></p>"#,
-            header("Multiscene world", &record_action)
-        ),
-    };
     let history_pane = format!(
         "{}{}",
-        header("Deployment history", &record_action),
+        header("Deployment history", ""),
         history_rows_pane(history)
     );
     let help_pane = format!(
@@ -2737,7 +2768,7 @@ fn target_card(
         col("Guides", &help_rows())
     );
     let world_pane = format!(
-        r#"{}{}{}<div id="target-worlds" class="tgt__worlds">{}</div>"#,
+        r#"{}{}<div id="target-worlds" class="tgt__worlds">{}</div>{}"#,
         header("Publish to a World", &world_action),
         if world.is_some() {
             verdict.as_str()
@@ -2745,17 +2776,31 @@ fn target_card(
             ""
         },
         if world.is_some() {
-            format!(r#"<div class="tgt__world-summary">{summary}</div>"#)
+            format!(
+                r#"<details><summary>Change World</summary>{}</details>"#,
+                your_worlds(prefix, tok, dest, rights)
+            )
+        } else {
+            your_worlds(prefix, tok, dest, rights)
+        },
+        if world.is_some() {
+            format!(
+                r#"{}<div class="tgt__management">{}{}</div>"#,
+                multiscene_pane(dest, status, prefix, tok),
+                col("Upload", &upload_panel(p, status)),
+                col(
+                    "Placement & entrance",
+                    &world_actions(prefix, tok, dest, status, print)
+                )
+            )
         } else {
             String::new()
-        },
-        your_worlds(prefix, tok, dest, rights)
+        }
     );
     let tabs = format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}",
         tab("world", "World", world.is_some()),
         tab("land", "LAND (Genesis City)", world.is_none()),
-        tab("multi", "Multiscene world", false),
         tab("history", "History", false),
         tab("help", "Help", false)
     );
@@ -2765,7 +2810,6 @@ fn target_card(
       <fieldset class="knob knob--tabs"><legend class="knob__k u-sr-only">Browse publishing destinations</legend><div class="jn2__tabs">{tabs}</div></fieldset>
       <div class="tgt__pane tgt__pane--world">{world_pane}</div>
       <div class="tgt__pane tgt__pane--land">{land_pane}</div>
-      <div class="tgt__pane tgt__pane--multi">{multi_pane}</div>
       <div class="tgt__pane tgt__pane--history">{history_pane}</div>
       <div class="tgt__pane tgt__pane--help">{help_pane}</div>
     </div>"#,
@@ -2796,9 +2840,9 @@ fn target_land_map(
         .collect();
     let map = land_map(&declared, base, owned, &missing);
     format!(
-        "{map}{}{}",
-        base_form(prefix, tok, dest),
-        super::land_picker::land_picker(prefix, tok, dest, rights, status)
+        "{}{map}{}",
+        super::land_picker::land_picker(prefix, tok, dest, rights, status),
+        base_form(prefix, tok, dest)
     )
 }
 
@@ -2919,7 +2963,51 @@ fn after_map(remote: &RemoteState, ours: &[(i64, i64)], base: (i64, i64)) -> Str
     let xs = span(all.iter().map(|p| p.0));
     let ys = span(all.iter().map(|p| p.1));
     if xs.1 - xs.0 + 1 > AFTER_MAP_SPAN || ys.1 - ys.0 + 1 > AFTER_MAP_SPAN {
-        return String::new();
+        let pad = 6;
+        let width = xs.1 - xs.0 + 1 + pad * 2;
+        let height = ys.1 - ys.0 + 1 + pad * 2;
+        let font = width.max(height) as f64 * 0.025;
+        let mut cells = String::new();
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        for (x, y) in sorted {
+            let (class, label) = if mine.contains(&(x, y)) {
+                ("new", "This publish")
+            } else if kept.contains(&(x, y)) {
+                ("kept", "Kept")
+            } else {
+                ("old", "Replaced")
+            };
+            cells.push_str(&format!(r#"<rect class="tgt__plot-{class}" x="{x}" y="{}" width="1" height="1"><title>{label}: {x},{y}</title></rect>"#, -y-1));
+        }
+        let overview = format!("{} {} {width} {height}", xs.0 - pad, -ys.1 - 1 - pad);
+        let mut controls = format!(
+            r#"<button type="button" class="deep__copy" data-map-viewbox="{overview}" aria-pressed="true">Overview</button>"#
+        );
+        let mut labels = String::new();
+        for coords in remote
+            .current
+            .iter()
+            .map(|s| &s.coords)
+            .chain(remote.others.iter().map(|s| &s.coords))
+        {
+            if coords.is_empty() {
+                continue;
+            }
+            let (x, y) = coords[0];
+            let (x0, x1) = span(coords.iter().map(|p| p.0));
+            let (y0, y1) = span(coords.iter().map(|p| p.1));
+            controls.push_str(&format!(r#"<button type="button" class="deep__copy" data-map-viewbox="{} {} {} {}" aria-pressed="false">{x},{y}</button>"#,x0-2,-y1-3,x1-x0+5,y1-y0+5));
+            labels.push_str(&format!(r##"<a href="#world-scene-{x}-{y}"><text x="{x}" y="{}" font-size="{font}">{x},{y}</text></a>"##, -y as f64+font));
+        }
+        return format!(
+            r#"<div class="tgt__map-controls" aria-label="Focus world map">{controls}</div><svg class="tgt__world-plot" viewBox="{} {} {width} {height}" role="img" aria-label="World scene locations after publishing"><rect class="tgt__plot-bg" x="{}" y="{}" width="{width}" height="{height}"/>{cells}{labels}</svg><div class="tgt__map-key"><span><i class="lay__swatch lay__swatch--in"></i>This publish</span><span><i class="lay__swatch dep__cell--kept"></i>Kept</span></div>"#,
+            xs.0 - pad,
+            -ys.1 - 1 - pad,
+            xs.0 - pad,
+            -ys.1 - 1 - pad
+        );
     }
     parcel_grid(
         &[
@@ -2948,21 +3036,31 @@ fn after_map(remote: &RemoteState, ours: &[(i64, i64)], base: (i64, i64)) -> Str
     )
 }
 
-fn scene_row(swatch: &str, title: &str, parcels: usize, size: Option<u64>, fate: &str) -> String {
-    let size = size
-        .map(|b| format!(" \u{b7} {}", deploy::human_size(b)))
-        .unwrap_or_default();
-    format!(
-        "<div class=\"lay__srow\"><i class=\"lay__swatch {swatch}\"></i><span class=\"lay__srow-t\"><span class=\"lay__srow-n\">{}</span><code class=\"lay__srow-c\">{parcels} parcel{}{size} \u{b7} {fate}</code></span></div>",
-        esc(title),
-        plural(parcels),
-    )
-}
-
 /// The multiscene pane: what already lives in this world beside the upload,
 /// the after-map, and what the world's scenes hold in bytes — said only from
 /// sizes the server actually reported.
-fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
+fn world_scene_location(world: &str, coords: &[(i64, i64)], spawn: Option<&str>) -> String {
+    let Some(&(x, y)) = coords.first() else {
+        return note_span("Parcel coordinates unavailable");
+    };
+    let (x0, x1) = span(coords.iter().map(|p| p.0));
+    let (y0, y1) = span(coords.iter().map(|p| p.1));
+    let entrance = spawn
+        .and_then(catalyrst_auth_chain::pointer::parse_pointer)
+        .is_some_and(|p| coords.contains(&p));
+    let points = coords
+        .iter()
+        .map(|(x, y)| format!("{x},{y}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    format!(
+        r#"<details class="tgt__scene-parcels" data-parcels="{points}"><summary>Parcels {x0},{y0} → {x1},{y1}<span data-entrance-marker hidden>{}</span></summary><p class="note">{points}</p></details><a class="tgt__visit" href="{}">Visit scene</a>"#,
+        if entrance { " · World entrance" } else { "" },
+        esc(&deploy::play_url(Some(world), &format!("{x},{y}")))
+    )
+}
+
+fn multiscene_pane(dest: &Dest, status: &LiveStatus, prefix: &str, tok: &str) -> String {
     let Some(w) = dest.world.as_deref() else {
         return empty_col(
             "Worlds only",
@@ -2971,67 +3069,462 @@ fn multiscene_pane(dest: &Dest, status: &LiveStatus) -> String {
     };
     let state = match &status.remote {
         Remote::Known(state) => state,
-        Remote::Empty => return empty_col("No scenes published", "The selected World has no published scenes yet."),
-        Remote::Unknown(why) | Remote::Unreachable(why) => return empty_col(
-            "World layout unavailable", &format!("Could not check this World's published scenes: {}. Review the layout before publishing.", esc(why))),
+        Remote::Empty => {
+            return empty_col(
+                "No scenes published",
+                "The selected World has no published scenes yet.",
+            );
+        }
+        Remote::Unknown(why) | Remote::Unreachable(why) => {
+            return empty_col(
+                "World layout unavailable",
+                &format!(
+                    "Could not check this World's published scenes: {}. Review the layout before publishing.",
+                    esc(why)
+                ),
+            );
+        }
     };
     let (ours, base) = footprint(dest);
-    let was = |title: &str, parcels, size| {
-        scene_row(
-            "dep__cell--was",
-            title,
-            parcels,
-            size,
-            "replaced by this publish",
+    let revision = replacement_revision(&status.remote).unwrap_or_default();
+    let card = |title: &str, coords: &[(i64, i64)], parcels: usize, size: Option<u64>| {
+        let overlap = scene_overlaps(coords, &ours);
+        let fate = if overlap {
+            "Updated by this publish"
+        } else {
+            "Kept"
+        };
+        let size = size
+            .map(deploy::human_size)
+            .unwrap_or_else(|| "Size unavailable".into());
+        let (x, y) = coords.first().copied().unwrap_or((0, 0));
+        let coordinate = format!("{x},{y}");
+        let entrance = status
+            .world_spawn
+            .as_deref()
+            .and_then(catalyrst_auth_chain::pointer::parse_pointer)
+            .is_some_and(|p| coords.contains(&p));
+        let entrance_badge = if entrance {
+            r#"<span class="tgt__badge">World entrance</span>"#
+        } else {
+            ""
+        };
+        let entrance_action = if !entrance && coords.contains(&base) {
+            world_entrance_form(prefix, tok, w, &dest.base_pointer)
+        } else {
+            String::new()
+        };
+        let remove = if coords.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<details class="tgt__remove"><summary>Remove scene</summary><p>Remove this {parcels}-parcel scene at {coordinate}? Other scenes will stay.</p><form class="tgt__scene-remove" method="post" action="{}/target/scene/remove"><input type="hidden" name="token" value="{}"><input type="hidden" name="world" value="{}"><input type="hidden" name="coordinate" value="{coordinate}"><input type="hidden" name="world_revision" value="{revision}"><button type="submit" class="deep__copy">Remove scene at {coordinate}</button><p class="note" role="status"></p></form></details>"#,
+                esc(prefix),
+                esc(tok),
+                esc(w)
+            )
+        };
+        format!(
+            r#"<article class="tgt__scene-card" id="world-scene-{x}-{y}"><div class="tgt__scene-heading"><strong>{coordinate}</strong>{entrance_badge}<span class="tgt__scene-fate">{fate}</span></div><h3>{}</h3><p class="note">{parcels} parcels · {size}</p>{}{entrance_action}{remove}</article>"#,
+            esc(title),
+            world_scene_location(w, coords, status.world_spawn.as_deref())
         )
     };
     let rows: String = state
         .others
         .iter()
-        .map(|s| match scene_overlaps(&s.coords, &ours) {
-            true => was(&s.title, s.parcels, s.size),
-            false => scene_row("dep__cell--kept", &s.title, s.parcels, s.size, "kept"),
-        })
+        .map(|s| card(&s.title, &s.coords, s.parcels, s.size))
+        .chain(
+            state
+                .current
+                .iter()
+                .map(|s| card(&s.title, &s.coords, s.parcels, s.size)),
+        )
         .collect();
-    let replaced_row = state
-        .current
-        .as_ref()
-        .map(|c| was(&c.title, c.parcels, c.size))
-        .unwrap_or_default();
+    let updated = state.current.iter().count()
+        + state
+            .others
+            .iter()
+            .filter(|s| scene_overlaps(&s.coords, &ours))
+            .count();
+    let kept = state
+        .others
+        .iter()
+        .filter(|s| !scene_overlaps(&s.coords, &ours))
+        .count();
     let held: u64 = state
         .others
         .iter()
         .filter_map(|s| s.size)
         .chain(state.current.as_ref().and_then(|c| c.size))
         .sum();
-    let storage = match held {
-        0 => String::new(),
-        b => {
-            let adds = status
-                .reuse
-                .as_ref()
-                .map(|r| {
-                    format!(
-                        " \u{2014} this publish uploads {} of new content",
-                        deploy::human_size(r.upload_bytes)
-                    )
-                })
-                .unwrap_or_default();
-            format!(
-                r#"<span class="note">Scenes in this world hold {}{adds}.</span>"#,
-                deploy::human_size(b)
-            )
-        }
+    let storage = if held == 0 {
+        String::new()
+    } else {
+        format!(
+            r#"<span class="note">{} stored across {} scenes</span>"#,
+            deploy::human_size(held),
+            updated + kept
+        )
     };
     format!(
-        "<div class=\"jn2__noterow\"><span class=\"jn__hint\">Publishing to {} replaces every scene that overlaps this footprint, including its parcels outside the footprint. Non-overlapping scenes stay published.</span></div>\n        <div class=\"jn2__body\">{}\n        {}</div>",
-        esc(w),
-        col("After this publish", &after_map(state, &ours, base)),
+        r#"<div class="tgt__publish-summary"><b>This publish</b><span>{updated} updated · {kept} kept</span><span class="note">Base {}, {} parcels</span></div><div class="jn2__body tgt__world-layout">{}{}</div>"#,
+        esc(&dest.base_pointer),
+        ours.len(),
+        col("World map", &after_map(state, &ours, base)),
         col(
-            "In this world now",
-            &format!(r#"<div class="lay__srows">{rows}{replaced_row}</div>{storage}"#),
-        ),
+            "Published scenes",
+            &format!(r#"<div class="tgt__scene-list">{rows}</div>{storage}"#)
+        )
     )
+}
+
+/// Bind whole-World removal to the scene layout and content shown in the review.
+fn replacement_revision(remote: &Remote) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut rows = Vec::new();
+    match remote {
+        Remote::Empty => {}
+        Remote::Known(state) => {
+            for (title, coords) in state
+                .current
+                .iter()
+                .map(|s| (&s.title, &s.coords))
+                .chain(state.others.iter().map(|s| (&s.title, &s.coords)))
+            {
+                let mut coords = coords.clone();
+                coords.sort_unstable();
+                rows.push(format!("{title:?}:{coords:?}"));
+            }
+            rows.extend(state.hashes.iter().map(|h| format!("hash:{h}")));
+        }
+        _ => return None,
+    }
+    rows.sort();
+    Some(hex(&Sha256::digest(format!("{rows:?}").as_bytes())))
+}
+
+fn world_entrance_form(prefix: &str, tok: &str, world: &str, base: &str) -> String {
+    format!(
+        r#"<form class="tgt__entrance" method="post" action="{}/target/entrance"><input type="hidden" name="token" value="{}"><input type="hidden" name="world" value="{}"><input type="hidden" name="base" value="{}"><button class="deep__copy" type="submit">Make {} the entrance</button><p class="note" role="status"></p></form>"#,
+        esc(prefix),
+        esc(tok),
+        esc(world),
+        esc(base),
+        esc(base)
+    )
+}
+
+fn world_actions(prefix: &str, tok: &str, dest: &Dest, status: &LiveStatus, print: &str) -> String {
+    let Some(world) = dest.world.as_deref() else {
+        return String::new();
+    };
+    let base_editor = base_form(prefix, tok, dest);
+    let spawn = status.world_spawn.as_deref().unwrap_or("Unavailable");
+    let arrival = match status.world_spawn.as_ref() {
+        Some(p) if dest.pointers.contains(p) => "Visitors arrive in this scene.",
+        Some(_) => "Entrance is in another scene.",
+        None => "Entrance unavailable.",
+    };
+    let (coords, base) = footprint(dest);
+    let (rows, _deployed) = match &status.remote {
+        Remote::Known(state) => {
+            let scenes = state
+                .current
+                .iter()
+                .map(|s| (&s.title, &s.coords))
+                .chain(state.others.iter().map(|s| (&s.title, &s.coords)));
+            let mut rows = String::new();
+            let mut deployed = false;
+            for (title, parcels) in scenes {
+                deployed |= parcels.contains(&base);
+                let coordinates = parcels
+                    .iter()
+                    .map(|(x, y)| format!("{x},{y}"))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                rows.push_str(&format!("<li>{} — {}</li>", esc(title), esc(&coordinates)));
+            }
+            (Some(rows), deployed)
+        }
+        Remote::Empty => (Some(String::new()), false),
+        _ => (None, false),
+    };
+    let revision = replacement_revision(&status.remote).unwrap_or_default();
+    let replacement = match rows {
+        Some(rows) => format!(
+            r#"<details class="tgt__replacement"><summary>Replace the entire World with this scene</summary><p>This removes the World's existing scenes and publishes only this project's {} parcels at base {}.</p><ul>{rows}</ul><p class="note">Removal happens before upload. If upload fails, removed scenes are not restored automatically. Keep their projects to publish them again. The wallet may ask for two signatures: one for publication and one for removal.</p><form method="post" action="{}/deploy"><input type="hidden" name="token" value="{}"><input type="hidden" name="fingerprint" value="{}"><input type="hidden" name="world_revision" value="{revision}"><label><input type="checkbox" name="replace_world" value="{}" required> Remove the existing scenes in {} and replace them with this project</label><button class="knob__go" type="submit">Replace World and publish</button></form></details>"#,
+            coords.len(),
+            esc(&dest.base_pointer),
+            esc(prefix),
+            esc(tok),
+            esc(print),
+            esc(world),
+            esc(world)
+        ),
+        None => note_span(
+            "Whole-World replacement is unavailable until the existing scene list can be checked.",
+        ),
+    };
+    format!(
+        r#"<div class="tgt__advanced-body">{base_editor}<a href="{}/scene">Edit footprint</a><p>World entrance: <b data-world-entrance>{}</b></p><p data-world-arrival>{arrival}</p><a href="{}">Visit this scene at {}</a>{replacement}</div>"#,
+        esc(prefix),
+        esc(spawn),
+        esc(&deploy::play_url(Some(world), &dest.base_pointer)),
+        esc(&dest.base_pointer)
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct EntranceForm {
+    token: String,
+    world: String,
+    base: String,
+    #[serde(default)]
+    timestamp: i64,
+    #[serde(default)]
+    address: String,
+    #[serde(default)]
+    signature: String,
+}
+
+/// Prepare and submit a wallet-signed update of only the selected World's entrance.
+pub(super) async fn target_entrance(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Form(form): Form<EntranceForm>,
+) -> Response {
+    if let Some(refused) = post_gate(
+        &st,
+        false,
+        peer,
+        &headers,
+        &form.token,
+        "World settings are changed on the machine hosting this preview",
+        "Reload the target page before changing the World entrance",
+    ) {
+        return refused;
+    }
+    if st.deploy_dry_run {
+        return reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "World settings updates are off for this run",
+        );
+    }
+    let Some(project) = st.first_project() else {
+        return reply(StatusCode::NOT_FOUND, "No scene loaded");
+    };
+    let dest = scene_dest(&project);
+    if dest.world.as_deref() != Some(form.world.as_str()) || dest.base_pointer != form.base {
+        return reply(
+            StatusCode::CONFLICT,
+            "The destination changed. Review the target again.",
+        );
+    }
+    let signed = !form.signature.is_empty();
+    if signed && deploy::now_ms().abs_diff(form.timestamp) > 60_000 {
+        return reply(
+            StatusCode::CONFLICT,
+            "The entrance signature expired. Try again to request a fresh signature.",
+        );
+    }
+    if signed {
+        let (remote, _) = deploy_status::fetch_remote(&dest).await;
+        let base = footprint(&dest).1;
+        let occupied = match remote {
+            Remote::Known(state) => {
+                state.current.iter().any(|s| s.coords.contains(&base))
+                    || state.others.iter().any(|s| s.coords.contains(&base))
+            }
+            _ => false,
+        };
+        if !occupied {
+            return reply(
+                StatusCode::CONFLICT,
+                "Could not confirm a published scene at this base. Publish first, then review the World entrance again.",
+            );
+        }
+    }
+    let response = entrance_request(&dest, form).await;
+    if signed && response.status().is_success() {
+        st.deploy.caches.clear();
+    }
+    response
+}
+
+async fn entrance_request(dest: &Dest, form: EntranceForm) -> Response {
+    let action = crate::world::WorldAction::SettingsSet(crate::world::SettingsUpdate {
+        spawn_coordinates: Some(form.base),
+        ..Default::default()
+    });
+    let timestamp = if form.signature.is_empty() {
+        deploy::now_ms()
+    } else {
+        form.timestamp
+    };
+    if deploy::now_ms().abs_diff(timestamp) > 60_000 {
+        return reply(
+            StatusCode::CONFLICT,
+            "The entrance signature expired. Try again to request a fresh signature.",
+        );
+    }
+    let path = format!(
+        "{}{}",
+        url::Url::parse(&dest.read_bases[0])
+            .map(|u| u.path().trim_end_matches('/').to_string())
+            .unwrap_or_default(),
+        action.path(&form.world)
+    );
+    let payload = crate::world::signed_fetch_payload(action.method(), &path, timestamp);
+    if form.signature.is_empty() {
+        return Json(serde_json::json!({ "payload": payload, "timestamp": timestamp }))
+            .into_response();
+    }
+    if !deploy_rights::valid_address(&form.address) {
+        return reply(StatusCode::UNPROCESSABLE_ENTITY, "Invalid wallet address");
+    }
+    let auth = crate::world::browser_headers(&form.address, &payload, &form.signature);
+    match action.send(&dest.read_bases[0], &form.world, auth).await {
+        Ok((status, _)) if (200..300).contains(&status) => {
+            Json(serde_json::json!({ "ok": true, "message": "World entrance updated" }))
+                .into_response()
+        }
+        Ok((status, body)) => reply(
+            StatusCode::BAD_GATEWAY,
+            &format!("World entrance was not updated (HTTP {status}): {body}"),
+        ),
+        Err(e) => reply(
+            StatusCode::BAD_GATEWAY,
+            &format!("Could not update the World entrance: {e:#}"),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct RemoveSceneForm {
+    token: String,
+    world: String,
+    coordinate: String,
+    world_revision: String,
+    #[serde(default)]
+    entity_id: String,
+    #[serde(default)]
+    timestamp: i64,
+    #[serde(default)]
+    address: String,
+    #[serde(default)]
+    signature: String,
+}
+
+pub(super) async fn target_remove_scene(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Form(form): Form<RemoveSceneForm>,
+) -> Response {
+    if let Some(refused) = post_gate(
+        &st,
+        false,
+        peer,
+        &headers,
+        &form.token,
+        "Scenes are removed on the machine hosting this preview",
+        "Reload the target page before removing a scene",
+    ) {
+        return refused;
+    }
+    if st.deploy_dry_run {
+        return reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Scene removal is off for this run",
+        );
+    }
+    let Some(project) = st.first_project() else {
+        return reply(StatusCode::NOT_FOUND, "No scene loaded");
+    };
+    let dest = scene_dest(&project);
+    if dest.world.as_deref() != Some(form.world.as_str()) {
+        return reply(
+            StatusCode::CONFLICT,
+            "The selected World changed. Review the target again.",
+        );
+    }
+    if catalyrst_auth_chain::pointer::parse_pointer(&form.coordinate).is_none() {
+        return reply(StatusCode::UNPROCESSABLE_ENTITY, "Invalid scene coordinate");
+    }
+    let signed = !form.signature.is_empty();
+    if signed && deploy::now_ms().abs_diff(form.timestamp) > 60_000 {
+        return reply(
+            StatusCode::CONFLICT,
+            "The removal signature expired. Try again.",
+        );
+    }
+    let (remote, _) = deploy_status::fetch_remote(&dest).await;
+    if replacement_revision(&remote).as_deref() != Some(form.world_revision.as_str()) {
+        return reply(
+            StatusCode::CONFLICT,
+            "The World's scenes changed. Reload and review them before removal.",
+        );
+    }
+    let entity_id = if signed {
+        form.entity_id
+    } else {
+        match crate::world::scene_at(&dest.read_bases[0], &form.world, &form.coordinate).await {
+            Ok(id) => id,
+            Err(e) => {
+                return reply(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Could not prepare removal: {e:#}"),
+                )
+            }
+        }
+    };
+    let action = crate::world::WorldAction::SceneRemove {
+        coordinate: form.coordinate,
+        entity_id: entity_id.clone(),
+    };
+    if let Err(e) = action.validate() {
+        return reply(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
+    }
+    let timestamp = if signed {
+        form.timestamp
+    } else {
+        deploy::now_ms()
+    };
+    let path = format!(
+        "{}{}",
+        url::Url::parse(&dest.read_bases[0])
+            .map(|u| u.path().trim_end_matches('/').to_string())
+            .unwrap_or_default(),
+        action.path(&form.world)
+    );
+    let payload = crate::world::signed_fetch_payload(action.method(), &path, timestamp);
+    if !signed {
+        return Json(
+            serde_json::json!({"payload":payload,"timestamp":timestamp,"entity_id":entity_id}),
+        )
+        .into_response();
+    }
+    if !deploy_rights::valid_address(&form.address) {
+        return reply(StatusCode::UNPROCESSABLE_ENTITY, "Invalid wallet address");
+    }
+    let auth = crate::world::browser_headers(&form.address, &payload, &form.signature);
+    match action.send(&dest.read_bases[0], &form.world, auth).await {
+        Ok((status, _)) if (200..300).contains(&status) => {
+            st.deploy.caches.clear();
+            Json(serde_json::json!({"ok":true,"message":action.success(&form.world)}))
+                .into_response()
+        }
+        Ok((status, body)) => reply(
+            StatusCode::BAD_GATEWAY,
+            &format!("Scene was not removed (HTTP {status}): {body}"),
+        ),
+        Err(e) => reply(
+            StatusCode::BAD_GATEWAY,
+            &format!("Scene was not removed: {e:#}"),
+        ),
+    }
 }
 
 /// `/target` — the destination detail that used to crowd the publish card.
@@ -3065,7 +3558,8 @@ async fn target_page(st: &Arc<AppState>, headers: &HeaderMap, local: bool) -> Re
                     &d.status,
                     d.rights.as_deref(),
                     connect.as_ref(),
-                    &history
+                    &history,
+                    &d.print,
                 ),
                 script = TARGET_SCRIPT,
             )

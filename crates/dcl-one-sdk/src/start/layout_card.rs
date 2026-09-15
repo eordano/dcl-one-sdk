@@ -272,11 +272,11 @@ pub(super) fn scene_layout_card(
         tab("info", "Info", true),
         tab("parcels", "Shape", false),
         tab("spawns", "Spawn points", false),
-        tab("perms", "Permissions", false),
+        tab("perms", "Permissions", false)
     );
     let info_pane = format!(r#"<section class="lay__pane" data-pane="info">{info_pane}</section>"#);
     let parcels_pane = format!(
-        r#"<section class="lay__pane" data-pane="parcels" hidden><span class="knob__k">Scene bounds</span><div class="lay__kvs"><div class="lay__kv"><span class="k">Parcels</span><code>{n}</code></div><div class="lay__kv"><span class="k">Size</span><code>{w} × {h} m</code></div><div class="lay__kv"><span class="k">Range</span><code>{min_x},{min_y} → {max_x},{max_y}</code></div><div class="lay__kv"><span class="k">Base parcel</span><span class="lay__basev"><code class="lay__base">{bx},{by}</code><button type="button" class="deep__copy" id="lay-base-pick" aria-pressed="false" disabled>Change</button></span></div></div><p class="note">One parcel is 16 × 16 m. Drag across the grid to paint or erase parcels; the grid rescales to whatever the scene becomes.</p></section>"#,
+        r#"<section class="lay__pane" data-pane="parcels" hidden><span class="knob__k">Scene bounds</span><div class="lay__kvs"><div class="lay__kv"><span class="k">Parcels</span><code>{n}</code></div><div class="lay__kv"><span class="k">Size</span><code>{w} × {h} m</code></div><div class="lay__kv"><span class="k">Range</span><code>{min_x},{min_y} → {max_x},{max_y}</code></div><div class="lay__kv"><span class="k">Base parcel</span><form class="lay__basev" id="lay-base-form"><input class="lay__base" id="lay-base-input" name="base" value="{bx},{by}" aria-label="Move scene to base parcel x,y" spellcheck="false" autocomplete="off" disabled><button type="submit" class="deep__copy" disabled>Move</button></form></div></div><p class="note">Move preserves the scene’s shape and spawn points. Publish to apply.</p></section>"#,
         n = parcels.len(),
         bx = base.0,
         by = base.1,
@@ -286,11 +286,22 @@ pub(super) fn scene_layout_card(
         rows = spawn_rows(spawns),
     );
     let perms_pane = format!(
-        r#"<section class="lay__pane" data-pane="perms" hidden><span class="knob__k">Scene permissions</span><div class="lay__perms">{rows}</div></section>"#,
-        rows = permission_rows(scene_json),
+        r#"<section class="lay__pane" data-pane="perms" hidden><span class="knob__k">Scene permissions</span><div class="lay__perms">{}</div><p class="note">Publishing rights come from your wallet.</p></section>"#,
+        permission_rows(scene_json),
+    );
+    let media_row = format!(
+        r#"<form class="lay__media" id="media-hosts-form"><label class="knob__k" for="media-hosts">Media hostnames</label><div class="lay__media-fields"><input class="knob__sel" id="media-hosts" value="{hosts}" placeholder="media.example.org, video.example.org" aria-describedby="media-hosts-help" disabled><button class="knob__go" type="submit" disabled>Save hostnames</button></div><p class="note" id="media-hosts-help">Allow media from these hosts. Separate hostnames with commas. At least one is required.</p></form>"#,
+        hosts = esc(&scene_json["allowedMediaHostnames"]
+            .as_array()
+            .map(|a| a
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", "))
+            .unwrap_or_default()),
     );
     format!(
-        r#"<div class="jn lay lay--info" id="scene-layout"><div class="jn2__tabs" role="tablist">{tabs}</div><div class="lay__body"><div class="lay__left"><div class="lay__legend"><span class="lay__key"><i class="lay__swatch lay__swatch--in"></i>In scene</span><span class="lay__key"><i class="lay__swatch lay__swatch--area"></i>Spawn area</span><span class="lay__size">{n} parcel{s} · {w} × {h} m</span></div>{map}<div class="note lay__hint" id="lay-hint">Click the title, description, tags or cover to edit — changes save to scene.json</div></div><div class="lay__rail">{info_pane}{parcels_pane}{spawns_pane}{perms_pane}</div></div></div>"#,
+        r#"<div class="jn lay lay--info" id="scene-layout"><div class="jn2__tabs" role="tablist">{tabs}</div><div class="lay__body"><div class="lay__left"><div class="lay__legend"><span class="lay__key"><i class="lay__swatch lay__swatch--in"></i>In scene</span><span class="lay__key"><i class="lay__swatch lay__swatch--area"></i>Spawn area</span><span class="lay__size">{n} parcel{s} · {w} × {h} m</span></div>{map}<div class="note lay__hint" id="lay-hint">Click the title, description, tags or cover to edit — changes save to scene.json</div></div><div class="lay__rail">{info_pane}{parcels_pane}{spawns_pane}{perms_pane}</div></div>{media_row}</div>"#,
         n = parcels.len(),
         s = if parcels.len() == 1 { "" } else { "s" },
         map = layout_grid(parcels, base, spawns),

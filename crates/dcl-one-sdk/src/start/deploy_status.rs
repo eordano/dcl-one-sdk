@@ -350,7 +350,7 @@ pub(super) async fn fetch_remote(dest: &Dest) -> (Remote, Option<String>) {
                 return (
                     genesis_remote(&entities, &dest.base_pointer),
                     Some(base.clone()),
-                )
+                );
             }
             Err(e) => last = e.sentence(base),
         }
@@ -407,6 +407,7 @@ pub(super) fn split_reuse(
 }
 
 pub(super) struct LiveStatus {
+    pub(super) world_spawn: Option<String>,
     pub(super) remote: Remote,
     pub(super) reuse: Option<Reuse>,
 }
@@ -414,6 +415,7 @@ pub(super) struct LiveStatus {
 impl LiveStatus {
     pub(super) fn unknown(why: &str) -> Self {
         LiveStatus {
+            world_spawn: None,
             remote: Remote::Unknown(why.to_string()),
             reuse: None,
         }
@@ -478,6 +480,21 @@ pub(super) fn status_peek(
 
 /// The network look and the hash split, at most once per [`STATUS_TTL`] per
 /// (target, payload) pair.
+async fn fetch_world_spawn(dest: &Dest) -> Option<String> {
+    let world = dest.world.as_ref()?;
+    let url = format!(
+        "{}/world/{}/settings",
+        dest.read_bases[0],
+        deploy::encode_segment(world)
+    );
+    let body = fetch_json::<serde_json::Value>(status_client().get(url))
+        .await
+        .ok()?;
+    let spawn = body.get("spawn_coordinates")?.as_str()?;
+    catalyrst_auth_chain::pointer::parse_pointer(spawn)?;
+    Some(spawn.to_string())
+}
+
 pub(super) async fn cached_status(
     caches: &StatusCaches,
     project: &Project,
@@ -488,14 +505,18 @@ pub(super) async fn cached_status(
     if let Some(hit) = status_peek(caches, dest, print) {
         return hit;
     }
-    let (remote, base) = fetch_remote(dest).await;
+    let ((remote, base), world_spawn) = tokio::join!(fetch_remote(dest), fetch_world_spawn(dest));
     let reuse = match &remote {
         Remote::Known(_) | Remote::Empty => {
             reuse_split(caches, project, p, print, &remote, base).await
         }
         _ => None,
     };
-    let entry = Arc::new(LiveStatus { remote, reuse });
+    let entry = Arc::new(LiveStatus {
+        remote,
+        reuse,
+        world_spawn,
+    });
     cache_put(
         &mut lock(&caches.status),
         status_key(dest, print),

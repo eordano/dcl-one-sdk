@@ -159,7 +159,9 @@ mod tests {
     #[test]
     fn weight_stacks_and_other_sequences_vanish() {
         assert_eq!(
-            to_html("\u{1b}[1;31mno\u{1b}[22m still red\u{1b}[39m plain\u{1b}[2K\u{1b}[38;5;200mx\u{1b}[0m"),
+            to_html(
+                "\u{1b}[1;31mno\u{1b}[22m still red\u{1b}[39m plain\u{1b}[2K\u{1b}[38;5;200mx\u{1b}[0m"
+            ),
             r#"<span class="ansi-b ansi-31">no</span><span class="ansi-31"> still red</span> plainx"#
         );
         assert_eq!(to_html("a\u{1b}[96"), "a");

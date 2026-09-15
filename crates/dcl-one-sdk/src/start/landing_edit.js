@@ -26,7 +26,6 @@
 
   const GAP = () => (data.grid && data.grid.gap) || 3;
   let layTab = null;
-  let layPick = false;
   let laySel = null;
   let layDraft = null;
   let layArmed = false;
@@ -64,9 +63,7 @@
       return 'Click the title, description, tags or cover to edit — changes save to scene.json';
     }
     if (layTab === 'parcels') {
-      return layPick
-        ? 'Click any parcel in the scene to make it the base parcel'
-        : 'Drag across parcels to erase them, start on a dashed cell to paint new ones — the base parcel stays';
+      return 'Enter a base coordinate to move the whole scene. Drag on the grid to change its shape.';
     }
     if (layTab === 'spawns') {
       if (layArmed) return 'Drag anywhere on the grid to draw the new spawn area';
@@ -374,12 +371,7 @@
     card.classList.toggle('lay--info', layTab === 'info');
     card.classList.toggle('lay--parcels', layTab === 'parcels');
     card.classList.toggle('lay--spawns', layTab === 'spawns');
-    card.classList.toggle('lay--pick', layPick);
-    const pick = document.getElementById('lay-base-pick');
-    if (pick) {
-      pick.textContent = layPick ? 'Pick on grid' : 'Change';
-      pick.setAttribute('aria-pressed', String(layPick));
-    }
+    card.classList.toggle('lay--perms', layTab === 'perms');
     const add = document.getElementById('lay-sadd');
     if (add) {
       add.textContent = layArmed ? 'Drawing — drag on the grid' : '+ Add spawn area';
@@ -424,20 +416,29 @@
     }
   };
 
-  const layPickBase = async (key) => {
-    layPick = false;
-    if (key === data.base) {
-      layApply();
-      return;
+  document.addEventListener('submit', async (event) => {
+    if (event.target.id !== 'lay-base-form') return;
+    event.preventDefault();
+    const input = document.getElementById('lay-base-input');
+    const base = input.value.trim();
+    if (base === data.base) return;
+    input.disabled = true;
+    const button = event.target.querySelector('button');
+    button.disabled = true;
+    if (await save({ moveBase: base })) {
+      toast('Scene moved to ' + base + '. Publish to update the live location.');
+      await refresh();
+    } else {
+      input.disabled = false;
+      button.disabled = false;
+      input.focus();
     }
-    if (await save({ base: key })) refresh();
-    else layApply();
-  };
+  });
 
   const enable = () => {
     document.body.classList.add('editing');
     for (const el of document.querySelectorAll(
-      '#cover-input, .lay__tab, .lay__srow, #lay-sadd, #lay-base-pick, .lay__perm .sw'
+      '#cover-input, .lay__tab, .lay__srow, #lay-sadd, #lay-base-input, #lay-base-form button, .lay__perm .sw, #media-hosts, #media-hosts-form button'
     )) {
       el.disabled = false;
     }
@@ -530,14 +531,7 @@
     const tab = hit('.lay__tab');
     if (tab && !tab.disabled) {
       layTab = tab.dataset.laytab;
-      if (layTab !== 'parcels') layPick = false;
       if (layTab !== 'spawns') layArmed = false;
-      layApply();
-      return;
-    }
-    const pick = hit('#lay-base-pick');
-    if (pick && !pick.disabled) {
-      layPick = !layPick;
       layApply();
       return;
     }
@@ -575,15 +569,6 @@
       const cell = event.target.closest('.lay__cell');
       if (!cell || !cell.dataset.cell) return;
       event.preventDefault();
-      if (layPick) {
-        if (
-          cell.classList.contains('lay__cell--in') ||
-          cell.classList.contains('lay__cell--base')
-        ) {
-          layPickBase(cell.dataset.cell);
-        }
-        return;
-      }
       if (cell.dataset.cell === data.base) {
         toast('The base parcel anchors the scene and stays', true);
         return;
@@ -686,6 +671,18 @@
     layDraftBox();
   });
 
+  function mediaHosts() {
+    return (document.getElementById('media-hosts')?.value || '').split(/[\s,]+/).filter(Boolean);
+  }
+  document.addEventListener('submit', async (event) => {
+    if (event.target.id !== 'media-hosts-form') return;
+    event.preventDefault();
+    const hosts = mediaHosts();
+    const permissions = (data.permissions || []).filter(p => p !== 'ALLOW_MEDIA_HOSTNAMES');
+    if (hosts.length) permissions.push('ALLOW_MEDIA_HOSTNAMES');
+    if (await save({ requiredPermissions: permissions, allowedMediaHostnames: hosts })) refresh();
+  });
+
   document.addEventListener('change', async (event) => {
     const t = event.target;
     if (t.id === 'cover-input') {
@@ -712,7 +709,16 @@
       const granting = t.checked;
       const list = (data.permissions || []).filter((p) => p !== key);
       if (granting) list.push(key);
-      if (!(await save({ requiredPermissions: list }))) {
+      const patch = { requiredPermissions: list };
+      if (key === 'ALLOW_MEDIA_HOSTNAMES' && granting && !mediaHosts().length) {
+        document.getElementById('media-hosts').focus();
+        toast('Add a media hostname and save to enable external media.');
+        return;
+      }
+      if (key === 'ALLOW_MEDIA_HOSTNAMES') {
+        patch.allowedMediaHostnames = granting ? mediaHosts() : [];
+      }
+      if (!(await save(patch))) {
         t.checked = !granting;
         return;
       }

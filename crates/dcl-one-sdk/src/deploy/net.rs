@@ -235,8 +235,10 @@ fn multipart_parts(
     fn text(parts: &mut Vec<(Option<usize>, Vec<u8>)>, boundary: &str, name: &str, value: &str) {
         parts.push((
             None,
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
-                .into_bytes(),
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .into_bytes(),
         ));
     }
     fn blob(
@@ -671,7 +673,7 @@ pub(super) async fn resolve_target_from(
                 "pass the target once: --target-content is an alias of --target-server",
                 TrySteps::one("--target-server <catalyst domain or content-server URL>"),
             )
-            .into())
+            .into());
         }
         (None, Some(tc)) => tc.trim_end_matches('/').to_string(),
         (Some(t), None) => target_content_url(t, "--target-server", world.is_some()).await?,
@@ -1772,9 +1774,21 @@ pub(crate) async fn upload_entity_with_chain_to(
 
 pub fn play_url(world: Option<&str>, base: &str) -> String {
     match world {
-        Some(w) => format!("https://decentraland.org/play/?realm={w}"),
+        Some(w) => format!(
+            "https://decentraland.org/play/?realm={}&position={}",
+            encode_segment(w),
+            encode_segment(base)
+        ),
         None => format!("https://play.decentraland.org/?NETWORK=mainnet&position={base}"),
     }
+}
+
+#[test]
+fn world_visit_links_include_the_published_scene_position() {
+    let link = url::Url::parse(&play_url(Some("gather.dcl.eth"), "45,83")).unwrap();
+    let query: std::collections::HashMap<_, _> = link.query_pairs().collect();
+    assert_eq!(query.get("realm").unwrap(), "gather.dcl.eth");
+    assert_eq!(query.get("position").unwrap(), "45,83");
 }
 
 pub fn jump_in_url(world: Option<&str>, base: &str) -> String {
@@ -1957,7 +1971,10 @@ mod tests {
     /// markup; a real server refusal keeps its body.
     #[test]
     fn a_cloudflare_challenge_reads_as_the_edge_not_the_server() {
-        let e = rendered(403, "<!DOCTYPE html>\n<html><head><title>Attention Required! | Cloudflare</title></head></html>");
+        let e = rendered(
+            403,
+            "<!DOCTYPE html>\n<html><head><title>Attention Required! | Cloudflare</title></head></html>",
+        );
         assert!(
             e.contains("the realm's edge challenged this deployment"),
             "{e}"

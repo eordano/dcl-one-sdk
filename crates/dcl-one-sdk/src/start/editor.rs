@@ -165,7 +165,7 @@ pub(super) async fn inspector_index(
                 StatusCode::NOT_FOUND,
                 "the inspector build has no index.html",
             )
-                .into_response()
+                .into_response();
         }
     };
     let ws_url = format!("{}/data-layer", preview_ws_origin(&headers));

@@ -277,7 +277,7 @@ pub(super) fn land_picker(
         let estates = match h.estates {
             0 => String::new(),
             n => format!(
-                " Parcels inside its {n} estate{} are not listed: the lambdas return estates without coordinates.",
+                " Parcels inside its {n} estate{} are not included in this list.",
                 plural(n as usize)
             ),
         };
@@ -293,7 +293,7 @@ pub(super) fn land_picker(
     }
     let held: HashSet<(i64, i64)> = h.coords.iter().copied().collect();
     let land_target = dest.world.is_none();
-    let known = r.land_use.is_some();
+    let known = r.land_use.as_ref().is_some_and(|u| u.note.is_none());
     let open = !folded(
         &declared,
         &held,
@@ -301,7 +301,12 @@ pub(super) fn land_picker(
         &status.remote,
         land_target,
     );
-    let areas = areas(&h.coords, r.land_use.as_ref(), &declared, base);
+    let mut areas = areas(&h.coords, r.land_use.as_ref(), &declared, base);
+    if !land_target {
+        for area in &mut areas {
+            area.holds_scene = false;
+        }
+    }
     let empties: usize = areas.iter().map(|a| a.empty).sum();
     let cols = columns(&areas);
     let one = cols.len() == 1;
@@ -341,6 +346,9 @@ pub(super) fn land_picker(
         })
         .collect();
     let mut notes: Vec<String> = Vec::new();
+    if h.parcels > h.owned.len() as i64 || h.operated > h.operated_coords.len() as i64 {
+        notes.push(format!("The account reports {} owned and {} operated parcels; {} parcel coordinates are available here.", h.parcels, h.operated, h.coords.len()));
+    }
     match r.land_use.as_ref() {
         None => notes.push(format!(
             "What is on these parcels could not be read from {}, so no area counts as empty here.",
@@ -355,15 +363,14 @@ pub(super) fn land_picker(
     }
     if h.estates > 0 {
         notes.push(format!(
-            "Parcels inside {} estate{} are not listed: the lambdas return estates without coordinates.",
+            "Parcels inside {} estate{} are not included in this list.",
             h.estates,
             plural(h.estates as usize)
         ));
     }
     if !land_target {
         notes.push(
-            "Move here sets this scene's base parcel; Select LAND then makes Genesis City the target."
-                .to_string(),
+            "Move here selects LAND and moves the whole scene. Publish to apply.".to_string(),
         );
     }
     let summary = if known {
@@ -383,12 +390,24 @@ pub(super) fn land_picker(
             plural(h.coords.len())
         )
     };
+    if h.coords.len() <= 6 {
+        return format!(
+            r#"<section class="tgt__inventory"><h2>Your LAND</h2>{}{}</section>"#,
+            parcel_inventory(
+                h,
+                r.land_use.as_ref(),
+                Some((prefix, tok, &areas, declared.len()))
+            ),
+            notes.iter().map(|n| note_span(n)).collect::<String>(),
+        );
+    }
     wrap(
         open,
         &summary,
         &format!(
-            r#"{here_html}<div class="tgt__picker-cols{}">{cols_html}</div>"#,
-            if one { " tgt__picker-cols--one" } else { "" }
+            r#"{here_html}<div class="tgt__picker-cols{}">{cols_html}</div>{}"#,
+            if one { " tgt__picker-cols--one" } else { "" },
+            parcel_inventory(h, r.land_use.as_ref(), None)
         ),
         &notes.iter().map(|n| note_span(n)).collect::<String>(),
     )
@@ -427,9 +446,11 @@ fn row(prefix: &str, tok: &str, a: &Area, footprint: usize, now: i64, known: boo
     }
     let action = if a.holds_scene {
         r#"<span class="tgt__badge">Scene is here</span>"#.to_string()
+    } else if a.fit.is_none() {
+        r#"<span class="tgt__badge">Footprint does not fit</span>"#.to_string()
     } else {
         format!(
-            r#"<form method="post" action="{}/target/base"><input type="hidden" name="token" value="{}"><input type="hidden" name="base" value="{x},{y}"><button class="deep__copy" type="submit">Move here</button></form>"#,
+            r#"<form method="post" action="{}/target/base"><input type="hidden" name="token" value="{}"><input type="hidden" name="destination" value="land"><input type="hidden" name="base" value="{x},{y}"><button class="deep__copy" type="submit">Move here</button></form>"#,
             esc(prefix),
             esc(tok),
             x = anchor.0,
@@ -441,6 +462,70 @@ fn row(prefix: &str, tok: &str, a: &Area, footprint: usize, now: i64, known: boo
         anchor.0,
         anchor.1,
         bits.join(" \u{b7} ")
+    )
+}
+
+/// Keep every loaded coordinate accessible, even beyond the ranked area cards.
+fn parcel_inventory(
+    h: &super::deploy_rights::Holdings,
+    usage: Option<&LandUse>,
+    actions: Option<(&str, &str, &[Area], usize)>,
+) -> String {
+    let owned: HashSet<_> = h.owned.iter().copied().collect();
+    let operated: HashSet<_> = h.operated_coords.iter().copied().collect();
+    let mut coords = h.coords.clone();
+    coords.sort_unstable();
+    coords.dedup();
+    let rows: String = coords
+        .iter()
+        .map(|p| {
+            let role = match (owned.contains(p), operated.contains(p)) {
+                (true, true) => "Owned and operated",
+                (true, false) => "Owned",
+                (false, true) => "Operated",
+                _ => "Rights unverified",
+            };
+            let scenes: Vec<_> = usage
+                .into_iter()
+                .flat_map(|u| &u.scenes)
+                .filter(|s| s.coords.contains(p))
+                .map(|s| esc(&s.title))
+                .collect();
+            let content = if !scenes.is_empty() {
+                scenes.join(" · ")
+            } else if usage.is_some_and(|u| u.note.is_none()) {
+                "No scene deployed".to_string()
+            } else {
+                "Deployment unknown".to_string()
+            };
+            let action = actions.map(|(prefix, tok, areas, footprint)| {
+                let Some(area) = areas.iter().find(|a| a.parcels.contains(p)) else { return String::new(); };
+                let anchor = area.fit.map(|(base, _)| base).unwrap_or(area.parcels[0]);
+                let label = if area.holds_scene {
+                    "Scene is here".to_string()
+                } else if area.fit.is_none() {
+                    format!("Does not fit {footprint} parcels")
+                } else if *p != anchor {
+                    format!("Move from {},{}", anchor.0, anchor.1)
+                } else {
+                    return format!(r#"<td><form method="post" action="{}/target/base"><input type="hidden" name="token" value="{}"><input type="hidden" name="destination" value="land"><input type="hidden" name="base" value="{},{}"><button class="deep__copy" type="submit">Move here</button></form></td>"#, esc(prefix), esc(tok), anchor.0, anchor.1);
+                };
+                format!("<td>{label}</td>")
+            }).unwrap_or_default();
+            format!(
+                r#"<tr><td>{},{}</td><td>{role}</td><td>{content}</td>{action}</tr>"#,
+                p.0, p.1
+            )
+        })
+        .collect();
+    if actions.is_some() {
+        return format!(
+            r#"<table><thead><tr><th scope="col">Parcel</th><th scope="col">Your access</th><th scope="col">Scene</th><th scope="col">Placement</th></tr></thead><tbody>{rows}</tbody></table>"#
+        );
+    }
+    format!(
+        r#"<details class="tgt__inventory"><summary>All {} parcels</summary><table><thead><tr><th scope="col">Parcel</th><th scope="col">Account role</th><th scope="col">Deployed scene</th></tr></thead><tbody>{rows}</tbody></table></details>"#,
+        coords.len()
     )
 }
 
@@ -729,7 +814,11 @@ mod tests {
             html.contains("Hexabricks</span><span class=\"tgt__badge\">Scene is here</span>"),
             "{html}"
         );
-        assert!(html.contains(r#"name="base" value="20,-4"><button class="deep__copy" type="submit">Move here</button>"#), "{html}");
+        assert!(
+            !html.contains(r#"name="base" value="40,0""#),
+            "an area that cannot fit must not offer a move: {html}"
+        );
+        assert!(html.contains("Footprint does not fit"));
         assert!(
             html.contains("1 parcel · 0 empty · last published") && html.contains("Kiosk"),
             "{html}"
@@ -749,6 +838,34 @@ mod tests {
             "off held land: open: {html}"
         );
         assert!(!html.contains("Scene is here"), "{html}");
+    }
+
+    #[test]
+    fn small_holdings_have_one_table_with_access_content_and_placement() {
+        let rights = Rights {
+            holdings: Some(holdings(&[(10, 10), (20, 20), (30, 30)])),
+            land_use: Some(LandUse {
+                scenes: vec![],
+                note: None,
+            }),
+            ..Rights::unchecked(ADDR, "")
+        };
+        let live = LiveStatus::unknown("test");
+        let html = land_picker("", "tok", &dest(&["0,0"], "0,0"), Some(&rights), &live);
+        assert_eq!(html.matches("<table>").count(), 1);
+        assert!(!html.contains("<details"));
+        assert_eq!(html.matches("Move here</button>").count(), 3);
+        assert!(html.contains("Owned") && html.contains("No scene deployed"));
+        assert!(html.contains(r#"name="destination" value="land""#));
+        let large = land_picker(
+            "",
+            "tok",
+            &dest(&["0,0", "1,0"], "0,0"),
+            Some(&rights),
+            &live,
+        );
+        assert!(!large.contains("Move here</button>"));
+        assert_eq!(large.matches("Does not fit 2 parcels").count(), 3);
     }
 
     /// Without an account the block asks for one; without holdings it says
@@ -774,7 +891,7 @@ mod tests {
         let html = land_picker("", "tok", &d, Some(&none), &live);
         assert!(
             html.contains(
-                "holds no parcels and operates none. Parcels inside its 2 estates are not listed"
+                "holds no parcels and operates none. Parcels inside its 2 estates are not included"
             ),
             "{html}"
         );
@@ -785,7 +902,7 @@ mod tests {
         };
         let html = land_picker("", "tok", &d, Some(&unread), &live);
         assert!(
-            html.contains("Your LAND · 1 area · 2 parcels</summary>"),
+            html.contains("<h2>Your LAND</h2>") && html.contains("Deployment unknown"),
             "{html}"
         );
         assert!(

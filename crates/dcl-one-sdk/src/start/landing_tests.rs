@@ -167,7 +167,9 @@ fn launch_href(html: &str) -> String {
 #[test]
 fn page_knobs_reach_the_link_but_cannot_repoint_it() {
     let st = gather_state();
-    let knobs = gather_knobs("opt=multi-instance&spawn=entrance&args=--gatekeeper-url%3Dhttps%3A%2F%2Fevil.example&realm=http%3A%2F%2Fevil.example");
+    let knobs = gather_knobs(
+        "opt=multi-instance&spawn=entrance&args=--gatekeeper-url%3Dhttps%3A%2F%2Fevil.example&realm=http%3A%2F%2Fevil.example",
+    );
     assert_eq!(
         knobs.tokens(Carry::Loopback),
         [
@@ -693,7 +695,9 @@ async fn the_scene_card_ships_its_editors_inert_for_the_script_to_enable() {
             && html.contains(r#"data-laytab="parcels" role="tab" aria-selected="false" disabled"#),
         "the layout tabs ship inert, Info selected: {html}"
     );
-    assert!(html.contains(r#"id="lay-base-pick" aria-pressed="false" disabled"#));
+    assert!(html.contains(r#"id="lay-base-input""#));
+    assert!(html.contains(r#"id="lay-base-form""#));
+    assert!(!html.contains("Pick on grid"));
     assert!(
         html.contains(r#"data-perm="USE_WEBSOCKET" disabled"#),
         "the permission switches ship inert: {html}"
@@ -887,17 +891,15 @@ fn the_layout_card_leads_with_info_and_counts_its_tabs() {
         card.contains(r#"class="jn lay lay--info" id="scene-layout""#),
         "the server's no-script default is the Info tab: {card}"
     );
-    assert!(card
-        .contains(r#"data-laytab="info" role="tab" aria-selected="true" disabled>Info</button>"#));
-    assert!(card.contains(
-        r#"data-laytab="parcels" role="tab" aria-selected="false" disabled>Shape</button>"#
-    ));
-    assert!(card.contains(
-        r#"data-laytab="spawns" role="tab" aria-selected="false" disabled>Spawn points</button>"#
-    ));
-    assert!(card.contains(
-        r#"data-laytab="perms" role="tab" aria-selected="false" disabled>Permissions</button>"#
-    ));
+    for (key, label) in [
+        ("info", "Info"),
+        ("parcels", "Shape"),
+        ("spawns", "Spawn points"),
+        ("perms", "Permissions"),
+    ] {
+        assert!(card.contains(&format!(r#"data-laytab="{key}""#)));
+        assert!(card.contains(&format!("disabled>{label}</button>")));
+    }
     assert!(
         !card.contains("sec__count"),
         "the scene tabs carry no counts in the harmonized design: {card}"
@@ -914,12 +916,19 @@ fn the_layout_card_leads_with_info_and_counts_its_tabs() {
         "the size label counts parcels: {card}"
     );
     assert!(
-        !card.contains("lay__swatch--base") && !card.contains("lay__swatch--add") && !card.contains("lay-sempty"),
+        !card.contains("lay__swatch--base")
+            && !card.contains("lay__swatch--add")
+            && !card.contains("lay-sempty"),
         "the legend keeps only what the grid shows at rest, and the spawn pane carries no placeholder: {card}"
     );
     assert!(card.contains(r#"<code>0,0 → 1,0</code>"#));
     assert!(card.contains("X 1 · Z 1 · Y 0"), "{card}");
-    assert!(!card.contains("<form"), "the card rides no form");
+    assert_eq!(
+        card.matches("<form").count(),
+        2,
+        "base and media hostnames have direct editors"
+    );
+    assert!(card.contains(r#"id="lay-base-form""#));
     assert!(
         !card.contains("jn2__head"),
         "the tab strip sits flush at the card top, no head above it"

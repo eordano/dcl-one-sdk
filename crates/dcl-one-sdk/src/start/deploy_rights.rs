@@ -627,7 +627,7 @@ async fn verdict_fetch(dest: &Dest, addr: &str) -> TargetVerdict {
             Err(why) => {
                 return TargetVerdict::bare(Verdict::Unchecked(format!(
                     "could not check permissions: {why}"
-                )))
+                )));
             }
         };
         let scoped = match deploy::deployment_permission_in_doc(&doc, addr) {
@@ -678,7 +678,7 @@ async fn verdict_fetch(dest: &Dest, addr: &str) -> TargetVerdict {
                         rows: partial,
                         unchecked: 0,
                         note: None,
-                    }
+                    };
                 }
             }
         }

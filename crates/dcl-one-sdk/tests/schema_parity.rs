@@ -2,7 +2,7 @@
 //!
 //! The scene goldens pin only the constructs those scenes use; this covers the
 //! bugs that are silent rather than loud: property order (a wrong order is the
-//! same length and still parses), optional truthiness, numeric coercions, the
+//! same length and still parses), optional presence, numeric coercions, the
 //! one-of index base. Schemas are emitted as raw text with a deliberately
 //! non-alphabetical property order, which is what an ordering regression would
 //! hide behind.
@@ -776,9 +776,10 @@ fn strict_frames(bytes: &[u8]) -> Vec<(u32, &[u8])> {
     out
 }
 
-/// Upstream 7.27.0 declares a network entity delete as 12 bytes and writes 16;
-/// the blob carries the #1595 fix as an overlay. Runs the vendored `dist-cjs`
-/// for real, so the overlay is proven on bytes the runtime produced.
+/// Upstream 7.27.0 declared a network entity delete as 12 bytes and wrote 16;
+/// the blob overlaid the #1595 fix until the auth-server 7.29.1 line carried it
+/// upstream. Runs the vendored `dist-cjs` for real, so the fix is proven on
+/// bytes the runtime produced, whichever side it comes from.
 #[test]
 fn the_vendored_ecs_frames_a_network_entity_delete_by_its_declared_length() {
     if Command::new("node").arg("--version").output().is_err() {

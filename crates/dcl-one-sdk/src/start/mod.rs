@@ -675,6 +675,60 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
                 .with_state(state.clone()),
         )
         .layer(middleware::from_fn_with_state(state, access_log))
+        .layer(compression_layer())
+}
+
+/// gzip, fastest level, on text-like bodies above 1 KB: the scene's chunks
+/// (`prebuilt/core.js` is 475 KB raw, 122 KB gzipped), the inspector's
+/// bundles, JSON. Never media (already compressed), never `text/event-stream`
+/// (buffering would hold the events back), and never a body with no
+/// content-type, which is what the websocket upgrades answer with. Only gzip
+/// is compiled in: brotli would add a native crate to every build for a
+/// preview served over loopback or a tunnel.
+fn compression_layer() -> tower_http::compression::CompressionLayer<
+    tower_http::compression::predicate::And<
+        tower_http::compression::predicate::SizeAbove,
+        TextLike,
+    >,
+> {
+    use tower_http::compression::predicate::{Predicate as _, SizeAbove};
+    tower_http::compression::CompressionLayer::new()
+        .quality(tower_http::CompressionLevel::Fastest)
+        .compress_when(SizeAbove::new(1024).and(TextLike))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TextLike;
+
+impl tower_http::compression::Predicate for TextLike {
+    fn should_compress<B>(&self, response: &axum::http::Response<B>) -> bool
+    where
+        B: axum::body::HttpBody,
+    {
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(compressible_mime)
+    }
+}
+
+fn compressible_mime(content_type: &str) -> bool {
+    let mime = content_type.split(';').next().unwrap_or("").trim();
+    if mime == "text/event-stream" {
+        return false;
+    }
+    mime.starts_with("text/")
+        || matches!(
+            mime,
+            "application/javascript"
+                | "application/x-javascript"
+                | "application/json"
+                | "application/manifest+json"
+                | "application/wasm"
+                | "application/xml"
+                | "image/svg+xml"
+        )
 }
 
 /// The `optimized-assets-url` the join block advertises. Never alongside

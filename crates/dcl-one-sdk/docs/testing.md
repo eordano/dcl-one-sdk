@@ -58,8 +58,12 @@ unless `ALLOW_SKIPPED_INTEGRATION=1` lets them skip.
 
 `data_layer_ui` and its driver `scripts/creator-hub-ui-drive.sh` are **not in
 the published tree**: `dcl-one-sdk-standalone-assemble.sh` excludes `scripts/`
-(bar `pin-abgen.sh` and `golden-runtime.mjs`) and `tests/data_layer_ui.rs`, as
-dev harnesses reaching for private tooling. Both live in the upstream source
+(bar the pin scripts, `golden-runtime.mjs` and the `*.test.mjs` files that
+`tests/loader_utf8.rs`, `tests/loader_mp.rs` and `tests/host_storage.rs` shell
+out to — its `KEEP_RE`) and `tests/data_layer_ui.rs`, as dev harnesses reaching
+for private tooling. A new Rust test that runs a script under `scripts/` needs
+that script added to `KEEP_RE`, or the published tree's `cargo test` fails
+wherever node exists. Both live in the upstream source
 checkout only, where the test also needs a chromium on the machine.
 
 **`node` is not on this list on purpose.** `golden`'s runtime tier needs it and

@@ -479,7 +479,14 @@ pub(super) async fn contents(
             Err(e) => Some((Err(e), file)),
         }
     });
-    (response_headers, axum::body::Body::from_stream(stream)).into_response()
+    // fused: the gzip layer's body adapter polls once more after the stream
+    // ends (tower-http BodyIntoStream, "you never know"), and an unfused
+    // `unfold` panics on that poll, closing the connection mid-response
+    (
+        response_headers,
+        axum::body::Body::from_stream(futures::StreamExt::fuse(stream)),
+    )
+        .into_response()
 }
 
 fn file_etag(meta: &std::fs::Metadata) -> String {

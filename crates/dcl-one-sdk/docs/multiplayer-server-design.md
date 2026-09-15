@@ -159,6 +159,37 @@ The loop is closed end to end, verified headlessly:
 - The acceptance scene pauses building with a notice when the host goes
   silent (heartbeat grace covers joining) instead of dropping lays.
 
+## Revised (2026-09-15): upstream's Room replaces the DCLR stand-in
+
+The vendored `@dcl/sdk` moved from mainline 7.27.0 to the `auth-server`
+line (`7.29.1-34986384248.commit-bb45080`), which ships the surface the
+stand-in imitated: `isServer()`, `registerMessages`/`getRoom` (a `Room`
+over `binaryMessageBus`, CUSTOM_EVENT frames with schema-encoded
+payloads), `@dcl/sdk/server` (`Storage`/`EnvVar`, off-server calls throw
+"only available on server-side scenes") and `@dcl/ecs`'s
+`AUTHORITATIVE_PUT_COMPONENT` + `CreatedBy`. Both ends now run the same
+chunk, so the JSON envelope, `mp-client.js`, the loader's inbox/outbox
+and the host's grafted network facade are gone. What remains is glue:
+
+- **Host** (`host-runtime.mjs`): answers `EngineApi.isServer` with true,
+  stamps every inbound door frame `[senderLen][sender][payload]` (the
+  engine's own framing, which the sdk's bus decodes), overrides the
+  chunk's `@dcl/sdk/server` key with `host-storage.mjs`, and feeds the
+  scene a `RealmInfo` PUT through `crdtSendToRenderer`'s answer whose
+  `isConnectedSceneRoom` follows the door -- the sync transport's
+  room-ready state hangs off `RealmInfo.onChange`, and ecs `onChange`
+  fires only for CRDT arriving over a transport.
+- **Loader** (`split-loader.js`, flag-armed): the sdk's client trusts CRDT,
+  state responses and room events only from the sender
+  `authoritative-server`; the engine names peers by hex address and the
+  preview host is mini-comms' zero address, so the wrap re-labels frames
+  from that address. Production comms already present the scene-state
+  server under that name, and no real peer owns the zero address.
+- **Blob overlay** (`patch_sdk_peer_trust`, `src/vendor/README.md`): the
+  same sender check is gated on `globalThis.__dclOneAuthoritative`, set
+  by the loader from the flag, so a scene without a server keeps
+  mainline's peer trust and serverless-multiplayer scenes keep syncing.
+
 ## Landed (2026-09-15): M3 storage
 
 Storage moved from a JSON file the isolate owned to a service the preview
@@ -209,6 +240,13 @@ wallet (today: a private key, or the preview's proxy with the Deploy page's
 session), and the hardening list below. Client-side inbound sender identity is not verifiable (the platform
 hands scenes bytes, not senders) -- state authority lives server-side where the
 relay stamps addresses.
+
+The headless half of that verification is `tests/host_room.rs`: a flagged
+scene built the way `start` builds it, the real host isolate joined through
+an in-process mini-comms door, and a fake explorer peer that must receive
+the host's unicast `RES_CRDT_STATE` for its `REQ_CRDT_STATE` and a `pong`
+custom event whose `from` is the peer's own address, proving the sender
+stamp, the `to` list and upstream's `Room` end to end over the wire.
 
 ## Non-goals for now
 

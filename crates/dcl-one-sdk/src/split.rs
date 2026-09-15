@@ -20,6 +20,13 @@ const MARKER_FILE: &str = "split";
 /// throw for a scene that imports either subpath directly: `scene_externals()`
 /// has always externalised all of `@dcl/sdk/*`, which is broader than the
 /// registry on purpose.
+///
+/// `@dcl/sdk/server`, the three `@dcl/sdk/network/*` subpaths and
+/// `@dcl/sdk/testing/assert` are the auth-server line's public modules
+/// (7.29.1-34986384248.commit-bb45080): decentraland/sdk7-test-scenes imports
+/// `server`, `network/message-bus-sync` and `testing/assert` by name, and the
+/// `network/events` docstring is upstream's own example import for
+/// `registerMessages`/`getRoom`. Each key costs the chunk one lazy getter.
 const REGISTRY_KEYS: &[&str] = &[
     "@dcl/sdk",
     "@dcl/sdk/ecs",
@@ -30,10 +37,15 @@ const REGISTRY_KEYS: &[&str] = &[
     "@dcl/sdk/message-bus",
     "@dcl/sdk/players",
     "@dcl/sdk/network",
+    "@dcl/sdk/network/events",
+    "@dcl/sdk/network/message-bus-sync",
+    "@dcl/sdk/network/binary-message-bus",
+    "@dcl/sdk/server",
     "@dcl/sdk/ethereum-provider",
     "@dcl/sdk/platform",
     "@dcl/sdk/text-codec",
     "@dcl/sdk/testing",
+    "@dcl/sdk/testing/assert",
     "@dcl/sdk/internal/Observable",
     "@dcl/ecs",
     "@dcl/ecs/dist/components",

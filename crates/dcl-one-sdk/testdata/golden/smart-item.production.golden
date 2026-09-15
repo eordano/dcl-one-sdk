@@ -1,10 +1,10 @@
 (dcl-one-sdk golden v1 smart-item production)
-TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:f8187c13bd82fe96
-SCENE_COMPILED_JS_SIZE_PROD=637.5k bytes
-  ARTIFACT bin/index.js               9920 sha256=31a0b7564f899aa1
+TOOLCHAIN sdk=7.29.1-34986384248.commit-bb45080 ecs=7.29.1-34986384248.commit-bb45080 bundler=rolldown-1.2.6 blob=sha256:d8ff1c6a32532743
+SCENE_COMPILED_JS_SIZE_PROD=660.3k bytes
+  ARTIFACT bin/index.js              10538 sha256=f1857a422452c486
   ARTIFACT bin/scene.js               1876 sha256=c22d2907c0387685
-  ARTIFACT bin/sdk-runtime.js       475121 sha256=fcbc5df482e2280a
-  ARTIFACT bin/sdk-smart-items.js   150541 sha256=9713d47d46fa10aa
+  ARTIFACT bin/sdk-runtime.js       497454 sha256=9322b30b0877230b
+  ARTIFACT bin/sdk-smart-items.js   150450 sha256=9ec86f8a544a2874
 LOADER sdk=bin/sdk-runtime.js smart=bin/sdk-smart-items.js scene=bin/scene.js max_composite_entity=512
 ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
@@ -91,13 +91,13 @@ ENTITY_NAMES assets/scene/entity-names.ts
     Counter_Box = "Counter Box",
   } 
 MAIN_CRDT main.crdt 235 bytes sha256=6c587977670027c8 (native, 1 composite)
-DEPLOY entity=bafkreic5xvyr573kgrip7fo3xonokomzok62hgnzf5zvvsxudailsgiupq files=7 total=640.1k bytes
+DEPLOY entity=bafkreiadyp64oifd5gzlh5lykhah2b32pc64bgp3kyvqjv4nvfpo7amsnq files=7 total=663.0k bytes
   bafkreifcxq62bje63i3khsvr45s3bkmtbvdutbhwehvfhc3yvspj6jrvda scene.json 167 bytes
   bafkreidmlb4xozyae7ejrd7tnw6qct7ppr3j6w4s4qpdrvzahvgvbsekca main.crdt 235 bytes
-  bafkreiexcpkh2rx2ccvdf3xlfze7iq2eloifeaziszc52njdznxmtwk72e bin/sdk-smart-items.js 150541 bytes
-  bafybeihfvu3ddvodkkgzbmx6wuctpvpcdvl6qwomhkxe6sndzejgq457ay bin/sdk-runtime.js 475121 bytes
+  bafkreie6zbxyuvckfb2bnwkspsfe5yqnannwr3tn3bak3xci6uhyjaqsaa bin/sdk-smart-items.js 150450 bytes
+  bafybeihojtsshznnhpf2jd4t2ahrlb5sti26rxsnprt4brtczo2ba7twmu bin/sdk-runtime.js 497454 bytes
   bafkreigcfuuqpqbyo2c3pul4xsjayjnbzgwigy6qftsnp3jidgt3vkcjtq bin/scene.js 1876 bytes
-  bafkreibruc3vmt4jtkqvsmmqbwn64ta4qvu5q7ep7yrpn2fblvmvzpwrwu bin/index.js 9920 bytes
+  bafkreihrqv5eejcsysddmzvbhmuiltlevu3bccuw37dijqxesjdcyrtoha bin/index.js 10538 bytes
   bafkreidxhlr4biomfortriklj6fnne7kzhvayixkmd6ynx2dlsoswh654a assets/scene/main.composite 2230 bytes
 EVAL bin/index.js
   READFILE: bin/sdk-runtime.js
@@ -107,9 +107,9 @@ EVAL bin/index.js
   REQUIRE: ~system/EngineApi
   REQUIRE: ~system/CommunicationsController
   REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/SignedFetch
   REQUIRE: ~system/EthereumController
   REQUIRE: ~system/RestrictedActions
-  REQUIRE: ~system/SignedFetch
   REQUIRE: ~system/CommsApi
 CALL onStart()
   main.crdt: PUT_COMPONENT e=0x200 c=1 t=0 data={"position":{"x":8,"y":1,"z":8},"rotation":{"x":0,"y":0,"z":0,"w":1},"scale":{"x":1,"y":1,"z":1},"parent":0}

@@ -6,7 +6,9 @@ uses: `@dcl/sdk` (with `@dcl/ecs`, `@dcl/react-ecs`, `@dcl/js-runtime`,
 `@dcl/ecs-math` and their runtime deps) plus `typescript` for the type check. Pure
 JS, no platform binaries — one blob serves linux, macOS and Windows.
 
-The blob is a registry install of the released 7.27.0 toolchain plus the
+The blob is a registry install of upstream's `auth-server` line - `@dcl/sdk`
+`7.29.1-34986384248.commit-bb45080`, the npm dist-tag `auth-server`, the one
+that ships `isServer`, `registerMessages` and `@dcl/sdk/server` - plus the
 rewrites `scripts/build-base-blob.py` applies on top. Every rewrite lives in
 `scripts/blob_overlays.py`; the complete list, derived from that module
 (`scripts/blob_collect.py` decides what of the install ships at all — its
@@ -14,7 +16,7 @@ pruning removes files, never edits one):
 
 | function | what the blob carries that the install did not |
 | --- | --- |
-| `patch_ecs_network_delete_length()` | the one overlay on upstream `@dcl/*` JS: `@dcl/ecs`'s `DeleteEntityNetwork.write` length fix (upstream #1595, unreleased), in the shipped `dist-cjs/serialization/crdt/network/deleteEntityNetwork.js` and, via the patched install tree, in `prebuilt/core.js`; `check_chunk_netdelete()` fails the build unless the chunk carries it. Detailed under **7.27.0** below. |
+| `patch_sdk_peer_trust()` | the one overlay on upstream `@dcl/*` JS: the auth-server line's sync transport applies CRDT, state responses and room events only from the sender `authoritative-server`; three handlers in `@dcl/sdk/network/message-bus-sync.js` and `network/events/implementation.js` are gated on `globalThis.__dclOneAuthoritative` (set by the split loader from scene.json's `authoritativeMultiplayer`) so a scene without a server keeps mainline's peer trust. Applied to the install tree before bundling, so it lives in `prebuilt/core.js` only; `check_chunk_peer_trust()` fails the build unless the chunk carries it. Detailed under **7.29.1** below. |
 | `patch_ecs7_tsconfig()` | `@dcl/sdk/types/tsconfig.ecs7.json`: `downlevelIteration` and `suppressExcessPropertyErrors` removed, `moduleResolution` `node` -> `bundler`; every scene extends this file (`docs/ts7-migration.md`). Each edit must match exactly once — the build fails naming an edit upstream has already shipped (drop it from `ECS7_EDITS`), and tells you to delete the function once all three have. |
 | `add_pbmin()` | `node_modules/protobufjs` is not upstream's: 4 files from `experiments/protobufjs-minimal-replacement` (`package.json` at version `7.2.4-dcl-one-sdk-pbmin.1`, `LICENSE`, `index.js`, `minimal.js`); `swap_pbmin_into_tree()` points the install tree at the same code before the chunks are bundled, and `check_chunk_pbmin()` fails the build if `prebuilt/core.js` stops carrying it. |
 | `add_shim()` | `node_modules/@dcl/inspector` is hand-authored, not a registry package: 8 files copied verbatim from `src/vendor/inspector-shim` (`index.js`, `engine.js`, `engine-to-composite.js`, `host.js`, `component-schemas.json`, `minimal-composite.json`, `root-components.json`, `package.json`). |
@@ -32,6 +34,77 @@ both shipped upstream: `@dcl/sdk` no longer imports `text-encoding`, so the
 549 KB polyfill is gone and the last regression vs the old overlaid blob is
 closed.
 
+**7.29.1-34986384248.commit-bb45080 (2026-09-15).** Not a release: the
+`auth-server` dist-tag of `@dcl/sdk`, `@dcl/ecs` and `@dcl/js-runtime`
+(js-sdk-toolchain branch commit bb45080), pinned because it is the only
+published line where a scene's `import { isServer, registerMessages } from
+'@dcl/sdk/network'` and `import { Storage } from '@dcl/sdk/server'` resolve -
+mainline 7.29.0 has neither. What it brings: `isServer()` (asked of
+`~system/EngineApi.isServer` at module init; every harness stub answers
+false, the host isolate true), `registerMessages`/`getRoom` (a `Room` over
+`binaryMessageBus`, `CUSTOM_EVENT` frames with schema-encoded payloads, sent
+to `[address]` or broadcast), `@dcl/sdk/server` (`Storage`, `EnvVar`; every
+call off-server throws "is only available on server-side scenes"),
+`@dcl/ecs`'s `AUTHORITATIVE_PUT_COMPONENT` (CRDT message type 8) with the
+`CreatedBy` manual component, `AvatarNametag`, #1582's `Schemas.Optional`
+(da82bfb0: `false`/`0`/`''` are written as present, only `undefined`/`null`
+is absent) and #1570's `Schemas.OneOf` (0dce4d2d: a value with no `$case`
+writes index 0 instead of throwing) - `schema_crdt.rs` moved with both, and
+`testdata/{gather,gather2,museum}-main.crdt` were regenerated through the
+node data-layer because those composites carry falsy optionals (+12, +12
+and +16 bytes; opera unchanged) - and #1595's network-delete
+framing fix as upstream's own code - so the 7.27.0 overlay below is gone,
+`schema_parity.rs::the_vendored_ecs_frames_a_network_entity_delete_by_its_declared_length`
+now proving upstream's bytes. The line's `CommsMessage` ids moved (CRDT 7,
+REQ_CRDT_STATE 8, RES_CRDT_STATE 9, CRDT_SERVER 4, CRDT_AUTHORITATIVE 5,
+CUSTOM_EVENT 6); both ends of a preview run this chunk, so nothing here
+depends on the old numbering.
+
+* **Peer trust is an accepted divergence, gated.** Mainline's client applies
+  every peer's CRDT; this line's applies only the authoritative server's
+  (`AUTH_SERVER_PEER_ID`), which would silently stop every
+  serverless-multiplayer scene (`syncEntity` with no server) from syncing the
+  moment it was rebuilt. `patch_sdk_peer_trust()` gates the three checks on
+  `globalThis.__dclOneAuthoritative`: the split loader sets it from
+  scene.json's flag, so a flagged scene runs upstream's server-only semantics
+  verbatim and an unflagged one keeps 7.29.0's. `CRDT_AUTHORITATIVE` stays
+  server-only either way, and the wire format is untouched. Each edit is
+  exact-substring, applied exactly once, accepted as already present only
+  under `--reuse-install`; `check_chunk_peer_trust()` requires the global
+  named at least twice in `prebuilt/core.js` and never in `smart.js`, and
+  `init.rs::blob_tracks_the_scaffold_pin_and_carries_the_ecs_fixes` pins the
+  same on the shipped chunk. Removal condition: an upstream client that
+  accepts peer CRDT without a server, or a decision that unflagged scenes need
+  one.
+* **The preview host is the authoritative server.** The engine names peers by
+  hex address, so `split-loader.js` (flag-armed) re-labels inbound frames
+  from mini-comms' zero address as `authoritative-server`, and
+  `host-runtime.mjs` runs upstream's transport for real: answers `isServer`,
+  stamps every inbound door frame `[senderLen][sender][payload]` (the
+  engine's framing, which `binaryMessageBus` decodes), and feeds the scene a
+  `RealmInfo` PUT through `crdtSendToRenderer`'s answer because the
+  transport's room-ready state hangs off `RealmInfo.onChange` and ecs
+  `onChange` fires only for CRDT arriving over a transport. The JSON room
+  envelope and the grafted network facade of 0.25/0.26 are deleted; the
+  host still rebinds `@dcl/sdk/server` to `host-storage.mjs`.
+* **Sizes.** 404 files, 9,865,543 B unpacked, **1,935,209 B**
+  zipped, from 423 / 13,009,091 / 2,429,943. The line itself costs +4 files
+  and +61 KB unpacked (`prebuilt/core.js` 475,139 -> 497,454 B for the room,
+  server and authoritative-put code; `@dcl/js-runtime/index.d.ts` +38 KB of
+  declarations for them). Two prunes pay for it many times over, both in
+  `scripts/blob_collect.py`: `TS_LIB_RE` keeps only TypeScript's ECMAScript
+  libraries (`lib.es5`, every `lib.es20xx.*` and `lib.esnext.*`,
+  `lib.decorators*`: 87 files) and drops `lib.dom*`, `lib.webworker*`,
+  `lib.scripthost`, `lib.d.ts`, `lib.es6` and every `*.full.d.ts` - 21 files,
+  3,163,952 B, none of which the scene tsconfig (`lib: ["ES2020"]`, inherited
+  from `tsconfig.ecs7.json`) can reach; and `long` ships its `umd/` build
+  alone (`exports.require` routes `require('long')` there; the ESM copy was
+  44 KB nothing loaded - `umd/package.json`'s `"type": "commonjs"` must stay,
+  or node reads the umd file as ESM and `require('long')` returns an empty
+  namespace). The pbmin package also follows its committed source
+  (`experiments/protobufjs-minimal-replacement/index.js`, 42,021 B; the
+  previous blob had bundled a 47,437 B working copy).
+
 **7.27.0 (2026-09-04).** Same 422 files, same transitive set and versions
 (`@dcl/rpc` 1.1.2, `ws` 8.21.3, `long` 5.3.2, `mitt` 3.0.1, `typescript`
 6.0.3). Zip size as one history: the previous pin zipped to 2,424,187 B, a pure
@@ -46,8 +119,11 @@ the scene runtime through `prebuilt/core.js`, not only the node-side `dist-cjs`.
 Two `@dcl/ecs` fixes landed upstream on 2026-09-03, after 7.27.0, and the
 wholesale-at-release rule treats them differently:
 
-* **#1595 is overlaid now** (js-sdk-toolchain 5ae3ef7c; decision ED,
-  2026-09-04). `DeleteEntityNetwork.write` declared
+* **#1595 was overlaid** from 2026-09-04 until the auth-server line carried
+  it upstream (2026-09-15; `patch_ecs_network_delete_length()`,
+  `check_chunk_netdelete()` and the `NETDELETE_*` constants are deleted, the
+  tests that pinned the framing stay and pass on upstream's code).
+  Js-sdk-toolchain 5ae3ef7c; decision ED, 2026-09-04. `DeleteEntityNetwork.write` declared
   `CRDT_MESSAGE_HEADER_LENGTH + 4` for an eight-byte body (entity + network
   id). `@dcl/ecs` reads its own stream field by field and never noticed; the
   bevy engine's CRDT reader frames strictly
@@ -67,15 +143,13 @@ wholesale-at-release rule treats them differently:
   copies) and
   `schema_parity.rs::the_vendored_ecs_frames_a_network_entity_delete_by_its_declared_length`,
   which runs the vendored `dist-cjs` and frames its output as the engine does.
-  **Removal condition:** the first release carrying #1595. The rewrite must find
-  the buggy line exactly once, so a rebuild on that release fails, telling you
-  to delete `NETDELETE_*`, both functions, this paragraph and the table row
-  above; the overlay cannot idle unnoticed.
-* **#1582 stays deferred.** `Schemas.Optional` treats `false`/`0`/`''` as
-  absent; the fix is a wire-format change `schema_crdt.rs` mirrors on purpose
-  (its optional encoding reproduces upstream's truthiness test), so it lands
-  with that encoder and the `testdata/*.crdt` fixtures at the release carrying
-  it, not alone.
+  Its removal condition was the first line carrying #1595, and the rewrite
+  requiring the buggy line exactly once is what made the 7.29.1 rebuild fail
+  loudly instead of idling.
+* **#1582 was deferred here.** 7.27.0's `Schemas.Optional` treats
+  `false`/`0`/`''` as absent; the fix is a wire-format change, so it was left
+  to land together with the `schema_crdt.rs` encoder that mirrors it - which
+  it did with the 7.29.1 line (next section).
 
 **Build it with `scripts/build-base-blob.py`.** Regenerating below walks the
 pipeline step by step; the script is the source of truth. It derives its install
@@ -84,10 +158,11 @@ from the scaffold pin), keeps only what is reachable from the code that ships
 (`scripts/blob_collect.py`), applies the rewrites above
 (`scripts/blob_overlays.py`), and fails if any kept file has an import that
 would not resolve; its module docstring carries the evidence for every prune.
-Current output: **422 files, 12,980,975 B (12.38 MB) unpacked, 2,426,312 B
-(2.31 MB) zipped** - down from 2,999 / 45.0 MB / 11.0 MB, mostly the prebuilt
-SDK export (chunks + a types rollup replace the SDK source tree) and dropping
-the vendored editor. Before the data-layer host landed it was 424 / 12.07 MB /
+Current output: **404 files, 9,865,543 B (9.87 MB) unpacked,
+1,935,209 B (1.94 MB) zipped** - down from 2,999 / 45.0 MB / 11.0 MB,
+mostly the prebuilt SDK export (chunks + a types rollup replace the SDK source
+tree), dropping the vendored editor, and (2026-09-15) shipping only the
+TypeScript libraries a scene can reach. Before the data-layer host landed it was 424 / 12.07 MB /
 2.27 MB; that host cost **+23 files, +0.28 MB unpacked, +0.05 MB zipped**, and
 replacing upstream `protobufjs` with our own drop-in then took that back off and
 more (exact figures below).
@@ -446,14 +521,13 @@ against, 1 that cannot build for unrelated reasons (missing third-party dep).
 
 Run `python3 scripts/build-base-blob.py`; it needs a `target/release/dcl-one-sdk`
 for the chunk build (`--sdk-bin` points elsewhere), and `--reuse-install` keeps
-the previous `--work` tree (`--keep-work` on the earlier run). Of the two
-install-tree rewrites in step 4 only `swap_pbmin_into_tree()` is idempotent -
-the entry it writes re-exports a sibling, never itself. The other,
-`patch_ecs_network_delete_length()`, finds its fixed line already in place on a
-reused tree, which on a fresh install is the signal that upstream #1595 has
-shipped and the overlay must go; it tolerates the reused tree only because
-`main()` passes the flag through and the function accepts the fixed line under
-it. The steps below are what the script does, in the order `main()` runs them,
+the previous `--work` tree (`--keep-work` on the earlier run). Both
+install-tree rewrites in step 4 survive a reused tree: `swap_pbmin_into_tree()`
+because the entry it writes re-exports a sibling, never itself, and
+`patch_sdk_peer_trust()` because it recognises its own gated lines and skips
+them - only under `--reuse-install`, which `main()` passes through; on a fresh
+install the same lines mean upstream shipped the gate and the overlay must go.
+The steps below are what the script does, in the order `main()` runs them,
 each naming the function that owns it — recorded so the script stays auditable.
 
 1. **Install** (`main()`): empty `--work` dir, `corepack pnpm add
@@ -488,21 +562,29 @@ each naming the function that owns it — recorded so the script stays auditable
    exactly `node typescript/lib/tsc.js -p tsconfig.json --noEmit`, and that run
    under a node with `Module._resolveFilename` and the `fs` read family hooked
    touches precisely `lib/tsc.js`, the `lib/_tsc.js` it requires,
-   `package.json`, and 45 `lib/lib.*.d.ts`. So `lib/typescript.js` (8.7 MB,
-   the programmatic API), `typescript.d.ts`, every `tsserver*` file and the 13
-   locale directories (4.2 MB) all go - 22.5 MB -> 9.6 MB. Locales are safe to
-   drop: with `lib/ja/` present `tsc --locale ja` prints Japanese; with every
-   locale directory deleted the same command exits 0 and prints English.
+   `package.json`, and 45 `lib/lib.*.d.ts` (`lib.es5`, the
+   `lib.es2015`-`lib.es2020` pieces, `lib.decorators*`). So `lib/typescript.js`
+   (8.7 MB, the programmatic API), `typescript.d.ts`, every `tsserver*` file
+   and the 13 locale directories (4.2 MB) all go - 22.5 MB -> 9.6 MB - and
+   since 2026-09-15 so do the 21 non-ECMAScript libraries (`lib.dom*`,
+   `lib.webworker*`, `lib.scripthost`, `lib.d.ts`, `lib.es6`, `*.full`:
+   3.16 MB) that no `lib` a scene inherits from `tsconfig.ecs7.json` names -
+   9.6 MB -> 6.6 MB. `TS_LIB_RE` keeps every ES year through `esnext` so a
+   scene raising `lib` still resolves; one naming the DOM has to `npm
+   install`. Locales are safe to drop: with `lib/ja/` present `tsc --locale
+   ja` prints Japanese; with every locale directory deleted the same command
+   exits 0 and prints English.
 4. **The rewrites** (`scripts/blob_overlays.py`, in this order):
    `add_pbmin()`, `add_shim()`, `build_service_descriptor()` and
    `patch_ecs7_tsconfig()` on the collected files; then
-   `swap_pbmin_into_tree()` and `patch_ecs_network_delete_length()` on the
-   *install tree*, because step 5 resolves against it and must bundle the same
-   bytes the blob ships. The table at the top of this file is that list.
+   `swap_pbmin_into_tree()` and `patch_sdk_peer_trust()` on the *install
+   tree*, because step 5 resolves against it and must bundle the same bytes
+   the blob ships (the peer-trust files ship only inside the chunk). The
+   table at the top of this file is that list.
 5. **Build products** (`build-base-blob.py`): `build_chunks()` shells out to
    `dcl-one-sdk vendor-chunks` against the unpruned tree for
    `@dcl/sdk/prebuilt/{core,smart}.js` + `registry.json`;
-   `check_chunk_pbmin()` and `check_chunk_netdelete()` fail the build if either
+   `check_chunk_pbmin()` and `check_chunk_peer_trust()` fail the build if either
    tree rewrite did not reach the chunk; `build_types_rollup()` writes
    `@dcl/js-runtime/index.d.ts`.
 6. **Resolver check** (`resolvable()` over `specifiers_in_files()`): re-scan
@@ -516,11 +598,15 @@ each naming the function that owns it — recorded so the script stays auditable
    at the archive root. Base-blob files are `require`d from disk and read by
    tsc, so unlike browser bundles they cannot be shipped gzipped - pruning and
    dedupe only. The result is reproducible while the registry resolves the
-   same versions: two fresh installs on 2026-09-04 produced the committed zip
-   byte for byte (sha256 `46b04264e308...444be8`).
+   same versions: two fresh installs on 2026-09-04 produced that day's zip
+   byte for byte, and the two fresh installs of 2026-09-15 differed only by
+   the file the second one's allowlist added (sha256 of the committed zip:
+   `d8ff1c6a3253...e40daf`).
 8. **Prove it before committing**: `dcl-one-sdk init` in an empty dir, then
    `build --production` (rolldown + type check) with a scene importing
-   `@dcl/sdk/players` and `@dcl/sdk/network`, then `start` and probe `/about`.
+   `@dcl/sdk/players`, `isServer` and `registerMessages` from
+   `@dcl/sdk/network` and `Storage` from `@dcl/sdk/server`, then `start` and
+   probe `/about`.
    A `.composite` scene must still reach `[4/5] main.crdt regenerated`, the
    test that the `@dcl/inspector` stand-in survived the rebuild; and
    `cargo test --test data_layer_rpc` with `DCL_ONE_SDK_TEST_NODE_MODULES` set

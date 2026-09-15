@@ -73,13 +73,45 @@ function __dclOneDecode(__dclOneBytes) {
   return __dclOneParts.join('')
 }
 
-// Authoritative-multiplayer arming (scene.json authoritativeMultiplayer):
-// wraps CommunicationsController so room-message envelopes (the 4-byte DCLR
-// magic) are folded out of the sync transport's inbound stream into
-// __dclOneMpInbox, and queued outbound envelopes in __dclOneMpOutbox ride
-// the transport's next sendBinary. The mp-client entry module owns both
-// queues; without the flag this is a literal false and nothing changes.
+// Authoritative-multiplayer arming (scene.json authoritativeMultiplayer).
+// Two effects, both read by the sdk chunk's sync transport:
+//
+// 1. globalThis.__dclOneAuthoritative tells the chunk whether the scene has a
+//    server to trust. The auth-server @dcl/sdk line applies CRDT, state
+//    responses and room events only from the sender 'authoritative-server';
+//    without the flag the blob's overlay (scripts/blob_overlays.py,
+//    patch_sdk_peer_trust) falls back to mainline's peer trust so a
+//    serverless-multiplayer scene keeps syncing.
+// 2. With the flag, CommunicationsController is wrapped so inbound frames
+//    the engine stamped with the preview host's zero address (mini-comms
+//    HOST_ADDRESS) are re-labelled as 'authoritative-server': the engine
+//    names peers by hex address and cannot present the host as anything
+//    else, while production comms already present the scene-state server
+//    under that name (and no real peer owns the zero address).
+//
+// Without the flag __dclOneMp is a literal false and nothing changes.
 var __dclOneMp = __DCL_ONE_MP__
+globalThis.__dclOneAuthoritative = __dclOneMp
+var __dclOneAuthorityLabel = 'authoritative-server'
+// [senderLen u8][sender utf8][payload]: is the sender 0x + 40 zeros?
+function __dclOneFromHost(__dclOneMsg) {
+  if (!__dclOneMsg || __dclOneMsg.length < 43 || __dclOneMsg[0] !== 42) return false
+  if (__dclOneMsg[1] !== 48 || (__dclOneMsg[2] | 32) !== 120) return false
+  for (var __dclOneI = 3; __dclOneI < 43; __dclOneI++) {
+    if (__dclOneMsg[__dclOneI] !== 48) return false
+  }
+  return true
+}
+function __dclOneRelabelHost(__dclOneMsg) {
+  if (!__dclOneFromHost(__dclOneMsg)) return __dclOneMsg
+  var __dclOneOut = new Uint8Array(1 + __dclOneAuthorityLabel.length + (__dclOneMsg.length - 43))
+  __dclOneOut[0] = __dclOneAuthorityLabel.length
+  for (var __dclOneI = 0; __dclOneI < __dclOneAuthorityLabel.length; __dclOneI++) {
+    __dclOneOut[1 + __dclOneI] = __dclOneAuthorityLabel.charCodeAt(__dclOneI)
+  }
+  __dclOneOut.set(__dclOneMsg.subarray(43), 1 + __dclOneAuthorityLabel.length)
+  return __dclOneOut
+}
 function __dclOneMpWrap(__dclOneHostRequire) {
   if (!__dclOneMp) return __dclOneHostRequire
   var __dclOneComms = null
@@ -89,43 +121,17 @@ function __dclOneMpWrap(__dclOneHostRequire) {
     }
     if (__dclOneComms) return __dclOneComms
     var __dclOneReal = __dclOneHostRequire(__dclOneSpec)
-    var __dclOneInbox = (globalThis.__dclOneMpInbox = globalThis.__dclOneMpInbox || [])
-    var __dclOneOutbox = (globalThis.__dclOneMpOutbox = globalThis.__dclOneMpOutbox || [])
     __dclOneComms = {
       send: function (__dclOneBody) {
         return __dclOneReal.send(__dclOneBody)
       },
       sendBinary: function (__dclOneBody) {
-        var __dclOnePeer = (__dclOneBody && __dclOneBody.peerData) || []
-        if (__dclOneOutbox.length) {
-          __dclOnePeer = __dclOnePeer.slice()
-          for (var __dclOneI = 0; __dclOneI < __dclOneOutbox.length; __dclOneI++) {
-            __dclOnePeer.push(__dclOneOutbox[__dclOneI])
-          }
-          __dclOneOutbox.length = 0
-        }
-        var __dclOneReq = {
-          data: (__dclOneBody && __dclOneBody.data) || [],
-          peerData: __dclOnePeer
-        }
-        return __dclOneReal.sendBinary(__dclOneReq).then(function (__dclOneRes) {
+        return __dclOneReal.sendBinary(__dclOneBody).then(function (__dclOneRes) {
           var __dclOneData = (__dclOneRes && __dclOneRes.data) || []
-          var __dclOneKept = []
           for (var __dclOneJ = 0; __dclOneJ < __dclOneData.length; __dclOneJ++) {
-            var __dclOneMsg = __dclOneData[__dclOneJ]
-            if (
-              __dclOneMsg.length > 4 &&
-              __dclOneMsg[0] === 68 &&
-              __dclOneMsg[1] === 67 &&
-              __dclOneMsg[2] === 76 &&
-              __dclOneMsg[3] === 82
-            ) {
-              __dclOneInbox.push(__dclOneMsg)
-            } else {
-              __dclOneKept.push(__dclOneMsg)
-            }
+            __dclOneData[__dclOneJ] = __dclOneRelabelHost(__dclOneData[__dclOneJ])
           }
-          return { data: __dclOneKept }
+          return { data: __dclOneData }
         })
       }
     }

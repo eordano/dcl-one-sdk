@@ -105,6 +105,8 @@ const HOST_MODULES = {
     }),
   }),
   '~system/EngineApi': () => ({
+    // the auth-server sdk asks at module init whether it is the scene server
+    isServer: async () => ({ isServer: false }),
     crdtSendToRenderer: async ({ data }) => {
       hostCalls.crdtSendToRenderer += 1
       for (const buffer of toBuffers(data)) {

@@ -6,12 +6,15 @@
 //   node host-runtime.mjs <sceneRoot> <doorWsUrl>
 //
 // The ~system table is the golden harness's grown live: readFile serves the
-// real files (and grafts the auth-server API surface onto the sdk chunk it
-// serves -- see PATCH below), CommunicationsController bridges the room, and
-// Storage/EnvVar ride the preview's storage routes (host-storage.mjs beside
-// this file). Room messages ride a "DCLR" magic-prefixed
-// JSON envelope so they never collide with the sync transport's CRDT bytes;
-// the relay stamps every inbound frame with the handshake-verified sender.
+// real files (and points the sdk chunk's '@dcl/sdk/server' at host-storage.mjs
+// -- see PATCH below), EngineApi answers isServer with true and feeds the
+// scene a RealmInfo whose isConnectedSceneRoom follows the door,
+// CommunicationsController bridges the room, and Storage/EnvVar ride the
+// preview's storage routes. The sync transport, registerMessages and getRoom
+// are upstream's own (@dcl/sdk auth-server line): room messages are
+// binaryMessageBus frames, and every inbound frame is stamped
+// [senderLen][sender][payload] with the relay-verified sender, exactly as the
+// engine stamps them for a client.
 'use strict'
 
 import fs from 'node:fs'
@@ -144,17 +147,23 @@ learnSceneId()
 // ---------------------------------------------------------------------------
 // room door: JSON websocket, relay-verified senders
 // ---------------------------------------------------------------------------
-const ROOM_MAGIC = Buffer.from('DCLR')
 let ws = null
 let welcomed = false
 let conceded = false
 // alias -> address, from welcome/join/leave frames
 const peers = new Map()
-// inbound non-room binary (sync transport bytes), drained by sendBinary
+// inbound scene binary, sender-stamped, drained by sendBinary
 let inboundSync = []
-// inbound room envelopes, dispatched to registered handlers
-const roomHandlers = new Map()
 let reconnectDelay = 1000
+
+// the engine's inbound framing (bevy crates/dcl/src/js/comms.rs): one byte
+// of sender length, the sender, then the scene bytes. The sdk's
+// binaryMessageBus decodes exactly this.
+function stampSender(from, body) {
+  const sender = Buffer.from(from, 'utf8')
+  if (sender.length > 255) return null
+  return new Uint8Array(Buffer.concat([Buffer.from([sender.length]), sender, body]))
+}
 
 function connect() {
   ws = new WebSocket(doorUrl)
@@ -181,6 +190,7 @@ function connect() {
       else announce()
       tech('scene: ' + (sceneId || '(pending)') + ' (alias ' + frame.alias + ')')
       tech('room: ' + doorUrl + (peers.size ? ' (' + peers.size + ' player(s) here)' : ''))
+      setRealmConnected(true)
       onPresence()
     } else if (frame.type === 'join') {
       peers.set(Number(frame.alias), String(frame.address).toLowerCase())
@@ -205,29 +215,13 @@ function connect() {
         }
         if (sceneId && unwrapped.sceneId && unwrapped.sceneId !== sceneId) return
         body = unwrapped.data
-      } else if (raw.subarray(0, 4).equals(ROOM_MAGIC)) {
+      } else if (raw.length) {
         body = raw
       } else {
         return
       }
-      if (body.subarray(0, 4).equals(ROOM_MAGIC)) {
-        let msg
-        try {
-          msg = JSON.parse(body.subarray(4).toString('utf8'))
-        } catch {
-          return
-        }
-        const handler = roomHandlers.get(msg.t)
-        if (handler) {
-          try {
-            handler(msg.p, { from })
-          } catch (e) {
-            console.error('[multiplayer] onMessage handler threw:', e)
-          }
-        }
-      } else {
-        inboundSync.push(new Uint8Array(body))
-      }
+      const stamped = from && stampSender(from, body)
+      if (stamped) inboundSync.push(stamped)
     } else if (frame.type === 'kicked') {
       // another host took the slot: concede instead of reconnecting, or two
       // hosts ping-pong kicking each other forever
@@ -239,6 +233,7 @@ function connect() {
   const retry = () => {
     if (conceded) return
     welcomed = false
+    setRealmConnected(false)
     setTimeout(connect, reconnectDelay)
     reconnectDelay = Math.min(reconnectDelay * 2, 15000)
   }
@@ -261,28 +256,6 @@ function doorSend(bytes, to) {
   ws.send(JSON.stringify(frame))
 }
 
-// ---------------------------------------------------------------------------
-// auth-server API surface, grafted onto the sdk chunk (see PATCH)
-// ---------------------------------------------------------------------------
-let roomSingleton = null
-function hostRegisterMessages(_schemas) {
-  // schema-validated parity is a doc'd TODO; the envelope is JSON either way
-  if (roomSingleton) return roomSingleton
-  roomSingleton = {
-    send(type, payload, opts) {
-      const body = Buffer.concat([
-        ROOM_MAGIC,
-        Buffer.from(JSON.stringify({ t: type, p: payload }), 'utf8')
-      ])
-      doorSend(body, opts && opts.to ? opts.to.map((a) => String(a).toLowerCase()) : undefined)
-    },
-    onMessage(type, cb) {
-      roomHandlers.set(type, cb)
-    }
-  }
-  return roomSingleton
-}
-
 // storage: the preview server owns the file and serves upstream's routes;
 // this side is upstream's client semantics (host-storage.mjs), bound to the
 // preview the door URL names (its path prefix kept, the door suffix dropped)
@@ -297,6 +270,58 @@ function onPresence() {
   presenceDirty = true
 }
 const presenceEntities = new Map()
+
+// RealmInfo -> the sdk sync transport. Its room-ready logic hangs off
+// RealmInfo.onChange(RootEntity).isConnectedSceneRoom, and ecs onChange fires
+// only for CRDT arriving over a transport, never for local writes, so the
+// host plays renderer: the next crdtSendToRenderer answers with a
+// PUT_COMPONENT for the root entity (reserved, which the renderer transport
+// alone may touch). Wire layout, @dcl/ecs PutComponentOperation.write:
+// u32 LE length, type=1, entity, componentId, timestamp, dataLength, data.
+let realmDirty = true
+let realmConnected = false
+let realmTimestamp = 0
+const realmPending = []
+function setRealmConnected(v) {
+  if (realmConnected !== v) realmDirty = true
+  realmConnected = v
+}
+function pushRealmInfo() {
+  const reg = fakeGlobal.__dclOneHostRegistry && fakeGlobal.__dclOneHostRegistry()
+  if (!reg) return
+  let engine, RealmInfo, ReadWriteByteBuffer
+  try {
+    const ecs = reg['@dcl/sdk/ecs']
+    engine = ecs.engine
+    RealmInfo = ecs.RealmInfo || ecs.components.RealmInfo(engine)
+    ReadWriteByteBuffer = reg['@dcl/ecs/dist/serialization/ByteBuffer'].ReadWriteByteBuffer
+  } catch {
+    return
+  }
+  if (!engine || !RealmInfo || !RealmInfo.schema || !ReadWriteByteBuffer) return
+  realmDirty = false
+  const value = {
+    baseUrl: previewBase,
+    realmName: 'dcl-one-host',
+    networkId: 0,
+    commsAdapter: 'host',
+    isPreview: true,
+    isConnectedSceneRoom: realmConnected
+  }
+  const data = new ReadWriteByteBuffer()
+  RealmInfo.schema.serialize(value, data)
+  const body = data.toBinary()
+  const msg = Buffer.alloc(24 + body.length)
+  msg.writeUInt32LE(msg.length, 0)
+  msg.writeUInt32LE(1, 4) // CrdtMessageType.PUT_COMPONENT
+  msg.writeUInt32LE(engine.RootEntity, 8)
+  msg.writeUInt32LE(RealmInfo.componentId, 12)
+  msg.writeUInt32LE(++realmTimestamp, 16)
+  msg.writeUInt32LE(body.length, 20)
+  msg.set(body, 24)
+  realmPending.push(new Uint8Array(msg))
+}
+
 function reconcilePresence() {
   presenceDirty = false
   const reg = fakeGlobal.__dclOneHostRegistry && fakeGlobal.__dclOneHostRegistry()
@@ -330,25 +355,16 @@ function reconcilePresence() {
 const HOST_ADDRESS = '0x0000000000000000000000000000000000000000'
 
 // PATCH: the sdk chunk's module.exports IS the split-loader registry. The
-// suffix appended here runs inside the chunk wrapper, so it can wrap the
-// registry before the scene chunk evaluates: the network module namespace
-// gains the auth-server functions, '@dcl/sdk/server' resolves at all, and
-// the registry itself is exposed for the presence bridge. This lives only in
-// the host harness -- client bundles are untouched.
+// suffix appended here runs inside the chunk wrapper, so it can rebind one
+// key before the scene chunk evaluates: '@dcl/sdk/server' becomes
+// host-storage.mjs (upstream's module resolves its storage URL from the
+// realm; ours is bound to the preview's routes and tested against them),
+// and the registry itself is exposed for the presence and RealmInfo
+// bridges. This lives only in the host harness -- client bundles are
+// untouched and get upstream's module, which throws off-server.
 const SDK_CHUNK_SUFFIX = `
 ;(function () {
   var __reg = module.exports
-  var __netDesc = Object.getOwnPropertyDescriptor(__reg, '@dcl/sdk/network')
-  if (__netDesc) {
-    Object.defineProperty(__reg, '@dcl/sdk/network', {
-      configurable: true,
-      get: function () {
-        var m = __netDesc.get ? __netDesc.get() : __netDesc.value
-        if (globalThis.__dclOneHostPatchNetwork) m = globalThis.__dclOneHostPatchNetwork(m)
-        return m
-      }
-    })
-  }
   Object.defineProperty(__reg, '@dcl/sdk/server', {
     configurable: true,
     get: function () {
@@ -385,7 +401,7 @@ const HOST_MODULES = {
     },
     getRealm: async () => ({
       realmInfo: {
-        baseUrl: new URL(doorUrl.replace(/^ws/, 'http')).origin,
+        baseUrl: previewBase,
         realmName: 'dcl-one-host',
         networkId: 0,
         commsAdapter: 'host',
@@ -408,9 +424,12 @@ const HOST_MODULES = {
     })
   }),
   '~system/EngineApi': () => ({
+    // this isolate IS the authoritative server
+    isServer: async () => ({ isServer: true }),
     // no renderer behind this isolate: the CRDT the scene emits for one is
-    // dropped, the state it asks for is the composite the build produced
-    crdtSendToRenderer: async () => ({ data: [] }),
+    // dropped, what comes back is the RealmInfo feed (pushRealmInfo), and the
+    // state it asks for is the composite the build produced
+    crdtSendToRenderer: async () => ({ data: realmPending.splice(0) }),
     crdtGetState: async () => {
       const p = path.join(root, 'main.crdt')
       if (fs.existsSync(p)) return { data: [new Uint8Array(fs.readFileSync(p))], hasEntities: true }
@@ -502,19 +521,7 @@ function hostRequire(spec) {
 const fakeGlobal = {
   require: hostRequire,
   console,
-  __dclOneHostServerModule: { Storage, EnvVar },
-  __dclOneHostPatchNetwork: (m) => {
-    // the 7.26 namespace exports getter-only properties (isStateSyncronized
-    // among them), so grafting happens on a facade whose prototype is the
-    // real module: additions shadow, everything else reads through
-    const facade = Object.create(m)
-    if (typeof m.registerMessages !== 'function')
-      Object.defineProperty(facade, 'registerMessages', { value: hostRegisterMessages })
-    Object.defineProperty(facade, 'isServer', { value: () => true })
-    if (typeof m.isStateSyncronized !== 'function')
-      Object.defineProperty(facade, 'isStateSyncronized', { value: () => welcomed })
-    return facade
-  }
+  __dclOneHostServerModule: { Storage, EnvVar }
 }
 const PREAMBLE = 'const require = globalThis.require;\n'
 function loadCjs(rel) {
@@ -555,6 +562,7 @@ setInterval(async () => {
   const dt = (now - last) / 1000
   last = now
   if (presenceDirty) reconcilePresence()
+  if (realmDirty) pushRealmInfo()
   try {
     await loader.onUpdate(dt)
   } catch (e) {

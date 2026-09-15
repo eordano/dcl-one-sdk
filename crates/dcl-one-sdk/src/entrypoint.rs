@@ -39,11 +39,7 @@ pub fn generate(
             script_utils_content(project, ignore_composite),
         )?;
         write_in(&dir, "sdk-boot.js", SDK_BOOT)?;
-        let mp = authoritative_multiplayer(project);
-        if mp {
-            write_in(&dir, "mp-client.js", MP_CLIENT_TEMPLATE)?;
-        }
-        entrypoint_code(&safe_entry, project.is_editor_scene(), split, mp)
+        entrypoint_code(&safe_entry, project.is_editor_scene(), split)
     };
     let entrypoint = write_in(&dir, "entrypoint.ts", content)?;
 
@@ -60,8 +56,9 @@ pub fn generate(
 }
 
 /// scene.json's documented activation flag for the authoritative-server
-/// surface (docs/multiplayer-server-design.md): with it, the loader arms the
-/// comms wrap and the entrypoint pulls in the mp-client half.
+/// surface (docs/multiplayer-server-design.md): with it, the loader tells the
+/// sdk chunk to trust only the authoritative server and re-labels the
+/// preview host's frames as that server, and `start` attaches the host.
 pub fn authoritative_multiplayer(project: &Project) -> bool {
     project
         .scene_json
@@ -70,13 +67,11 @@ pub fn authoritative_multiplayer(project: &Project) -> bool {
         == Some(true)
 }
 
-const MP_CLIENT_TEMPLATE: &str = include_str!("templates/mp-client.js");
-
 const SDK_BOOT: &str = "import { engine, setCompositeProvider } from '@dcl/sdk/ecs'\n\
                         import { compositeProvider } from '@dcl/sdk/composite-provider'\n\
                         setCompositeProvider(engine, compositeProvider)\n";
 
-fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool, mp: bool) -> String {
+fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool) -> String {
     let composite_fill = if split {
         "import { compositeFromLoader as __sceneComposites } from './all-composites.js'\nObject.assign(compositeFromLoader, __sceneComposites)\n"
     } else {
@@ -88,7 +83,6 @@ fn entrypoint_code(safe_entry: &str, editor_scene: bool, split: bool, mp: bool) 
     } else {
         "false".to_string()
     };
-    let mp_import = if mp { "import './mp-client.js'\n" } else { "" };
     format!(
         r#"// BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
 "use strict";
@@ -113,7 +107,7 @@ import {{ _initializeScripts }} from '~sdk/script-utils'
 // re-export below then reads a `_dcl_sdk` binding that was never declared, while
 // `export * from` is emitted at the end wherever it is written.
 import './sdk-boot.js'
-{mp_import}import * as entrypoint from {safe_entry}
+import * as entrypoint from {safe_entry}
 {composite_fill}
 {editor_block}
 

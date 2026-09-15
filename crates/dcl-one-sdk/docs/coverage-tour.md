@@ -32,7 +32,7 @@ cargo build -p catalyrst-preview-tunnel        # tour case 94 runs a real tunnel
 Baseline — the env-gated suites must run, not skip:
 
 ```
-export DCL_ONE_SDK_TEST_NODE_MODULES=<blob node_modules>   # 7.27.0 install tree
+export DCL_ONE_SDK_TEST_NODE_MODULES=<blob node_modules>   # the blob's install tree
 export DCL_ONE_SDK_TEST_SCENE=<scene with @dcl/sdk-commands installed>
 export ALLOW_SKIPPED_INTEGRATION=1
 export LLVM_PROFILE_FILE="<dir>/base-%p-%m%c.profraw"
@@ -210,7 +210,8 @@ blocks per file (`llvm-cov show` / lcov `DA:` zeros).
   component can be encoded at all. Driven by the golden fixtures in
   `testdata/{opera,gather,gather2,museum}-main.{composite,crdt}` (each `.crdt`
   regenerated through the node data-layer when it was committed, @dcl/ecs 7.26.0;
-  still byte-identical under 7.27.0) and by `tests/schema_parity.rs`, a seeded
+  still byte-identical under 7.27.0 and the auth-server 7.29.1 line) and by
+  `tests/schema_parity.rs`, a seeded
   differential fuzz against @dcl/ecs itself. `scripts/crdt-diff.py` turns any
   parity failure into a component + entity + schema field path, and
   `scripts/ischema-oracle.py` is an independent Python reimplementation kept as a

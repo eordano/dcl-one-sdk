@@ -456,11 +456,13 @@ mod tests {
 
     /// Both scaffold pins must name the blob's @dcl line (a manifest naming an
     /// older one would have the next npm install downgrade it), and the blob's
-    /// @dcl/ecs must carry the 7.27.0 fixes: the byteLength-scoped DataView
-    /// (upstream #1460), the renderer-reserved entity-id guard (#1544), and —
-    /// ours until upstream #1595 ships — the eight-byte network delete body the
-    /// bevy engine's strict framing needs (`patch_ecs_network_delete_length()`
-    /// in scripts/blob_overlays.py).
+    /// @dcl/ecs must carry the fixes the line brought: the byteLength-scoped
+    /// DataView (upstream #1460), the renderer-reserved entity-id guard (#1544)
+    /// and the eight-byte network delete body the bevy engine's strict framing
+    /// needs (#1595 — an overlay of ours on 7.27.0, upstream's own code on the
+    /// auth-server line). The runtime chunk must also carry the peer-trust gate
+    /// (`patch_sdk_peer_trust()` in scripts/blob_overlays.py), or every
+    /// unflagged serverless-multiplayer scene stops syncing.
     #[test]
     fn blob_tracks_the_scaffold_pin_and_carries_the_ecs_fixes() {
         use std::io::Read;
@@ -556,6 +558,16 @@ mod tests {
         assert!(
             !write.contains("writeUint32(12),"),
             "the prebuilt runtime chunk was built from the unpatched @dcl/ecs: {write}"
+        );
+
+        assert!(
+            core.matches("__dclOneAuthoritative").count() >= 2,
+            "the prebuilt runtime chunk lacks the peer-trust gate: an unflagged scene \
+             would trust CRDT only from 'authoritative-server' (patch_sdk_peer_trust)"
+        );
+        assert!(
+            core.contains("is only available on server-side scenes"),
+            "the prebuilt runtime chunk carries no @dcl/sdk/server"
         );
     }
 

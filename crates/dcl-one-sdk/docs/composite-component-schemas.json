@@ -1,9 +1,9 @@
 {
   "source": "@dcl/ecs dist-cjs engine component definitions (schema.jsonSchema)",
-  "ecsVersion": "7.27.0",
-  "generatedAt": "2026-09-04T08:37:16.189Z",
+  "ecsVersion": "7.29.1-34986384248.commit-bb45080",
+  "generatedAt": "2026-09-15T17:39:52.602Z",
   "registrationErrors": [],
-  "componentCount": 68,
+  "componentCount": 70,
   "components": [
     {
       "name": "composite::root",
@@ -34,6 +34,22 @@
               "serializationType": "map"
             },
             "serializationType": "array"
+          }
+        },
+        "serializationType": "map"
+      }
+    },
+    {
+      "name": "core-schema::Created-By",
+      "componentId": 3557578520,
+      "componentType": 0,
+      "inStaticTable": false,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "serializationType": "utf8-string"
           }
         },
         "serializationType": "map"
@@ -289,6 +305,18 @@
         "properties": {},
         "serializationType": "protocol-buffer",
         "protocolBuffer": "PBAvatarModifierArea"
+      }
+    },
+    {
+      "name": "core::AvatarNametag",
+      "componentId": 1221,
+      "componentType": 0,
+      "inStaticTable": true,
+      "jsonSchema": {
+        "type": "object",
+        "properties": {},
+        "serializationType": "protocol-buffer",
+        "protocolBuffer": "PBAvatarNametag"
       }
     },
     {

@@ -700,9 +700,11 @@ mod tests {
     use serde_json::json;
 
     /// Every golden here was regenerated through the node data-layer
-    /// (`data-layer-host.mjs <scene> dump-crdt`, @dcl/ecs 7.26.0; still
-    /// byte-identical under 7.27.0) when committed — a scene's checked-in
-    /// main.crdt can predate its own composite, so it is not a reference.
+    /// (`data-layer-host.mjs <scene> dump-crdt`) when committed — a scene's
+    /// checked-in main.crdt can predate its own composite, so it is not a
+    /// reference. Last regenerated 2026-09-15 under the auth-server @dcl/ecs
+    /// 7.29.1 line: #1582 (optionals set to 0/false/"" are now written) moved
+    /// gather, gather2 and museum by 12, 12 and 16 bytes; opera is unchanged.
     #[test]
     fn real_scene_fixtures_are_byte_identical_to_the_upstream_toolchain() {
         let cases: [(&str, &str, &[u8]); 4] = [

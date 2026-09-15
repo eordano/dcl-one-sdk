@@ -1,9 +1,9 @@
 (dcl-one-sdk golden v1 dynamic-import production)
-TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:f8187c13bd82fe96
-SCENE_COMPILED_JS_SIZE_PROD=486.5k bytes
-  ARTIFACT bin/index.js               9896 sha256=6294f93998a83d72
+TOOLCHAIN sdk=7.29.1-34986384248.commit-bb45080 ecs=7.29.1-34986384248.commit-bb45080 bundler=rolldown-1.2.6 blob=sha256:d8ff1c6a32532743
+SCENE_COMPILED_JS_SIZE_PROD=509.4k bytes
+  ARTIFACT bin/index.js              10514 sha256=b23999a9bcdabd20
   ARTIFACT bin/scene.js               1446 sha256=650d7a73a04682da
-  ARTIFACT bin/sdk-runtime.js       475121 sha256=fcbc5df482e2280a
+  ARTIFACT bin/sdk-runtime.js       497454 sha256=9322b30b0877230b
 LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=0
 ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
@@ -70,11 +70,11 @@ ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   REQUIRE(scene): ~sdk/all-composites
   REQUIRE(scene): ~sdk/script-utils
 MAIN_CRDT none (no composite)
-DEPLOY entity=bafkreifpyylap5d6h5xvcjtsonwivpia24cmqzqyrcv7odc2fmshiesxg4 files=4 total=486.6k bytes
+DEPLOY entity=bafkreihjpg5cqwvr6656dnsvjaoph4uacpzflsi7vkf5v7lwastfhzmp24 files=4 total=509.6k bytes
   bafkreigbeh7s4uf5a6xnw5vz3vbc6bp334klyralrp2mct44gr2zqbqj64 scene.json 171 bytes
-  bafybeihfvu3ddvodkkgzbmx6wuctpvpcdvl6qwomhkxe6sndzejgq457ay bin/sdk-runtime.js 475121 bytes
+  bafybeihojtsshznnhpf2jd4t2ahrlb5sti26rxsnprt4brtczo2ba7twmu bin/sdk-runtime.js 497454 bytes
   bafkreidfbv5hhicgqlnipiwkq2rhji5cvynz4rxfob237ffbavc3bvfx5u bin/scene.js 1446 bytes
-  bafkreidcst4ttgfihvzl3yucft4faoyegtsjdxarjuy6jzz4rbh7fxcyw4 bin/index.js 9896 bytes
+  bafkreifshgm2tpg2xuqgazxvicz4mjfn3rknuo5vgs4djdwkiqtthv2jzm bin/index.js 10514 bytes
 EVAL bin/index.js
   READFILE: bin/sdk-runtime.js
   READFILE: bin/scene.js
@@ -82,6 +82,7 @@ EVAL bin/index.js
   REQUIRE: ~system/EngineApi
   REQUIRE: ~system/CommunicationsController
   REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/SignedFetch
   REQUIRE: ~system/EthereumController
 CALL onStart()
 CALL onUpdate(0)

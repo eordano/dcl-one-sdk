@@ -373,20 +373,32 @@ impl CompositeNormalizer {
 mod tests {
     use super::*;
 
+    /// The table is regenerated from the blob's `@dcl/ecs`
+    /// (`scripts/dump-composite-schema-table.mts`, `DCL_ECS_PATH` at the
+    /// install tree) whenever the vendored line moves; the version pin here
+    /// is what makes a forgotten regeneration fail.
     #[test]
-    fn schema_table_tracks_ecs_7_27_0() {
+    fn schema_table_tracks_the_vendored_ecs() {
         let raw = include_str!("../docs/composite-component-schemas.json");
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
-        assert_eq!(parsed["ecsVersion"], serde_json::json!("7.27.0"));
+        assert_eq!(
+            parsed["ecsVersion"],
+            serde_json::json!("7.29.1-34986384248.commit-bb45080")
+        );
         let table = static_core_table();
         for name in [
             "core::ExplorerUiEventsResult",
             "core::TouchScreenControls",
             "core::UiInputBinding",
             "core::AvatarEmoteCommand",
+            // new on the auth-server line
+            "core::AvatarNametag",
         ] {
             assert!(table.contains(name), "missing {name}");
         }
+        // CreatedBy is a manual component, registered but not a static-table
+        // entry: composites never carry it
+        assert!(!table.contains("core-schema::Created-By"));
     }
 
     fn edge_cases() -> Vec<(String, String)> {

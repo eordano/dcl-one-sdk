@@ -1,9 +1,9 @@
 (dcl-one-sdk golden v1 custom-entry production)
-TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:f8187c13bd82fe96
-SCENE_COMPILED_JS_SIZE_PROD=485.4k bytes
-  ARTIFACT bin/index.js               9896 sha256=6294f93998a83d72
+TOOLCHAIN sdk=7.29.1-34986384248.commit-bb45080 ecs=7.29.1-34986384248.commit-bb45080 bundler=rolldown-1.2.6 blob=sha256:d8ff1c6a32532743
+SCENE_COMPILED_JS_SIZE_PROD=508.4k bytes
+  ARTIFACT bin/index.js              10514 sha256=b23999a9bcdabd20
   ARTIFACT bin/scene.js                384 sha256=dfb79cecd045b151
-  ARTIFACT bin/sdk-runtime.js       475121 sha256=fcbc5df482e2280a
+  ARTIFACT bin/sdk-runtime.js       497454 sha256=9322b30b0877230b
 LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=0
 ENTRYPOINT .dcl-one/entrypoint.ts main=custom-entry composites=0 script-utils=-
   ;"use strict";export * from "<SCENE>/src/index.ts"
@@ -11,11 +11,11 @@ ENTRYPOINT .dcl-one/entrypoint.ts main=custom-entry composites=0 script-utils=-
   REQUIRE(scene): @dcl/sdk/ecs
   REQUIRE(scene): @dcl/sdk/math
 MAIN_CRDT none (no composite)
-DEPLOY entity=bafkreifb3l246fq5h5syuxx76vsfhodj4fxrar7damct3jmptnclocpphy files=4 total=485.6k bytes
+DEPLOY entity=bafkreig4vefgg3bgscni6njgapvigrninrs5lmc2jiifr7gg2pfo2fze4y files=4 total=508.5k bytes
   bafkreia4himidyowso3qby3obwuctihv3do6stzzw66cqholyd4crqnqce scene.json 169 bytes
-  bafybeihfvu3ddvodkkgzbmx6wuctpvpcdvl6qwomhkxe6sndzejgq457ay bin/sdk-runtime.js 475121 bytes
+  bafybeihojtsshznnhpf2jd4t2ahrlb5sti26rxsnprt4brtczo2ba7twmu bin/sdk-runtime.js 497454 bytes
   bafkreig7w6oozucfwfirut6usylphfhtkbpzekfmr4gee57o5uxbelstne bin/scene.js 384 bytes
-  bafkreidcst4ttgfihvzl3yucft4faoyegtsjdxarjuy6jzz4rbh7fxcyw4 bin/index.js 9896 bytes
+  bafkreifshgm2tpg2xuqgazxvicz4mjfn3rknuo5vgs4djdwkiqtthv2jzm bin/index.js 10514 bytes
 EVAL bin/index.js
   READFILE: bin/sdk-runtime.js
   READFILE: bin/scene.js
@@ -23,6 +23,7 @@ EVAL bin/index.js
   REQUIRE: ~system/EngineApi
   REQUIRE: ~system/CommunicationsController
   REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/SignedFetch
   REQUIRE: ~system/EthereumController
 CALL onStart()
 CALL onUpdate(0)

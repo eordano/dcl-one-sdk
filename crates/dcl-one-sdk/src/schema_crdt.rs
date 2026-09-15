@@ -3,16 +3,22 @@
 //! `asset-packs::*`, user names) is a tagless, positional, little-endian
 //! format driven entirely by the `jsonSchema` the composite carries.
 //!
-//! Verified against @dcl/ecs 7.27.0 (`schemas/`, `components/component-number.js`,
-//! `serialization/ByteBuffer`). JS semantics reproduced deliberately:
+//! Verified against the auth-server @dcl/ecs 7.29.1 line (`schemas/`,
+//! `components/component-number.js`, `serialization/ByteBuffer`). Two encoders
+//! moved since 7.27.0: upstream #1582 (da82bfb0, 2026-09-03) made `Optional`
+//! write falsy values, and #1570 (0dce4d2d, 2026-09-10) made an unselected
+//! `OneOf` case serializable. JS semantics reproduced deliberately:
 //! - map: properties back to back in declaration order — no count, no tags, no
 //!   lengths (`Map.js`)
-//! - optional: presence is JS *truthiness*, not "key present": 0, "", false and
-//!   null encode as absent, while `[]` and `{}` are present (`Optional.js`)
-//! - one-of: a 1-based uint8 index into the property order (`OneOf.js`)
+//! - optional: present unless the value is `undefined` or `null`: 0, "" and
+//!   false encode as present, a missing key and null as absent (`Optional.js`
+//!   since #1582; 7.27.0 tested truthiness, so those three used to vanish)
+//! - one-of: a 1-based uint8 index into the property order; a value with no
+//!   `$case` (a `create()`d `{}`, or anything destructurable that is not an
+//!   object) writes index 0 and nothing else (`OneOf.js`, #1570)
 //! - a value missing below the top level is `undefined`, and JS throws for only
 //!   some of those: numbers coerce (NaN → 0 for ints, NaN for floats), booleans
-//!   and optionals read as falsy, everything else throws
+//!   read as false, optionals as absent, everything else throws
 //! - int32/entity/enum-int go through ECMAScript ToInt32 (wrap, not saturate);
 //!   int64 goes through `BigInt()`, which reads a string exactly and throws
 //!   where `Number` would have produced NaN
@@ -287,7 +293,9 @@ pub fn encode(
             }
         },
         Schema::Optional(inner) => {
-            if truthy(value) {
+            // `value !== undefined && value !== null` (#1582): the value's own
+            // truthiness no longer decides, so 0, "" and false round-trip
+            if value.is_some_and(|v| !v.is_null()) {
                 out.push(1);
                 encode(inner, value, out)?;
             } else {
@@ -295,10 +303,17 @@ pub fn encode(
             }
         }
         Schema::OneOf(specs) => {
-            let obj = value.and_then(Value::as_object).ok_or_else(|| {
+            // `serialize({ $case, value })`: destructuring null/undefined throws;
+            // any other value with no `$case` writes NO_CASE = 0 (#1570)
+            let value = value.filter(|v| !v.is_null()).ok_or_else(|| {
                 SchemaError::Invalid(format!("expected a one-of object, got {}", describe(value)))
             })?;
-            let case = obj.get("$case").and_then(Value::as_str).ok_or_else(|| {
+            let obj = value.as_object();
+            let Some(case) = obj.and_then(|o| o.get("$case")) else {
+                out.push(0);
+                return Ok(());
+            };
+            let case = case.as_str().ok_or_else(|| {
                 SchemaError::Invalid("one-of value without a string $case".to_string())
             })?;
             let idx = specs
@@ -306,7 +321,7 @@ pub fn encode(
                 .position(|(k, _)| k == case)
                 .ok_or_else(|| SchemaError::Invalid(format!("one-of has no variant '{case}'")))?;
             out.push((idx + 1) as u8);
-            encode(&specs[idx].1, obj.get("value"), out)?;
+            encode(&specs[idx].1, obj.and_then(|o| o.get("value")), out)?;
         }
         Schema::Str | Schema::EnumStr(_) => write_utf8_string(value, out)?,
         Schema::Bool => out.push(truthy(value) as u8),
@@ -660,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_presence_is_js_truthiness_not_key_presence() {
+    fn optional_presence_is_null_or_undefined_not_truthiness() {
         let s = |inner: serde_json::Value| {
             schema(
                 json!({ "type": "object", "serializationType": "optional", "optionalJsonSchema": inner }),
@@ -674,18 +689,11 @@ mod tests {
             "items": { "type": "integer", "serializationType": "int32" },
             "serializationType": "array"
         }));
-        for (schema, value) in [
-            (&int, json!(0)),
-            (&string, json!("")),
-            (&boolean, json!(false)),
-            (&int, json!(null)),
-        ] {
-            assert_eq!(
-                enc(schema, &value),
-                vec![0],
-                "{value} must encode as absent"
-            );
-        }
+        // falsy values are values (#1582); only null and a missing key are absent
+        assert_eq!(enc(&int, &json!(0)), vec![1, 0, 0, 0, 0]);
+        assert_eq!(enc(&string, &json!("")), vec![1, 0, 0, 0, 0]);
+        assert_eq!(enc(&boolean, &json!(false)), vec![1, 0]);
+        assert_eq!(enc(&int, &json!(null)), vec![0]);
         assert_eq!(enc(&list, &json!([])), vec![1, 0, 0, 0, 0]);
         assert_eq!(enc(&int, &json!(7)), vec![1, 7, 0, 0, 0]);
     }
@@ -712,6 +720,13 @@ mod tests {
             enc(&s, &json!({ "$case": "single", "value": 85 })),
             vec![1, 0, 0, 0xaa, 0x42]
         );
+        // no case selected (#1570): index 0 alone, whatever shape carried it
+        assert_eq!(enc(&s, &json!({})), vec![0]);
+        assert_eq!(enc(&s, &json!({ "value": 85 })), vec![0]);
+        assert_eq!(enc(&s, &json!(0)), vec![0]);
+        assert_eq!(enc(&s, &json!("range")), vec![0]);
+        assert!(encode_component_value(&s, &json!(null)).is_err());
+        assert!(encode_component_value(&s, &json!({ "$case": "none" })).is_err());
     }
 
     #[test]

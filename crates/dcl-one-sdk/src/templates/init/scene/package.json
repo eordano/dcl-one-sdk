@@ -8,8 +8,8 @@
     "deploy": "dcl-one-sdk deploy"
   },
   "devDependencies": {
-    "@dcl/js-runtime": "7.27.0",
-    "@dcl/sdk": "7.27.0",
+    "@dcl/js-runtime": "7.29.1-34986384248.commit-bb45080",
+    "@dcl/sdk": "7.29.1-34986384248.commit-bb45080",
     "typescript": "6.0.3"
   },
   "engines": {

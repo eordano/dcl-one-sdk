@@ -1088,3 +1088,145 @@ fn scene_entity_content_hashes_are_member_scoped() {
                 ))
     }));
 }
+
+/// The compression predicate: text-like bodies only. Media is already
+/// compressed, an event stream must not be buffered, and a body with no
+/// content-type is what the websocket upgrades answer with.
+#[test]
+fn only_text_like_responses_are_compressible() {
+    for yes in [
+        "text/html; charset=utf-8",
+        "text/javascript",
+        "application/javascript",
+        "application/json",
+        "application/wasm",
+        "image/svg+xml",
+    ] {
+        assert!(compressible_mime(yes), "{yes}");
+    }
+    for no in [
+        "text/event-stream",
+        "image/png",
+        "video/mp4",
+        "application/octet-stream",
+        "model/gltf-binary",
+        "",
+    ] {
+        assert!(!compressible_mime(no), "{no}");
+    }
+}
+
+/// The layer sits outside every route, the merged deploy pages included:
+/// a browser asking for gzip gets the scene page gzipped, a client that does
+/// not ask gets it plain, and a body under the 1 KB floor (the one-scene
+/// landing JSON) stays plain for everyone.
+#[tokio::test]
+async fn the_preview_gzips_text_for_clients_that_accept_it() {
+    let (_tmp, _project, st) = one_scene("gzip");
+    let (addr, server) = serve(&st).await;
+    let client = reqwest::Client::builder().no_gzip().build().unwrap();
+    let encoding = |r: &reqwest::Response| {
+        r.headers()
+            .get("content-encoding")
+            .map(|v| v.to_str().unwrap().to_string())
+    };
+    let gz = client
+        .get(format!("http://{addr}/scene"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gz.status(), StatusCode::OK);
+    assert_eq!(encoding(&gz).as_deref(), Some("gzip"), "{:?}", gz.headers());
+    assert!(gz
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().starts_with("text/html"))
+        .unwrap_or(false));
+    let plain = client
+        .get(format!("http://{addr}/scene"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    assert_eq!(encoding(&plain), None);
+    assert!(
+        plain.text().await.unwrap().len() > 1024,
+        "the scene page is the >1 KB sample"
+    );
+    let small = client
+        .get(format!("http://{addr}/"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(small.status(), StatusCode::OK);
+    assert_eq!(encoding(&small), None, "{:?}", small.headers());
+    assert!(
+        small.text().await.unwrap().len() <= 1024,
+        "the landing JSON is the small sample"
+    );
+    server.abort();
+}
+
+/// A streamed content file survives gzip end to end. The first gzip layer
+/// truncated every `/content/contents/{hash}` body: tower-http polls the body
+/// once more after it ends, and the unfused `unfold` stream behind the file
+/// panicked on that poll, closing the connection mid-response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamed_content_files_survive_gzip() {
+    let tmp = Tmp::new("gzip-stream");
+    let body: String = (0..2000)
+        .map(|i| format!("export const line{i} = 'the scene chunk, line {i}';\n"))
+        .collect();
+    let project = testkit::scene(&tmp.0, "scene-a", &["0,0"], &body);
+    let st = Arc::new(state(vec![project.clone()]));
+    let (addr, server) = serve(&st).await;
+    let client = reqwest::Client::builder().no_gzip().build().unwrap();
+    let hash = crate::scene::b64_content_hash_in_root(
+        &crate::scene::root_tag(&project.root, &st.machine),
+        "bin/index.js",
+        &project.root.join("bin/index.js"),
+    );
+    let gz = client
+        .get(format!("http://{addr}/content/contents/{hash}"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gz.status(), StatusCode::OK);
+    assert_eq!(
+        gz.headers()
+            .get("content-encoding")
+            .map(|v| v.to_str().unwrap()),
+        Some("gzip"),
+        "{:?}",
+        gz.headers()
+    );
+    let packed = gz.bytes().await.expect("the whole gzip body arrives");
+    assert_eq!(&packed[..2], &[0x1f, 0x8b], "gzip magic");
+    assert!(packed.len() < body.len() / 4, "{} B packed", packed.len());
+    let mut unpacked = String::new();
+    std::io::Read::read_to_string(
+        &mut flate2::read::GzDecoder::new(&packed[..]),
+        &mut unpacked,
+    )
+    .expect("a complete gzip member");
+    assert_eq!(unpacked, body);
+    let plain = client
+        .get(format!("http://{addr}/content/contents/{hash}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    assert_eq!(
+        plain
+            .headers()
+            .get("content-length")
+            .map(|v| v.to_str().unwrap()),
+        Some(body.len().to_string().as_str()),
+        "uncompressed bodies keep their length"
+    );
+    assert_eq!(plain.text().await.unwrap(), body);
+    server.abort();
+}

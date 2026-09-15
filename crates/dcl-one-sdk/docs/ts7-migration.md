@@ -59,7 +59,8 @@ targets must be relative once `baseUrl` is gone — `"@dcl/asset-packs/*":
 ## What upstream must change (pending)
 
 File: `node_modules/@dcl/sdk/types/tsconfig.ecs7.json`, shipped inside
-`src/vendor/node_modules.zip` (@dcl/sdk 7.27.0). Upstream home:
+`src/vendor/node_modules.zip` (@dcl/sdk auth-server line, 7.29.1-34986384248.commit-bb45080;
+unchanged since 7.27.0). Upstream home:
 `decentraland/js-sdk-toolchain`, `packages/@dcl/sdk/types/tsconfig.ecs7.json`.
 `tsconfig.ecs7.strict.json` needs nothing — it is
 `{"compilerOptions":{},"extends":"./tsconfig.ecs7.json"}`.
@@ -153,7 +154,8 @@ Two further gaps, for whoever picks up TS 7 later:
 ## Verification
 
 Fresh `dcl-one-sdk init --project scene`, `node_modules` from the current
-`src/vendor/node_modules.zip` (@dcl/sdk 7.27.0), driven through
+`src/vendor/node_modules.zip` (@dcl/sdk 7.27.0; re-run on the auth-server
+7.29.1 line with the same result), driven through
 `dcl-one-sdk build --dir <scene> --production`. No `ignoreDeprecations`
 anywhere.
 

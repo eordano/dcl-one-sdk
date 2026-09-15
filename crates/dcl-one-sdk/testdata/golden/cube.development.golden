@@ -1,14 +1,14 @@
 (dcl-one-sdk golden v1 cube development)
-TOOLCHAIN sdk=7.27.0 ecs=7.27.0 bundler=rolldown-1.2.6 blob=sha256:f8187c13bd82fe96
-SCENE_COMPILED_JS_SIZE_DEV=487.1k bytes
+TOOLCHAIN sdk=7.29.1-34986384248.commit-bb45080 ecs=7.29.1-34986384248.commit-bb45080 bundler=rolldown-1.2.6 blob=sha256:d8ff1c6a32532743
+SCENE_COMPILED_JS_SIZE_DEV=510.1k bytes
 THE BUNDLE HAS SOURCEMAPS
   SOURCE: ../.dcl-one/sdk-boot.js
   SOURCE: ../src/index.ts
   SOURCE: ../.dcl-one/all-composites.js
   SOURCE: ../.dcl-one/entrypoint.ts
-  ARTIFACT bin/index.js               9896 sha256=6294f93998a83d72
+  ARTIFACT bin/index.js              10514 sha256=b23999a9bcdabd20
   ARTIFACT bin/scene.js               2094 sha256=e3b517c79500bf22
-  ARTIFACT bin/sdk-runtime.js       475121 sha256=fcbc5df482e2280a
+  ARTIFACT bin/sdk-runtime.js       497454 sha256=9322b30b0877230b
 LOADER sdk=bin/sdk-runtime.js smart=- scene=bin/scene.js max_composite_entity=0
 ENTRYPOINT .dcl-one/entrypoint.ts main=guarded composites=0 script-utils=stub
   // BEGIN AUTO GENERATED CODE "~sdk/scene-entrypoint"
@@ -83,6 +83,7 @@ EVAL bin/index.js
   REQUIRE: ~system/EngineApi
   REQUIRE: ~system/CommunicationsController
   REQUIRE: ~system/UserIdentity
+  REQUIRE: ~system/SignedFetch
   REQUIRE: ~system/EthereumController
 CALL onStart()
 CALL onUpdate(0)

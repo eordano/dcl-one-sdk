@@ -10,17 +10,19 @@ scaffolds a scene, builds it, serves a live preview to the desktop client, and
 deploys it to a catalyst.
 
 **Compared with upstream.** Parity target `@dcl/sdk-commands` 7.27.0, npm
-`latest`; the vendored toolchain and the `init` scaffold pin the same line, and
-scenes still on 7.22.6 keep working because every behaviour change ported here
-is backward-compatible with them. Commands, flags and output match closely
+`latest`; the vendored runtime and the `init` scaffold pin the `auth-server`
+line (`@dcl/sdk` 7.29.1-34986384248.commit-bb45080, the one that ships
+`isServer`, `registerMessages` and `@dcl/sdk/server`), and scenes still on
+7.22.6 keep working because every behaviour change ported here is
+backward-compatible with them. Commands, flags and output match closely
 enough to drop into a supervisor invoking the npm CLI, including flags this
 binary accepts and ignores. Deliberate differences, each covered below:
 in-process builds instead of shelling out to node; native `main.crdt` generation
 instead of `@dcl/inspector`; an asset-bundle sidecar upstream has no equivalent
 of; scene runtime errors pulled out of the running client into your terminal.
 
-The 7.27.0 number comes from the vendored `@dcl/ecs` / `@dcl/sdk` runtime, which
-moves wholesale at each npm release. The `@dcl/sdk-commands` side of
+The vendored `@dcl/ecs` / `@dcl/sdk` runtime moves wholesale at each pin
+(`src/vendor/README.md` keeps the history). The `@dcl/sdk-commands` side of
 7.26.0..7.27.0 was audited commit by commit: #1542 (free-port probing on
 `0.0.0.0`) and #1529 (content-versioned preview ids) were already matched,
 #1536 (event-system helpers) is runtime code the blob carries, two are

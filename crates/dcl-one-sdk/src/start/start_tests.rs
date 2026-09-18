@@ -1035,6 +1035,71 @@ async fn inspector_serves_the_gzipped_bundle_both_ways() {
     assert_eq!(body.as_ref(), plain.as_slice());
 }
 
+#[tokio::test]
+async fn inspector_revalidates_by_etag_and_serves_the_index_from_memory() {
+    let tmp = Tmp::new("inspector-etag");
+    let public = tmp.0.join("public");
+    std::fs::create_dir_all(&public).unwrap();
+    std::fs::write(public.join("app.js"), "console.log(1)").unwrap();
+    std::fs::write(
+        public.join("index.html"),
+        "<html><head><script>const config = '$CONFIG'</script></head><body></body></html>",
+    )
+    .unwrap();
+    let st = state_with_data_layer(public.clone());
+
+    let first = get_asset(&st, "app.js", HeaderMap::new()).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first.headers().get(header::ETAG).expect("etag").clone();
+    assert_eq!(
+        first.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+    let mut again = HeaderMap::new();
+    again.insert(header::IF_NONE_MATCH, etag.clone());
+    let revalidated = get_asset(&st, "app.js", again.clone()).await;
+    assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(revalidated.headers().get(header::ETAG).unwrap(), &etag);
+    let body = axum::body::to_bytes(revalidated.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(body.is_empty());
+
+    std::fs::write(public.join("app.js"), "console.log(1);/*edited*/").unwrap();
+    let edited = get_asset(&st, "app.js", again).await;
+    assert_eq!(
+        edited.status(),
+        StatusCode::OK,
+        "a changed length is a new tag"
+    );
+    assert_ne!(edited.headers().get(header::ETAG).unwrap(), &etag);
+
+    let mut host = HeaderMap::new();
+    host.insert(header::HOST, "127.0.0.1:8000".parse().unwrap());
+    let index = inspector_index(State(st.clone()), host.clone()).await;
+    assert_eq!(index.status(), StatusCode::OK);
+    let tag = index
+        .headers()
+        .get(header::ETAG)
+        .expect("index etag")
+        .clone();
+    let html = body_text(index).await;
+    assert!(html.contains("127.0.0.1:8000/data-layer"), "{html}");
+    host.insert(header::IF_NONE_MATCH, tag.clone());
+    let same = inspector_index(State(st.clone()), host.clone()).await;
+    assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
+    let mut other = HeaderMap::new();
+    other.insert(header::HOST, "10.0.0.5:8000".parse().unwrap());
+    other.insert(header::IF_NONE_MATCH, tag.clone());
+    let elsewhere = inspector_index(State(st.clone()), other).await;
+    assert_eq!(
+        elsewhere.status(),
+        StatusCode::OK,
+        "the injected origin is part of the page, so its tag differs"
+    );
+    assert_ne!(elsewhere.headers().get(header::ETAG).unwrap(), &tag);
+}
+
 #[test]
 fn data_layer_origin_gate_allows_same_origin_and_native_rejects_cross() {
     let headers = |pairs: &[(header::HeaderName, &str)]| {

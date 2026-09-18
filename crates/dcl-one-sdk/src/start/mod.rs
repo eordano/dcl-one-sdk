@@ -127,6 +127,9 @@ pub(crate) struct AppState {
     port: u16,
     data_layer: Option<DataLayerState>,
     entity_cache: Mutex<HashMap<PathBuf, (Instant, Value)>>,
+    /// The first project's storage database, opened once and kept: a request
+    /// used to open, migrate and drop it.
+    storage_db: Mutex<Option<(PathBuf, Arc<crate::storage::Db>)>>,
     /// The sidecar's own address, set once abgen reports ready: what
     /// `/optimized-assets/*` forwards to, never what a deep link names (see
     /// `local_ab`).
@@ -160,6 +163,7 @@ impl AppState {
             port,
             data_layer: None,
             entity_cache: Mutex::new(HashMap::new()),
+            storage_db: Mutex::new(None),
             optimized_assets_url: OnceLock::new(),
             local_ab: false,
             mcp: false,

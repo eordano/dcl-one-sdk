@@ -27,7 +27,13 @@ pub async fn run(project: &Project, opts: &EsbuildOptions) -> Result<()> {
                 "build failed \u{2014} rolldown reported errors",
                 TrySteps::one("fix the errors above"),
             )
-            .why(format!("{e}")),
+            .why(
+                e.into_vec()
+                    .iter()
+                    .map(|diagnostic| diagnostic.to_diagnostic().convert_to_string(false))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         )
     })?;
     for warning in &output.warnings {

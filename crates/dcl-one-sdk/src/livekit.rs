@@ -399,13 +399,13 @@ mod tests {
             assert_eq!(emb.url_for(preview_host), want, "for {preview_host:?}");
         }
         assert_eq!(emb.describe_url(), "ws://127.0.0.1:7880");
-        let a = emb.adapter("0xabc", "LocalPreview", "10.0.0.2:8000");
+        let a = emb.adapter("0xabc", "LocalPreview", "198.51.100.2:8000");
         assert!(
-            a.starts_with("livekit:ws://10.0.0.2:7880?access_token=eyJ"),
+            a.starts_with("livekit:ws://198.51.100.2:7880?access_token=eyJ"),
             "{a}"
         );
         assert_eq!(
-            lk().url_for("10.0.0.2:8000"),
+            lk().url_for("198.51.100.2:8000"),
             "ws://127.0.0.1:7880",
             "a fixed URL ignores the request host"
         );

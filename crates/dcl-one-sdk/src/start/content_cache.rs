@@ -8,10 +8,17 @@
 //! invisible to the watcher and to deploys.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 const MAX_ENTRIES_ENV: &str = "DCL_ONE_SDK_CONTENT_CACHE_MAX";
 const DEFAULT_MAX_ENTRIES: usize = 5000;
+
+/// Eviction walks the whole directory (a `metadata` per entry), so it runs on
+/// one put in this many; the cache overshoots by at most that many entries.
+const EVICT_EVERY: usize = 64;
+
+static PUTS: AtomicUsize = AtomicUsize::new(0);
 
 fn max_entries() -> usize {
     match std::env::var(MAX_ENTRIES_ENV) {
@@ -71,7 +78,12 @@ pub async fn put(dir: &Path, hash: &str, bytes: &[u8], content_type: Option<&str
         if let Some(ct) = ct.filter(|c| !c.is_empty()) {
             let _ = std::fs::write(dir.join(format!("{hash}.ct")), ct);
         }
-        evict(&dir, cap);
+        if PUTS
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(EVICT_EVERY)
+        {
+            evict(&dir, cap);
+        }
     })
     .await;
 }

@@ -356,14 +356,19 @@ pub(super) async fn preview_wearables(
     let base = format!("{}/content/contents", preview_origin(&headers));
     Json(json!({
         "ok": true,
-        "data": collect_preview_wearables(&st.projects(), &base, &st.machine),
+        "data": collect_preview_wearables(&st.projects(), &base, |p| scene_entity_cached(&st, p)),
     }))
 }
 
 /// One entry per project with a readable `wearable.json`; a plain scene
 /// contributes nothing, so the route answers `{ok: true, data: []}` like
-/// upstream. Hashes are the preview's own reversible path hashes.
-fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) -> Vec<Value> {
+/// upstream. The contents are the project's scene entity's (the same walk
+/// and the same reversible path hashes), so the entity memo serves both.
+fn collect_preview_wearables(
+    projects: &[Project],
+    base: &str,
+    entity_of: impl Fn(&Project) -> Value,
+) -> Vec<Value> {
     let mut out = Vec::new();
     for p in projects {
         let Ok(text) = std::fs::read_to_string(p.root.join("wearable.json")) else {
@@ -372,14 +377,14 @@ fn collect_preview_wearables(projects: &[Project], base: &str, machine: &str) ->
         let Ok(mut wearable) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
-        let tag = root_tag(&p.root, machine);
-        let contents: Vec<Value> = collect_publishable_files(&p.root)
-            .unwrap_or_default()
-            .iter()
-            .map(|rel| {
-                let hash = b64_content_hash_in_root(&tag, rel, &p.root.join(rel));
-                json!({ "key": rel, "url": format!("{base}/{hash}"), "hash": hash })
-            })
+        let entity = entity_of(p);
+        let contents: Vec<Value> = entity
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| Some((c.get("file")?.as_str()?, c.get("hash")?.as_str()?)))
+            .map(|(rel, hash)| json!({ "key": rel, "url": format!("{base}/{hash}"), "hash": hash }))
             .collect();
         if let Some(obj) = wearable.as_object_mut() {
             obj.insert("baseUrl".into(), json!(base));
@@ -1343,7 +1348,9 @@ mod tests {
     fn a_scene_without_a_wearable_json_contributes_no_entries() {
         let tmp = Tmp::new("plain");
         std::fs::write(tmp.0.join("scene.json"), "{}").unwrap();
-        let out = collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", "m");
+        let out = collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", |p| {
+            build_scene_entity(p, "m")
+        });
         assert!(out.is_empty());
     }
 
@@ -1357,7 +1364,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(tmp.0.join("model.glb"), b"glb").unwrap();
-        let out = collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", "m");
+        let out = collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", |p| {
+            build_scene_entity(p, "m")
+        });
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["id"], "urn:x");
         assert_eq!(out[0]["baseUrl"], "http://x/c");
@@ -1385,7 +1394,10 @@ mod tests {
         let tmp = Tmp::new("bad");
         std::fs::write(tmp.0.join("wearable.json"), "{not json").unwrap();
         assert!(
-            collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", "m").is_empty()
+            collect_preview_wearables(&[project_at(tmp.0.clone())], "http://x/c", |p| {
+                build_scene_entity(p, "m")
+            })
+            .is_empty()
         );
     }
 

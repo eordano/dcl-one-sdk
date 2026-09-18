@@ -214,15 +214,21 @@ async fn a_bad_request_class_failure_never_reaches_the_legacy_retry() {
     );
 
     let mut headers = legacy_headers(&delivered);
-    headers.remove(AUTH_TIMESTAMP_HEADER);
-    let err = verify(&headers, SCENE_KEYS, None).await.unwrap_err();
-    assert!(matches!(err, AuthChainError::MissingTimestamp), "{err:?}");
-
-    let mut headers = legacy_headers(&delivered);
     headers
         .remove(HeaderName::from_bytes(format!("{AUTH_CHAIN_HEADER_PREFIX}1").as_bytes()).unwrap());
     let err = verify(&headers, SCENE_KEYS, None).await.unwrap_err();
     assert!(matches!(err, AuthChainError::InsufficientLinks), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_missing_timestamp_header_expires_instead_of_reaching_the_legacy_retry() {
+    let delivered = METADATA.replace("\"sceneId\"", "\"sceneid\"");
+    let mut headers = legacy_headers(&delivered);
+    headers.remove(AUTH_TIMESTAMP_HEADER);
+
+    let err = verify(&headers, SCENE_KEYS, None).await.unwrap_err();
+    assert!(matches!(err, AuthChainError::Expired { .. }), "{err:?}");
+    assert_eq!(err.http_status_and_message().0, 401);
 }
 
 #[tokio::test]

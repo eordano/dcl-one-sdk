@@ -468,6 +468,21 @@ fn status_key(dest: &Dest, print: &str) -> String {
     )
 }
 
+/// The warm cached look at `dest` under any payload fingerprint, when the
+/// target answered: what the page drew the review a form carries from.
+pub(super) fn remote_peek(caches: &StatusCaches, dest: &Dest) -> Option<Arc<LiveStatus>> {
+    let prefix = status_key(dest, "");
+    lock(&caches.status)
+        .iter()
+        .filter(|(k, at, v)| {
+            k.starts_with(&prefix)
+                && at.elapsed() < STATUS_TTL
+                && matches!(v.remote, Remote::Known(_) | Remote::Empty)
+        })
+        .max_by_key(|(_, at, _)| *at)
+        .map(|(_, _, v)| v.clone())
+}
+
 /// The cached answer if still warm, never fetching: the no-wait read the
 /// instant page render uses while a background task warms the cache.
 pub(super) fn status_peek(

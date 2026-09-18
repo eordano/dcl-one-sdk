@@ -1,3 +1,19 @@
+# dcl-one-sdk v0.27.0
+
+The preview, storage and publish pages repeat less work on every request, build errors say where they are, and scenes on an older `@dcl/sdk` build again.
+
+- Report build errors one diagnostic at a time, each with its `file:line:column` location and the offending source line.
+- Build scenes on an older `@dcl/sdk` again: `@dcl/sdk/network/events` and `@dcl/sdk/server` join the core runtime chunk only when the installed SDK ships them.
+- Revalidate the inspector by `ETag`: an unchanged asset, or the inspector page itself, answers `304 Not Modified` on reload, so the 18 MB bundle is no longer re-read and re-sent.
+- Answer the target and Deploy pages sooner: the permission check joins the lookup the target page already started for the same wallet, the replacement, removal and entrance checks reuse the last look at the destination while it is warm, the probe of a target's sign-in page is remembered, and parcel land-use batches load four at a time.
+- Proxy Worlds with less traffic: remember a World's `/about` for 30 seconds, skip a content server that refused the connection for 30 seconds unless it is the only one left, and share one HTTP client across every proxied route.
+- Open the scene's storage database once per preview instead of on every request, commit a write and its activity entry in one transaction, and run fewer queries for listings, counts, the size check and exports.
+- Evict the preview content cache once every 64 writes instead of after each one (it can sit up to 64 entries over `DCL_ONE_SDK_CONTENT_CACHE_MAX`), and build the preview wearables list from the cached scene entity.
+- Match upstream's signed-fetch checks: a missing or empty `x-identity-timestamp` answers 401 Expired instead of 400, freshness is checked before the metadata is parsed, metadata that is not a JSON object answers 400, and `null` metadata reads as `{}`.
+- Update the embedded abgen server from v0.17.10 to v0.17.13.
+
+Includes the embedded LiveKit v1.13.7 and abgen servers. Builds use Rust 1.97.0 and the committed Cargo.lock.
+
 # dcl-one-sdk v0.26.1
 
 The vendored SDK moves to the `auth-server` line, so `isServer`, `registerMessages`, `getRoom` and `@dcl/sdk/server` build and run out of the box, and the scaffold, blob and preview get leaner.

@@ -301,7 +301,7 @@ fn realm_carry_calls_only_loopback_loopback() {
         assert_eq!(realm_carry(loopback), Carry::Loopback, "{loopback}");
     }
     for routable in [
-        "http://192.168.1.9:8000",
+        "http://198.51.100.9:8000",
         "http://10.0.0.5:8000",
         "https://preview.example.org",
         "http://127.0.0.1.evil.example:8000",
@@ -320,7 +320,7 @@ fn the_lan_target_drops_the_knobs_its_client_would_throw_away() {
     let page = |where_key: &str| {
         render_local(
             &st,
-            Some("http://192.168.1.9:8000"),
+            Some("http://198.51.100.9:8000"),
             &gather_knobs(&format!("{query}&where={where_key}")),
         )
     };
@@ -332,7 +332,7 @@ fn the_lan_target_drops_the_knobs_its_client_would_throw_away() {
 
     let lan = page(WHERE_LAN);
     let link = launch_href(&lan);
-    assert!(link.contains("192.168.1.9"), "the lan card is selected");
+    assert!(link.contains("198.51.100.9"), "the lan card is selected");
     for dropped in ["multi-instance", "hub=true", "mcp=true", "mcp-port"] {
         assert!(
             !link.contains(dropped),

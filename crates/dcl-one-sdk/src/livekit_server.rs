@@ -1,7 +1,8 @@
 //! The LiveKit server a preview runs by default: what turns its comms rooms
 //! into voice rooms with nothing installed. One process per preview with a
 //! random API secret of its own, on 7880/7881/7882 (signalling, media over
-//! TCP, media over UDP) or the next free trio, killed with the preview.
+//! TCP, media over UDP) or the next free trio — 7883/7884/7885 beside a running
+//! system LiveKit — killed with the preview.
 //! `start --livekit-url` names a server elsewhere instead; `--no-livekit`
 //! keeps the built-in ws-room.
 

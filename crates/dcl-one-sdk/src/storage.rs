@@ -312,7 +312,14 @@ CREATE TABLE IF NOT EXISTS activity (
     op TEXT NOT NULL,
     source TEXT NOT NULL
 );
+CREATE TRIGGER IF NOT EXISTS activity_trim AFTER INSERT ON activity BEGIN
+    DELETE FROM activity WHERE id <= (SELECT id FROM activity ORDER BY id DESC LIMIT 1 OFFSET 200);
+END;
 ";
+const _: () = assert!(
+    ACTIVITY_KEEP == 200,
+    "the activity_trim trigger hardcodes ACTIVITY_KEEP"
+);
 
 /// One open connection. Cheap to open, so callers open one per request or
 /// per command and let it drop. The mutex only makes `&Db` shareable across
@@ -350,6 +357,34 @@ pub fn open(root: &Path) -> Result<Db> {
         db.import_legacy(root)?;
     }
     Ok(db)
+}
+
+/// The activity row of a write; the `activity_trim` trigger keeps the table
+/// at [`ACTIVITY_KEEP`] rows.
+fn log_with(
+    conn: &Connection,
+    at: i64,
+    scope: Scope<'_>,
+    key: &str,
+    op: &str,
+    source: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO activity (at, scope, address, key, op, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![at, scope.name(), scope.address(), key, op, source],
+    )
+    .context("logging a storage write")?;
+    Ok(())
+}
+
+/// A page that ends before `limit` tells the total on its own; the last page
+/// of a listing is `offset` plus what it holds.
+fn implied_total(offset: usize, limit: usize, rows: usize) -> Option<usize> {
+    if rows < limit && (offset == 0 || rows > 0) {
+        Some(offset + rows)
+    } else {
+        None
+    }
 }
 
 fn now_ms() -> i64 {
@@ -410,28 +445,36 @@ impl Db {
 
     pub fn set(&self, scope: Scope<'_>, key: &str, value: &Value, source: &str) -> Result<()> {
         let now = now_ms();
-        self.conn()
-            .execute(
-                "INSERT INTO kv (scope, address, key, value, updated_at, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT (scope, address, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, source = excluded.source",
-                params![scope.name(), scope.address(), key, value.to_string(), now, source],
-            )
+        let conn = self.conn();
+        let tx = conn
+            .unchecked_transaction()
             .context("writing a storage value")?;
-        self.log(now, scope, key, "set", source)
+        tx.execute(
+            "INSERT INTO kv (scope, address, key, value, updated_at, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (scope, address, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, source = excluded.source",
+            params![scope.name(), scope.address(), key, value.to_string(), now, source],
+        )
+        .context("writing a storage value")?;
+        log_with(&tx, now, scope, key, "set", source)?;
+        tx.commit().context("writing a storage value")
     }
 
     /// True when the key existed.
     pub fn delete(&self, scope: Scope<'_>, key: &str, source: &str) -> Result<bool> {
-        let removed = self
-            .conn()
+        let conn = self.conn();
+        let tx = conn
+            .unchecked_transaction()
+            .context("deleting a storage value")?;
+        let removed = tx
             .execute(
                 "DELETE FROM kv WHERE scope = ?1 AND address = ?2 AND key = ?3",
                 params![scope.name(), scope.address(), key],
             )
             .context("deleting a storage value")?;
         if removed > 0 {
-            self.log(now_ms(), scope, key, "delete", source)?;
+            log_with(&tx, now_ms(), scope, key, "delete", source)?;
         }
+        tx.commit().context("deleting a storage value")?;
         Ok(removed > 0)
     }
 
@@ -446,14 +489,6 @@ impl Db {
     ) -> Result<Page> {
         let prefix = prefix.unwrap_or_default();
         let address = scope.address();
-        let total: i64 = self
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope = ?1 AND address = ?2 AND (?3 = '' OR substr(key, 1, length(?3)) = ?3)",
-                params![scope.name(), address, prefix],
-                |row| row.get(0),
-            )
-            .context("counting storage values")?;
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
@@ -482,11 +517,24 @@ impl Db {
             .context("listing storage values")?
             .collect::<Result<Vec<_>, _>>()
             .context("reading storage values")?;
+        let total = match implied_total(offset, limit, data.len()) {
+            Some(total) => total,
+            None => {
+                let total: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM kv WHERE scope = ?1 AND address = ?2 AND (?3 = '' OR substr(key, 1, length(?3)) = ?3)",
+                        params![scope.name(), address, prefix],
+                        |row| row.get(0),
+                    )
+                    .context("counting storage values")?;
+                total.max(0) as usize
+            }
+        };
         Ok(Page {
             data,
             limit,
             offset,
-            total: total.max(0) as usize,
+            total,
         })
     }
 
@@ -512,17 +560,17 @@ impl Db {
         key: &str,
         size: usize,
     ) -> Result<Result<(), String>> {
-        let existing: i64 = self
+        let (used, existing): (i64, i64) = self
             .conn()
             .query_row(
-                "SELECT COALESCE(length(CAST(value AS BLOB)), 0) FROM kv WHERE scope = ?1 AND address = ?2 AND key = ?3",
+                "SELECT COALESCE(SUM(length(CAST(value AS BLOB))), 0),
+                        COALESCE(SUM(CASE WHEN key = ?3 THEN length(CAST(value AS BLOB)) ELSE 0 END), 0)
+                 FROM kv WHERE scope = ?1 AND address = ?2",
                 params![scope.name(), scope.address(), key],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()
-            .context("measuring a storage value")?
-            .unwrap_or(0);
-        let used = self.usage(scope)?;
+            .context("measuring storage usage")?;
+        let used = used.max(0) as usize;
         let (_, max_total) = scope.limits();
         let projected = used - (existing.max(0) as usize).min(used) + size;
         Ok(if projected > max_total {
@@ -571,13 +619,6 @@ impl Db {
     /// at a time, and how many there are.
     pub fn player_addresses(&self, limit: usize, offset: usize) -> Result<(Vec<String>, usize)> {
         let conn = self.conn();
-        let total: i64 = conn
-            .query_row(
-                "SELECT COUNT(DISTINCT address) FROM kv WHERE scope = 'player'",
-                [],
-                |row| row.get(0),
-            )
-            .context("counting players")?;
         let mut stmt = conn
             .prepare("SELECT DISTINCT address FROM kv WHERE scope = 'player' ORDER BY address LIMIT ?1 OFFSET ?2")
             .context("listing players")?;
@@ -588,7 +629,20 @@ impl Db {
             .context("listing players")?
             .collect::<Result<Vec<_>, _>>()
             .context("reading players")?;
-        Ok((rows, total.max(0) as usize))
+        let total = match implied_total(offset, limit, rows.len()) {
+            Some(total) => total,
+            None => {
+                let total: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(DISTINCT address) FROM kv WHERE scope = 'player'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .context("counting players")?;
+                total.max(0) as usize
+            }
+        };
+        Ok((rows, total))
     }
 
     /// Every address with player values, and how many each holds.
@@ -627,18 +681,27 @@ impl Db {
 
     /// `(scene, player, env)` key counts.
     pub fn counts(&self) -> Result<(usize, usize, usize)> {
-        let count = |scope: &str| -> Result<usize> {
-            let n: i64 = self
-                .conn()
-                .query_row(
-                    "SELECT COUNT(*) FROM kv WHERE scope = ?1",
-                    params![scope],
-                    |row| row.get(0),
-                )
-                .context("counting storage values")?;
-            Ok(n.max(0) as usize)
-        };
-        Ok((count("scene")?, count("player")?, count("env")?))
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT scope, COUNT(*) FROM kv GROUP BY scope")
+            .context("counting storage values")?;
+        let mut counts = (0usize, 0usize, 0usize);
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .context("counting storage values")?;
+        for row in rows {
+            let (scope, n) = row.context("counting storage values")?;
+            let n = n.max(0) as usize;
+            match scope.as_str() {
+                "scene" => counts.0 = n,
+                "player" => counts.1 = n,
+                "env" => counts.2 = n,
+                _ => {}
+            }
+        }
+        Ok(counts)
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -680,19 +743,7 @@ impl Db {
     }
 
     fn log(&self, at: i64, scope: Scope<'_>, key: &str, op: &str, source: &str) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT INTO activity (at, scope, address, key, op, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![at, scope.name(), scope.address(), key, op, source],
-            )
-            .context("logging a storage write")?;
-        self.conn()
-            .execute(
-                "DELETE FROM activity WHERE id <= (SELECT id FROM activity ORDER BY id DESC LIMIT 1 OFFSET ?1)",
-                params![ACTIVITY_KEEP as i64],
-            )
-            .context("trimming the storage log")?;
-        Ok(())
+        log_with(&self.conn(), at, scope, key, op, source)
     }
 
     /// The newest writes first.
@@ -719,19 +770,36 @@ impl Db {
     }
 
     pub fn export(&self) -> Result<Store> {
-        let mut store = Store {
-            env: self.env_runtime()?,
-            ..Store::default()
-        };
-        for e in self.list(Scope::Scene, None, ALL, 0)?.data {
-            store.world.insert(e.key, e.value);
-        }
-        for (address, _) in self.players()? {
-            let values = self.list(Scope::Player(&address), None, ALL, 0)?.data;
-            store.players.insert(
-                address,
-                values.into_iter().map(|e| (e.key, e.value)).collect(),
-            );
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT scope, address, key, value FROM kv")
+            .context("exporting storage")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .context("exporting storage")?;
+        let mut store = Store::default();
+        for row in rows {
+            let (scope, address, key, value) = row.context("exporting storage")?;
+            let value = decode(&value);
+            match scope.as_str() {
+                "env" => {
+                    store.env.insert(key, env_text(&value));
+                }
+                "scene" => {
+                    store.world.insert(key, value);
+                }
+                "player" => {
+                    store.players.entry(address).or_default().insert(key, value);
+                }
+                _ => {}
+            }
         }
         Ok(store)
     }
@@ -1146,6 +1214,43 @@ mod tests {
         assert!(Target::parse("storage.decentraland.org").is_err());
         assert_eq!(Target::Custom("http://h".into()).to_arg(), "http://h");
         assert_eq!(Target::Org.url(), Some(ORG_URL));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn page_totals_are_implied_by_short_pages_and_counted_otherwise() {
+        assert_eq!(implied_total(0, 10, 3), Some(3));
+        assert_eq!(implied_total(10, 10, 3), Some(13));
+        assert_eq!(implied_total(0, 10, 10), None);
+        assert_eq!(implied_total(50, 10, 0), None);
+        assert_eq!(implied_total(0, ALL, 0), Some(0));
+        let root = tmp("totals");
+        let db = open(&root).unwrap();
+        for i in 0..7 {
+            db.set(Scope::Scene, &format!("k{i}"), &json!(i), "t")
+                .unwrap();
+        }
+        for (limit, offset) in [(3, 0), (3, 6), (3, 9), (10, 0), (ALL, 0)] {
+            assert_eq!(db.list(Scope::Scene, None, limit, offset).unwrap().total, 7);
+        }
+        assert_eq!(db.list(Scope::Scene, Some("k1"), 10, 0).unwrap().total, 1);
+        assert_eq!(db.player_addresses(10, 0).unwrap(), (Vec::new(), 0));
+        db.set(Scope::Player("0xAB"), "a", &json!(1), "t").unwrap();
+        db.set(Scope::Player("0xCD"), "a", &json!(1), "t").unwrap();
+        assert_eq!(
+            db.player_addresses(1, 0).unwrap(),
+            (vec!["0xab".to_string()], 2)
+        );
+        assert_eq!(
+            db.player_addresses(1, 1).unwrap(),
+            (vec!["0xcd".to_string()], 2)
+        );
+        assert_eq!(db.player_addresses(5, 9).unwrap(), (Vec::new(), 2));
+        assert_eq!(db.counts().unwrap(), (7, 2, 0));
+        assert_eq!(
+            db.check_fits(Scope::Player("0xAB"), "a", 5).unwrap(),
+            Ok(())
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

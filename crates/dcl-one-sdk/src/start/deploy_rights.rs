@@ -9,8 +9,9 @@ use super::deploy_status::{
 };
 use crate::deploy::{self, DocAnswer, WORLDS_CONTENT_SERVER};
 use serde_json::Value;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 /// Whether the deploy's own permission check would pass, said before the
@@ -130,17 +131,32 @@ pub(super) async fn working_auth_bases(default_target: Option<&str>) -> AuthBase
     if own.page == public.page {
         return own;
     }
-    let answers = status_client()
+    let remembered = lock(&AUTH_ANSWERS)
         .get(&own.page)
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
+        .and_then(|(answers, at)| (*answers || at.elapsed() < STATUS_TTL).then_some(*answers));
+    let answers = match remembered {
+        Some(answers) => answers,
+        None => {
+            let answers = status_client()
+                .get(&own.page)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            lock(&AUTH_ANSWERS).insert(own.page.clone(), (answers, Instant::now()));
+            answers
+        }
+    };
     match answers {
         true => own,
         false => public,
     }
 }
+
+/// Whether a target's authorize page answered, per process: a yes for good,
+/// a no for [`STATUS_TTL`], so one sign-in per process probes it.
+static AUTH_ANSWERS: LazyLock<Mutex<HashMap<String, (bool, Instant)>>> =
+    LazyLock::new(Default::default);
 
 pub(super) fn auth_bases(default_target: Option<&str>) -> AuthBases {
     let root = match default_target.map(str::trim).filter(|t| !t.is_empty()) {
@@ -563,30 +579,42 @@ pub(super) fn parse_land_use(entities: &[Value]) -> Vec<LandScene> {
 /// against `bases` in order. `None` when no batch was answered at all; a
 /// partial answer carries a note instead of passing off gaps as empties.
 pub(super) async fn fetch_land_use(bases: &[String], coords: &[(i64, i64)]) -> Option<LandUse> {
-    let mut entities: Vec<Value> = Vec::new();
-    let mut failed = 0usize;
-    let batches = coords.chunks(LAND_USE_BATCH);
+    use futures::StreamExt;
+    let batches: Vec<Vec<String>> = coords
+        .chunks(LAND_USE_BATCH)
+        .map(|chunk| chunk.iter().map(|(x, y)| format!("{x},{y}")).collect())
+        .collect();
     let total = batches.len();
-    for chunk in batches {
-        let pointers: Vec<String> = chunk.iter().map(|(x, y)| format!("{x},{y}")).collect();
-        let mut answered = false;
-        for base in bases {
-            let req = status_client()
-                .post(format!("{}/entities/active", base.trim_end_matches('/')))
-                .json(&serde_json::json!({ "pointers": pointers }));
-            if let Ok(got) = fetch_json::<Vec<Value>>(req).await {
-                entities.extend(got);
-                answered = true;
-                break;
+    // Four batches in flight; a base that answered is where the next batch starts.
+    let preferred = AtomicUsize::new(0);
+    let fetches = batches.into_iter().map(|pointers| {
+        let preferred = &preferred;
+        async move {
+            let start = preferred
+                .load(Ordering::Relaxed)
+                .min(bases.len().saturating_sub(1));
+            for i in (start..bases.len()).chain(0..start) {
+                let req = status_client()
+                    .post(format!(
+                        "{}/entities/active",
+                        bases[i].trim_end_matches('/')
+                    ))
+                    .json(&serde_json::json!({ "pointers": pointers }));
+                if let Ok(got) = fetch_json::<Vec<Value>>(req).await {
+                    preferred.store(i, Ordering::Relaxed);
+                    return Some(got);
+                }
             }
+            None
         }
-        if !answered {
-            failed += 1;
-        }
-    }
+    });
+    let answers: Vec<Option<Vec<Value>>> =
+        futures::stream::iter(fetches).buffered(4).collect().await;
+    let failed = answers.iter().filter(|a| a.is_none()).count();
     if failed == total {
         return None;
     }
+    let entities: Vec<Value> = answers.into_iter().flatten().flatten().collect();
     let note = (failed > 0).then(|| {
         format!(
             "{failed} of {total} parcel batches went unanswered, so some parcels may only look empty."

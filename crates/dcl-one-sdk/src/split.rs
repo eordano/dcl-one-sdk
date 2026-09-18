@@ -113,7 +113,15 @@ fn has_jsx_runtime(project: &Project) -> bool {
 /// The core chunk's keys: never the asset-packs ones, which belong to the smart
 /// chunk alone so a scene without smart items stays off that +30% payload.
 pub fn core_registry_keys(project: &Project) -> Vec<&'static str> {
-    let mut keys: Vec<&'static str> = REGISTRY_KEYS.to_vec();
+    let mut keys: Vec<&'static str> = REGISTRY_KEYS
+        .iter()
+        .copied()
+        .filter(|key| {
+            !matches!(*key, "@dcl/sdk/network/events" | "@dcl/sdk/server")
+                || project.node_module(&format!("{key}.js")).is_some()
+                || project.node_module(&format!("{key}/index.js")).is_some()
+        })
+        .collect();
     if has_jsx_runtime(project) {
         keys.push("react/jsx-runtime");
     }
@@ -365,6 +373,30 @@ mod tests {
             false,
         );
         assert!(smart.contains("__dclOneSmartChunkPath = 'bin/sdk-smart-items.js'"));
+    }
+
+    #[test]
+    fn older_sdks_do_not_require_auth_server_modules() {
+        let dir = crate::scene::Tmp::new("split-auth-modules");
+        let project = Project {
+            root: dir.0.clone(),
+            scene_json: serde_json::json!({}),
+        };
+        let old = core_registry_keys(&project);
+        assert!(old.contains(&"@dcl/sdk"));
+        assert!(!old.contains(&"@dcl/sdk/network/events"));
+        assert!(!old.contains(&"@dcl/sdk/server"));
+        let sdk = dir.0.join("node_modules/@dcl/sdk");
+        std::fs::create_dir_all(sdk.join("network/events")).unwrap();
+        std::fs::write(
+            sdk.join("network/events/index.js"),
+            "export const getRoom = () => null;",
+        )
+        .unwrap();
+        std::fs::write(sdk.join("server.js"), "export const Storage = {};").unwrap();
+        let current = core_registry_keys(&project);
+        assert!(current.contains(&"@dcl/sdk/network/events"));
+        assert!(current.contains(&"@dcl/sdk/server"));
     }
 
     #[test]

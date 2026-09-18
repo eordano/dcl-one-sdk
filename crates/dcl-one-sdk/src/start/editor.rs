@@ -11,8 +11,10 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use std::path::Path;
-use std::sync::Arc;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn mobile_preview(State(st): State<Arc<AppState>>) -> Response {
     let ifaces = netinfo::enumerate();
@@ -149,6 +151,61 @@ pub(super) async fn inspector_redirect(headers: HeaderMap) -> Response {
     Redirect::permanent(&format!("{prefix}/inspector/")).into_response()
 }
 
+/// `W/"<mtime>-<len><suffix>"`: what a `no-cache` reload revalidates against,
+/// so an unchanged bundle costs a stat, not an 18 MB read.
+fn weak_etag(md: &std::fs::Metadata, suffix: &str) -> Option<HeaderValue> {
+    let modified = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    HeaderValue::from_str(&format!(
+        "W/\"{:x}-{:x}{suffix}\"",
+        modified.as_nanos(),
+        md.len()
+    ))
+    .ok()
+}
+
+fn not_modified(headers: &HeaderMap, etag: &HeaderValue) -> bool {
+    let Ok(etag) = etag.to_str() else {
+        return false;
+    };
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"))
+}
+
+fn revalidated(etag: HeaderValue, vary: bool) -> Response {
+    let mut out = HeaderMap::new();
+    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    out.insert(header::ETAG, etag);
+    if vary {
+        out.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    }
+    (StatusCode::NOT_MODIFIED, out).into_response()
+}
+
+type IndexMemo = Option<(PathBuf, SystemTime, u64, Arc<String>)>;
+
+/// The inspector's index.html, re-read only when its mtime or length moves.
+async fn index_html(index: &Path) -> Option<(Arc<String>, Option<HeaderValue>)> {
+    static MEMO: Mutex<IndexMemo> = Mutex::new(None);
+    let md = tokio::fs::metadata(index).await.ok()?;
+    let modified = md.modified().ok()?;
+    let etag = weak_etag(&md, "");
+    let remembered = MEMO
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .filter(|(p, m, l, _)| p == index && *m == modified && *l == md.len())
+        .map(|(_, _, _, html)| html.clone());
+    if let Some(html) = remembered {
+        return Some((html, etag));
+    }
+    let html = Arc::new(tokio::fs::read_to_string(index).await.ok()?);
+    *MEMO.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some((index.to_path_buf(), modified, md.len(), html.clone()));
+    Some((html, etag))
+}
+
 pub(super) async fn inspector_index(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -158,27 +215,36 @@ pub(super) async fn inspector_index(
         Err(resp) => return resp,
     };
     let index = public_dir.join("index.html");
-    let html = match tokio::fs::read_to_string(&index).await {
-        Ok(html) => html,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                "the inspector build has no index.html",
-            )
-                .into_response();
-        }
+    let Some((html, etag)) = index_html(&index).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            "the inspector build has no index.html",
+        )
+            .into_response();
     };
     let ws_url = format!("{}/data-layer", preview_ws_origin(&headers));
+    // The injected config rides the tag: a different origin is a different page.
+    let etag = etag.and_then(|tag| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        ws_url.hash(&mut h);
+        let tag = tag.to_str().ok()?.trim_end_matches('"').to_string();
+        HeaderValue::from_str(&format!("{tag}-{:x}\"", h.finish())).ok()
+    });
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Some(etag) = etag {
+        if not_modified(&headers, &etag) {
+            return revalidated(etag, false);
+        }
+        out.insert(header::ETAG, etag);
+    }
     let config = data_layer::inspector_config_json(&ws_url);
     let body = data_layer::inject_config(&html, &config);
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
-            (header::CACHE_CONTROL, "no-cache".to_string()),
-        ],
-        body,
-    )
-        .into_response()
+    (out, body).into_response()
 }
 
 pub(super) async fn inspector_asset(
@@ -200,9 +266,23 @@ pub(super) async fn inspector_asset(
         data_layer::Asset::Plain(p) => (p, false),
         data_layer::Asset::Gzipped(p) => (p, true),
     };
-    let Ok(mut bytes) = tokio::fs::read(&full).await else {
+    let accepted = stored_gzipped
+        && data_layer::accepts_gzip(
+            headers
+                .get(header::ACCEPT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+        );
+    let Ok(md) = tokio::fs::metadata(&full).await else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
+    let etag = weak_etag(
+        &md,
+        if stored_gzipped && !accepted {
+            "-plain"
+        } else {
+            ""
+        },
+    );
     let mut out = HeaderMap::new();
     out.insert(
         header::CONTENT_TYPE,
@@ -211,20 +291,24 @@ pub(super) async fn inspector_asset(
     out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     if stored_gzipped {
         out.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
-        let accepted = data_layer::accepts_gzip(
-            headers
-                .get(header::ACCEPT_ENCODING)
-                .and_then(|v| v.to_str().ok()),
-        );
-        if accepted {
-            out.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        } else {
-            match data_layer::gunzip(&bytes) {
-                Ok(plain) => bytes = plain,
-                Err(e) => {
-                    tracing::warn!("could not decompress {}: {e}", full.display());
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "asset unreadable").into_response();
-                }
+    }
+    if let Some(etag) = etag {
+        if not_modified(&headers, &etag) {
+            return revalidated(etag, stored_gzipped);
+        }
+        out.insert(header::ETAG, etag);
+    }
+    let Ok(mut bytes) = tokio::fs::read(&full).await else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    if accepted {
+        out.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    } else if stored_gzipped {
+        match data_layer::gunzip(&bytes) {
+            Ok(plain) => bytes = plain,
+            Err(e) => {
+                tracing::warn!("could not decompress {}: {e}", full.display());
+                return (StatusCode::INTERNAL_SERVER_ERROR, "asset unreadable").into_response();
             }
         }
     }

@@ -238,3 +238,120 @@ async fn validate_signature_either_payload_accepts_both_shapes_over_one_chain_ty
         );
     }
 }
+
+#[tokio::test]
+async fn a_missing_timestamp_header_expires_like_upstream() {
+    for shape in SHAPES {
+        let mut headers = fresh(shape);
+        headers.remove(AUTH_TIMESTAMP_HEADER);
+
+        let err = verify_signed_fetch(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AuthChainError::Expired { .. }),
+            "{shape:?}: {err:?}"
+        );
+        assert_eq!(err.http_status_and_message().0, 401);
+
+        assert!(try_extract_signer(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_present_but_empty_timestamp_header_expires_like_an_absent_one() {
+    for shape in SHAPES {
+        let mut headers = fresh(shape);
+        headers.insert(AUTH_TIMESTAMP_HEADER, HeaderValue::from_static(""));
+
+        let err = verify_signed_fetch(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AuthChainError::Expired { .. }),
+            "{shape:?}: {err:?}"
+        );
+        assert_eq!(err.http_status_and_message().0, 401);
+
+        assert!(try_extract_signer(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_present_non_numeric_timestamp_header_is_still_a_bad_request() {
+    for shape in SHAPES {
+        let mut headers = fresh(shape);
+        headers.insert(
+            AUTH_TIMESTAMP_HEADER,
+            HeaderValue::from_static("not-a-number"),
+        );
+
+        let err = verify_signed_fetch(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AuthChainError::InvalidTimestamp(raw) if raw == "not-a-number"),
+            "{shape:?}: {err:?}"
+        );
+        assert_eq!(err.http_status_and_message().0, 400);
+
+        assert!(try_extract_signer(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn metadata_that_is_not_an_object_is_refused_before_the_signature() {
+    let now = chrono::Utc::now().timestamp_millis();
+    for delivered in [
+        r#"["decentraland-kernel-scene"]"#,
+        r#""signer""#,
+        "not-json",
+    ] {
+        let headers = headers_for(Shape::V6, PATH, delivered, delivered, now);
+
+        let err = verify_signed_fetch_meta(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .unwrap_err();
+        match err {
+            AuthChainError::MalformedChain { detail } => {
+                assert!(
+                    detail.contains("invalid chain metadata"),
+                    "{delivered}: {detail}"
+                )
+            }
+            other => panic!("{delivered}: expected MalformedChain, got {other:?}"),
+        }
+
+        let err = verify_signed_fetch(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .unwrap_err();
+        assert_eq!(err.http_status_and_message().0, 400, "{delivered}");
+
+        assert!(try_extract_signer(&headers, METHOD, PATH, FIVE_MINUTES)
+            .await
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_json_null_metadata_reads_as_an_empty_object() {
+    let headers = headers_for(
+        Shape::V6,
+        PATH,
+        "null",
+        "null",
+        chrono::Utc::now().timestamp_millis(),
+    );
+
+    let (signer, metadata) = verify_signed_fetch_meta(&headers, METHOD, PATH, FIVE_MINUTES)
+        .await
+        .unwrap();
+    assert_eq!(signer, expected_signer());
+    assert_eq!(metadata, serde_json::json!({}));
+}

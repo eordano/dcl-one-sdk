@@ -21,6 +21,33 @@ pub fn hash_bytes_v1(data: &[u8]) -> String {
     }
 }
 
+pub fn hash_bytes_v0_unixfs(data: &[u8]) -> String {
+    if data.len() <= CHUNK_SIZE {
+        return cid_v0_to_string(&unixfs_leaf_node(data).cid_bytes[2..]);
+    }
+    let leaves: Vec<TreeNode> = data.chunks(CHUNK_SIZE).map(unixfs_leaf_node).collect();
+    let root = balanced_reduce_with(leaves, build_interior_node_v0);
+    cid_v0_to_string(&root.cid_bytes[2..])
+}
+
+fn multihash_sha256(digest: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(34);
+    out.push(0x12);
+    out.push(0x20);
+    out.extend_from_slice(digest);
+    out
+}
+
+fn unixfs_leaf_node(chunk: &[u8]) -> TreeNode {
+    let block = unixfs::encode_pb_node(&unixfs::encode_file_leaf(chunk), &[]);
+    let digest = Sha256::digest(&block);
+    TreeNode {
+        cid_bytes: multihash_sha256(&digest),
+        file_size: chunk.len() as u64,
+        tsize: block.len() as u64,
+    }
+}
+
 struct TreeNode {
     cid_bytes: Vec<u8>,
     file_size: u64,
@@ -90,11 +117,15 @@ impl HashV1Writer {
     }
 }
 
-fn balanced_reduce(mut nodes: Vec<TreeNode>) -> TreeNode {
+fn balanced_reduce(nodes: Vec<TreeNode>) -> TreeNode {
+    balanced_reduce_with(nodes, build_interior_node)
+}
+
+fn balanced_reduce_with(mut nodes: Vec<TreeNode>, build: fn(&[TreeNode]) -> TreeNode) -> TreeNode {
     while nodes.len() > 1 {
         let mut parents = Vec::new();
         for batch in nodes.chunks(MAX_CHILDREN) {
-            parents.push(build_interior_node(batch));
+            parents.push(build(batch));
         }
         nodes = parents;
     }
@@ -102,6 +133,14 @@ fn balanced_reduce(mut nodes: Vec<TreeNode>) -> TreeNode {
 }
 
 fn build_interior_node(children: &[TreeNode]) -> TreeNode {
+    interior_node(children, |digest| encode_cid_v1(0x70, digest))
+}
+
+fn build_interior_node_v0(children: &[TreeNode]) -> TreeNode {
+    interior_node(children, multihash_sha256)
+}
+
+fn interior_node(children: &[TreeNode], cid: impl Fn(&[u8]) -> Vec<u8>) -> TreeNode {
     let block_sizes: Vec<u64> = children.iter().map(|c| c.file_size).collect();
     let total_file_size: u64 = block_sizes.iter().sum();
 
@@ -118,7 +157,7 @@ fn build_interior_node(children: &[TreeNode]) -> TreeNode {
     let pb_node = unixfs::encode_pb_node(&unixfs_data, &links);
 
     let digest = Sha256::digest(&pb_node);
-    let cid_bytes = encode_cid_v1(0x70, &digest);
+    let cid_bytes = cid(&digest);
 
     let children_tsize_sum: u64 = children.iter().map(|c| c.tsize).sum();
     let tsize = pb_node.len() as u64 + children_tsize_sum;
@@ -186,6 +225,39 @@ mod tests {
                 "size {size} in one read"
             );
         }
+    }
+
+    #[test]
+    fn cidv0_unixfs_matches_ipfs_add_for_single_block_files() {
+        assert_eq!(
+            hash_bytes_v0_unixfs(b""),
+            "QmbFMke1KXqnYyBBWxB74N4c5SBnJMVAiMNRcGu6x1AwQH"
+        );
+        assert_eq!(
+            hash_bytes_v0_unixfs(b"hello world"),
+            "Qmf412jQZiuVUtdgnB36FXFX7xg5V6KEbSJ4dpQuhkLyfD"
+        );
+        assert_ne!(
+            hash_bytes_v0_unixfs(b"hello world"),
+            hash_bytes(b"hello world")
+        );
+    }
+
+    #[test]
+    fn cidv0_unixfs_matches_ipfs_add_for_chunked_files() {
+        let pattern = |n: usize| -> Vec<u8> { (0..n).map(|i| (i % 251) as u8).collect() };
+        assert_eq!(
+            hash_bytes_v0_unixfs(&pattern(CHUNK_SIZE + 1)),
+            "QmUSjGawaz4ptvREcMKSMJneWCa5j8dAz2wSAAvHtW2rnB"
+        );
+        assert_eq!(
+            hash_bytes_v0_unixfs(&pattern(CHUNK_SIZE * 3)),
+            "QmSuzytMNMmTQC6hL7FG7CtoqWKoZpDiMHbcGeoDakJvAg"
+        );
+        assert_eq!(
+            hash_bytes_v0_unixfs(&pattern(CHUNK_SIZE * (MAX_CHILDREN + 1))),
+            "Qmbp67kThKoJFnWu7pUgwCu81WttemMnD13oG4uj9DiY5E"
+        );
     }
 
     #[test]

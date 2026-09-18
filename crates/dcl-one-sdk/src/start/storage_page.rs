@@ -146,8 +146,25 @@ pub(super) fn start_line(target: &Target, signer: Option<&Signer>, base: &str) -
 
 struct Ctx {
     project: Project,
-    db: Db,
+    db: Arc<Db>,
     target: Target,
+}
+
+/// The project's database, opened on first use and held in the state; a
+/// project swap under the same server reopens it.
+fn shared_db(st: &AppState, project: &Project) -> anyhow::Result<Arc<Db>> {
+    let mut slot = st
+        .storage_db
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((root, db)) = slot.as_ref() {
+        if *root == project.root {
+            return Ok(db.clone());
+        }
+    }
+    let db = Arc::new(storage::open(&project.root)?);
+    *slot = Some((project.root.clone(), db.clone()));
+    Ok(db)
 }
 
 fn open_ctx(st: &AppState) -> Result<Ctx, Response> {
@@ -157,7 +174,7 @@ fn open_ctx(st: &AppState) -> Result<Ctx, Response> {
             "no scene is loaded, so there is no storage to serve",
         ));
     };
-    let db = storage::open(&project.root).map_err(failed)?;
+    let db = shared_db(st, &project).map_err(failed)?;
     let target = db.target().map_err(failed)?;
     Ok(Ctx {
         project,
@@ -1051,7 +1068,7 @@ pub(super) async fn page(
         );
     };
     let scene_title = crate::joinblock::scene_title(&project.scene_json);
-    let ctx = match storage::open(&project.root).and_then(|db| {
+    let ctx = match shared_db(&st, &project).and_then(|db| {
         let target = db.target()?;
         Ok(Ctx {
             project: project.clone(),

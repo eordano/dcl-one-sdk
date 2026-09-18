@@ -18,12 +18,12 @@
 # its own loader, so the host ABI it was linked against is irrelevant and
 # *-pc-windows-msvc builds ship the -gnu archive.
 
-version = v0.17.10
+version = v0.17.13
 url = https://github.com/decentraland/abgen/releases/download/{version}/abgen-{version}-{target}.tar.gz
 
-aarch64-apple-darwin       = b3d237a8d6dc6752eca601896aa3feb55c20289f69d637172f922e0820c0edd1
-x86_64-apple-darwin        = 40f40cbf12e73c9ce8731a3e262ba57cd29daaefbcbe46f826509341cebc2731
-aarch64-unknown-linux-gnu  = 8793eef68ac904aa3506a50fb00a3098386c794beb73a252b72e144f292c98ac
-x86_64-unknown-linux-gnu   = 44731ff6bbd344b5842dc84daaa06447944eea7fbddc2f22f35c09e9f34d2b26
-aarch64-pc-windows-gnullvm = 02a806a28f8432bc8b55e78d6c235eb50b6670794c5eee09d9ec12ac114e22c7
-x86_64-pc-windows-gnu      = c35c97c130a320a042264510dd57b2ef5df8bf0e3dd5d25b51cae09a8f52a062
+aarch64-apple-darwin       = ad235ccaf04d60e69615918af8597f77c7f7767e308afe1af9acd564f59f79de
+x86_64-apple-darwin        = 2f23e97020c1025de892d8bab08df2c5f7b8d4f93dcd4bb2fb5322dd5af80a97
+aarch64-unknown-linux-gnu  = 2fc79417e7f509a7721cd7322323df68cf5042bf27427b8ad7c2a0b62233cad9
+x86_64-unknown-linux-gnu   = 294128fe6b7dad6272a6af971ceae6f98f35087d1aac3e1865a57495aef13a39
+aarch64-pc-windows-gnullvm = da93aa881e5f95f3dae3138ec314da5a9da0767309d38dd7b24f91e33523290c
+x86_64-pc-windows-gnu      = f721f6bef2a0aabc80d210dd482d382fae0c431fe4d380cc4075b42cb3a9f7a5

@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{Path as AxPath, RawQuery, Request, State};
@@ -73,18 +74,24 @@ fn upstream_candidates() -> Vec<String> {
     out
 }
 
-fn proxy_client() -> Result<reqwest::Client, Response> {
+/// One client for every proxied route: a per-request client rebuilt its pool
+/// (and its TLS session) on each fetch.
+static CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("catalyst proxy client: {e}"),
-            )
-                .into_response()
-        })
+        .map_err(|e| e.to_string())
+});
+
+fn proxy_client() -> Result<&'static reqwest::Client, Response> {
+    CLIENT.as_ref().map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("catalyst proxy client: {e}"),
+        )
+            .into_response()
+    })
 }
 
 fn axum_status(status: reqwest::StatusCode) -> StatusCode {
@@ -355,6 +362,60 @@ fn world_upstreams() -> MutexGuard<'static, HashMap<String, Vec<String>>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A world's /about is re-read at most this often; the explorer asks for it on
+/// every scene load and content hash miss.
+const WORLD_ABOUT_TTL: Duration = Duration::from_secs(30);
+
+static WORLD_ABOUT: LazyLock<Mutex<HashMap<String, (Instant, Value)>>> =
+    LazyLock::new(Default::default);
+
+fn remembered_about(key: &str) -> Option<Value> {
+    WORLD_ABOUT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(key)
+        .filter(|(at, _)| at.elapsed() < WORLD_ABOUT_TTL)
+        .map(|(_, about)| about.clone())
+}
+
+fn remember_about(key: &str, about: &Value) {
+    WORLD_ABOUT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key.to_string(), (Instant::now(), about.clone()));
+}
+
+/// A content prefix that refused the connection is skipped for this long,
+/// unless it is all that is left to try.
+const DEAD_PREFIX_TTL: Duration = Duration::from_secs(30);
+
+static DEAD_PREFIXES: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(Default::default);
+
+fn mark_prefix_dead(prefix: &str) {
+    DEAD_PREFIXES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(prefix.to_string(), Instant::now());
+}
+
+fn live_candidates(candidates: Vec<String>) -> Vec<String> {
+    let dead = DEAD_PREFIXES.lock().unwrap_or_else(PoisonError::into_inner);
+    let live: Vec<String> = candidates
+        .iter()
+        .filter(|c| {
+            !dead
+                .get(*c)
+                .is_some_and(|at| at.elapsed() < DEAD_PREFIX_TTL)
+        })
+        .cloned()
+        .collect();
+    if live.is_empty() {
+        candidates
+    } else {
+        live
+    }
+}
+
 fn valid_world_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -384,9 +445,18 @@ async fn fetch_world_about(name: &str) -> Result<Value, Response> {
     }
 }
 
-/// Fetch a world's /about and remember where its content is served from.
+/// Fetch a world's /about (memoized for [`WORLD_ABOUT_TTL`]) and remember
+/// where its content is served from.
 async fn learn_world(name: &str) -> Result<(Value, Vec<String>), Response> {
-    let about = fetch_world_about(name).await?;
+    let key = name.to_ascii_lowercase();
+    let (about, fresh) = match remembered_about(&key) {
+        Some(about) => (about, false),
+        None => {
+            let about = fetch_world_about(name).await?;
+            remember_about(&key, &about);
+            (about, true)
+        }
+    };
     let candidates = world_content_candidates(&about);
     if candidates.is_empty() {
         return Err((
@@ -395,7 +465,14 @@ async fn learn_world(name: &str) -> Result<(Value, Vec<String>), Response> {
         )
             .into_response());
     }
-    world_upstreams().insert(name.to_ascii_lowercase(), candidates.clone());
+    let mut known = world_upstreams();
+    let candidates = match known.get(&key) {
+        Some(learned) if !fresh => learned.clone(),
+        _ => {
+            known.insert(key, candidates.clone());
+            candidates
+        }
+    };
     Ok((about, candidates))
 }
 
@@ -511,12 +588,13 @@ pub(super) async fn world_content(
             Err(resp) => return resp,
         },
     };
+    let candidates = live_candidates(candidates);
     let client = match proxy_client() {
         Ok(c) => c,
         Err(resp) => return resp,
     };
     let mut last: Option<(StatusCode, String)> = None;
-    for (i, upstream) in candidates.iter().enumerate() {
+    for upstream in &candidates {
         let url = format!("{upstream}{hash}");
         match client.request(method.clone(), &url).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -527,14 +605,15 @@ pub(super) async fn world_content(
                         super::content_cache::put(dir, &hash, &bytes, Some(&ct)).await;
                     }
                 }
-                if i > 0 {
-                    let mut map = world_upstreams();
-                    if let Some(list) = map.get_mut(&name.to_ascii_lowercase()) {
-                        if let Some(pos) = list.iter().position(|u| u == upstream) {
+                let mut map = world_upstreams();
+                if let Some(list) = map.get_mut(&name.to_ascii_lowercase()) {
+                    if let Some(pos) = list.iter().position(|u| u == upstream) {
+                        if pos > 0 {
                             list.swap(0, pos);
                         }
                     }
                 }
+                drop(map);
                 return (
                     StatusCode::OK,
                     [
@@ -552,6 +631,9 @@ pub(super) async fn world_content(
             }
             Err(e) => {
                 tracing::warn!("world content {url}: {e}");
+                if e.is_connect() {
+                    mark_prefix_dead(upstream);
+                }
                 last = Some((StatusCode::BAD_GATEWAY, format!("world content {url}: {e}")));
             }
         }
@@ -652,6 +734,39 @@ mod tests {
 
         let unique: HashSet<_> = candidates.iter().collect();
         assert_eq!(unique.len(), candidates.len());
+    }
+
+    #[test]
+    fn a_world_about_is_remembered_for_the_ttl_and_only_when_fetched() {
+        let key = "memo-test.dcl.eth";
+        assert_eq!(remembered_about(key), None);
+        let about = json!({ "content": { "publicUrl": "https://worlds.example" } });
+        remember_about(key, &about);
+        assert_eq!(remembered_about(key), Some(about));
+        WORLD_ABOUT.lock().unwrap().get_mut(key).unwrap().0 = Instant::now() - WORLD_ABOUT_TTL;
+        assert_eq!(
+            remembered_about(key),
+            None,
+            "past the ttl it is fetched again"
+        );
+    }
+
+    #[test]
+    fn dead_prefixes_are_skipped_unless_nothing_else_is_left() {
+        let a = "http://127.0.0.1:1/dead-a/contents/".to_string();
+        let b = "http://127.0.0.1:1/live-b/contents/".to_string();
+        mark_prefix_dead(&a);
+        assert_eq!(live_candidates(vec![a.clone(), b.clone()]), vec![b.clone()]);
+        assert_eq!(
+            live_candidates(vec![a.clone()]),
+            vec![a.clone()],
+            "the only candidate is still tried"
+        );
+        DEAD_PREFIXES
+            .lock()
+            .unwrap()
+            .insert(a.clone(), Instant::now() - DEAD_PREFIX_TTL);
+        assert_eq!(live_candidates(vec![a.clone(), b.clone()]), vec![a, b]);
     }
 
     #[test]

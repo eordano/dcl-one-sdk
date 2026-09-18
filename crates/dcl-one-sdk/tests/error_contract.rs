@@ -971,8 +971,8 @@ fn t2_syntax_error_renders_code_frame() {
     let out = run(&args, &[]);
     assert_contract(&out, f.path(), "build failed");
     assert!(
-        stderr_of(&out).contains('^'),
-        "no caret frame: {}",
+        stderr_of(&out).contains("src/index.ts:1:") && stderr_of(&out).contains("const x = = 1"),
+        "no source location and code frame: {}",
         stderr_of(&out)
     );
 }

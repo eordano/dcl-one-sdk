@@ -579,8 +579,8 @@ pub(super) async fn start(
         );
     }
     if replacement {
-        let (remote, _) = deploy_status::fetch_remote(&dest).await;
-        if replacement_revision(&remote).as_deref() != Some(form.world_revision.as_str()) {
+        let live = reviewed_remote(&st, &dest).await;
+        if replacement_revision(&live.remote).as_deref() != Some(form.world_revision.as_str()) {
             return reply(
                 StatusCode::CONFLICT,
                 "The World's scenes changed or could not be checked. Reload Target and review the removal list again.",
@@ -782,12 +782,42 @@ pub(super) async fn preflight(
     if st.deploy_dry_run {
         return verdict_json("unchecked", "live checks are off for this run", None);
     }
-    let rights = deploy_rights::cached_rights(&st.deploy.rights, &dest, &address).await;
+    let rights = rights_after_warm(&st, &dest, &address).await;
     match &rights.verdict {
         Verdict::May(w) => verdict_json("may", w, None),
         Verdict::MayNot { why, remedy } => verdict_json("may_not", why, Some(remedy.as_str())),
         Verdict::Unchecked(w) => verdict_json("unchecked", w, None),
     }
+}
+
+/// The rights answer, joining the warm-up the target page already started
+/// for the same wallet instead of fanning out a second time beside it.
+async fn rights_after_warm(st: &AppState, dest: &Dest, address: &str) -> Arc<Rights> {
+    let key = format!("rights|{address}|{}", dest.headline);
+    for _ in 0..150 {
+        if let Some(hit) = deploy_rights::rights_peek(&st.deploy.rights, dest, address) {
+            return hit;
+        }
+        if !warm_slot(st).contains(&key) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    deploy_rights::cached_rights(&st.deploy.rights, dest, address).await
+}
+
+/// The destination as the page last showed it, while that look is warm and
+/// answered, else one fresh look: the review a form carries came from it.
+async fn reviewed_remote(st: &AppState, dest: &Dest) -> Arc<LiveStatus> {
+    if let Some(hit) = deploy_status::remote_peek(&st.deploy.caches, dest) {
+        return hit;
+    }
+    let (remote, _) = deploy_status::fetch_remote(dest).await;
+    Arc::new(LiveStatus {
+        remote,
+        reuse: None,
+        world_spawn: None,
+    })
 }
 
 /// The gate every signing route shares: the wallet signs on the hosting
@@ -3336,9 +3366,9 @@ pub(super) async fn target_entrance(
         );
     }
     if signed {
-        let (remote, _) = deploy_status::fetch_remote(&dest).await;
+        let live = reviewed_remote(&st, &dest).await;
         let base = footprint(&dest).1;
-        let occupied = match remote {
+        let occupied = match &live.remote {
             Remote::Known(state) => {
                 state.current.iter().any(|s| s.coords.contains(&base))
                     || state.others.iter().any(|s| s.coords.contains(&base))
@@ -3466,8 +3496,8 @@ pub(super) async fn target_remove_scene(
             "The removal signature expired. Try again.",
         );
     }
-    let (remote, _) = deploy_status::fetch_remote(&dest).await;
-    if replacement_revision(&remote).as_deref() != Some(form.world_revision.as_str()) {
+    let live = reviewed_remote(&st, &dest).await;
+    if replacement_revision(&live.remote).as_deref() != Some(form.world_revision.as_str()) {
         return reply(
             StatusCode::CONFLICT,
             "The World's scenes changed. Reload and review them before removal.",

@@ -530,35 +530,52 @@ pub async fn try_extract_signer(
 ) -> Option<Signer> {
     let path = signed_fetch_path(headers, path);
     let chain = try_extract(headers)?;
-    let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)?.to_string();
-    let metadata = header_str(headers, AUTH_METADATA_HEADER)
+    let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or("0")
+        .to_string();
+    let metadata_raw = header_str(headers, AUTH_METADATA_HEADER)
         .unwrap_or("{}")
         .to_string();
+    parse_metadata(&metadata_raw).ok()?;
     let now = chrono::Utc::now().timestamp();
-    validate_signature_either_payload(&chain, method, path, &ts, &metadata, tolerance_secs, now)
-        .await
-        .ok()
+    validate_signature_either_payload(
+        &chain,
+        method,
+        path,
+        &ts,
+        &metadata_raw,
+        tolerance_secs,
+        now,
+    )
+    .await
+    .ok()
 }
 
+/// The metadata the signature is checked over is parsed here too, so a
+/// delivery upstream refuses outright never reaches a caller that authorizes
+/// on it: [`verify_signed_fetch_meta`] answers the same 400 for it.
 pub async fn verify_signed_fetch(
     headers: &HeaderMap,
     method: &str,
     path: &str,
     tolerance_secs: i64,
 ) -> Result<Signer, AuthChainError> {
-    let path = signed_fetch_path(headers, path);
-    let chain = extract_auth_chain(headers)?;
-    let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)
-        .ok_or(AuthChainError::MissingTimestamp)?
-        .to_string();
-    let metadata = header_str(headers, AUTH_METADATA_HEADER)
-        .unwrap_or("{}")
-        .to_string();
-    let now = chrono::Utc::now().timestamp();
-    validate_signature_either_payload(&chain, method, path, &ts, &metadata, tolerance_secs, now)
+    verify_signed_fetch_meta(headers, method, path, tolerance_secs)
         .await
+        .map(|(signer, _)| signer)
 }
 
+/// Stage order matches upstream `verify()`: chain extraction, timestamp,
+/// expiration, metadata parse, signature. Freshness first so a replayed or
+/// stale request answers 401 Expired without the metadata being parsed, and
+/// the parse then refuses anything that is not an object before a caller can
+/// read a field out of it.
+///
+/// The header read - not the window - applies upstream's `Number(raw || '0')`:
+/// an absent or empty `x-identity-timestamp` becomes `0`, so the request
+/// answers 401 Expired like every other stale one instead of a 400 no upstream
+/// service returns. A present non-numeric one still answers 400.
 pub async fn verify_signed_fetch_meta(
     headers: &HeaderMap,
     method: &str,
@@ -568,12 +585,16 @@ pub async fn verify_signed_fetch_meta(
     let path = signed_fetch_path(headers, path);
     let chain = extract_auth_chain(headers)?;
     let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)
-        .ok_or(AuthChainError::MissingTimestamp)?
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or("0")
         .to_string();
+    let now = chrono::Utc::now().timestamp();
+    check_symmetric_skew(&ts, now, tolerance_secs)?;
+
     let metadata_raw = header_str(headers, AUTH_METADATA_HEADER)
         .unwrap_or("{}")
         .to_string();
-    let now = chrono::Utc::now().timestamp();
+    let metadata = parse_metadata(&metadata_raw)?;
     let signer = validate_signature_either_payload(
         &chain,
         method,
@@ -585,8 +606,6 @@ pub async fn verify_signed_fetch_meta(
     )
     .await?;
 
-    let metadata: serde_json::Value =
-        serde_json::from_str(&metadata_raw).unwrap_or(serde_json::Value::Null);
     Ok((signer, metadata))
 }
 
@@ -806,7 +825,8 @@ pub async fn verify_signed_fetch_meta_with_policy(
     let path = signed_fetch_path(headers, path);
     let chain = extract_auth_chain(headers)?;
     let ts = header_str(headers, AUTH_TIMESTAMP_HEADER)
-        .ok_or(AuthChainError::MissingTimestamp)?
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or("0")
         .to_string();
     let now = chrono::Utc::now().timestamp();
     check_symmetric_skew(&ts, now, tolerance_secs)?;
@@ -918,6 +938,15 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn an_empty_timestamp_is_refused_by_the_shared_freshness_primitive() {
+        assert!(matches!(
+            check_symmetric_skew("", 1_700_000_000, 60),
+            Err(AuthChainError::InvalidTimestamp(v)) if v.is_empty()
+        ));
+    }
+
     use crate::sign::{create_simple_auth_chain, Wallet};
     use http::HeaderValue;
 

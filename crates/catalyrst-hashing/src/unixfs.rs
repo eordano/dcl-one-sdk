@@ -21,6 +21,24 @@ pub fn encode_file_node(filesize: u64, blocksizes: &[u64]) -> Vec<u8> {
     buf
 }
 
+pub fn encode_file_leaf(data: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(data.len() + 16);
+
+    buf.push(0x08);
+    encode_varint(&mut buf, 2);
+
+    if !data.is_empty() {
+        buf.push(0x12);
+        encode_varint(&mut buf, data.len() as u64);
+        buf.extend_from_slice(data);
+    }
+
+    buf.push(0x18);
+    encode_varint(&mut buf, data.len() as u64);
+
+    buf
+}
+
 pub fn encode_pb_node(data: &[u8], links: &[PBLink]) -> Vec<u8> {
     let mut size = 0usize;
 
@@ -132,6 +150,15 @@ mod tests {
         assert_eq!(varint_size(128), 2);
         assert_eq!(varint_size(300), 2);
         assert_eq!(varint_size(262_144), 3);
+    }
+
+    #[test]
+    fn unixfs_file_leaf_orders_type_data_filesize_and_omits_empty_data() {
+        assert_eq!(encode_file_leaf(b""), vec![0x08, 0x02, 0x18, 0x00]);
+        assert_eq!(
+            encode_file_leaf(b"ab"),
+            vec![0x08, 0x02, 0x12, 0x02, b'a', b'b', 0x18, 0x02]
+        );
     }
 
     #[test]

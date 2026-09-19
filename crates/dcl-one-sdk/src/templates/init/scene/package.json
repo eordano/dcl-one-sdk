@@ -4,7 +4,7 @@
   "description": "{{DESCRIPTION}}",
   "scripts": {
     "start": "dcl-one-sdk start",
-    "build": "dcl-one-sdk build",
+    "build": "dcl-one-sdk build --built-in",
     "deploy": "dcl-one-sdk deploy"
   },
   "devDependencies": {

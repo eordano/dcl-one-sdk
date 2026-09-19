@@ -60,8 +60,16 @@ enum Command {
         )]
         offline: bool,
     },
-    #[command(about = "Type-check and bundle the scene into bin/index.js")]
+    #[command(
+        about = "Run package.json scripts.build, or type-check and bundle with the SDK",
+        long_about = "Run package.json scripts.build from the project directory via the system shell, with node_modules/.bin on PATH and inherited output. The script owns type checking, bundling and assets, must exit zero and produce a nonempty scene.json main bundle. No npm lifecycle hooks or SDK fallback. DCL_ONE_SDK_PRODUCTION=1 for production (0 otherwise); DCL_ONE_SDK_MAIN names the output. Build, start/watch, deploy and pack share this contract. Use --built-in for an explicit SDK build, including inside a build script. The legacy script dcl-one-sdk build is a built-in alias. See README: Custom build scripts."
+    )]
     Build {
+        #[arg(
+            long,
+            help = "Ignore scripts.build and use the SDK type-check/bundle pipeline"
+        )]
+        built_in: bool,
         #[arg(long, default_value = ".", help = "Project folder to build")]
         dir: PathBuf,
         #[arg(
@@ -268,7 +276,8 @@ enum Command {
         tunnel_token_file: Option<PathBuf>,
         #[arg(
             long,
-            help = "Do not attach the authoritative-server isolate a scene.json authoritativeMultiplayer flag would auto-start"
+            visible_alias = "no-server",
+            help = "Do not attach the authoritative-server isolate a scene.json authoritativeMultiplayer flag would auto-start (--no-server is upstream's spelling)"
         )]
         no_host: bool,
     },
@@ -641,6 +650,7 @@ async fn run(command: Command) -> Result<()> {
             context_files::get_context_files(&dir, &api, offline).await
         }
         Command::Build {
+            built_in,
             dir,
             production,
             watch,
@@ -653,6 +663,7 @@ async fn run(command: Command) -> Result<()> {
                 ux::note(NO_INSTALL_NOTE);
             }
             let opts = build::BuildOptions {
+                built_in,
                 dir,
                 production,
                 ignore_composite,
@@ -937,7 +948,9 @@ async fn watch_workspace(ws: &workspace::Workspace, opts: &build::BuildOptions) 
         let fs = watch::FsWatcher::new(&project.root)?;
         let session =
             watch::WatchSession::create(project.clone(), &member, true, &mut steps).await?;
-        if member.skip_type_check {
+        if session.is_custom() {
+            // The build script has already performed its own checks.
+        } else if member.skip_type_check {
             ux::note("type check skipped (--skip-type-check)");
         } else {
             match build::type_check(session.project(), build::Reloaded::Yes).await {

@@ -106,10 +106,35 @@ pub fn is_relevant(root: &Path, path: &Path) -> bool {
     if first.is_some_and(|f| f.starts_with('.') || matches!(f, "node_modules" | "bin")) {
         return false;
     }
-    is_model(path)
+    matches!(
+        rel.to_str(),
+        Some("package.json" | "scene.json" | "tsconfig.json")
+    ) || is_model(path)
         || matches!(
-            path.extension().and_then(|e| e.to_str()).unwrap_or(""),
-            "ts" | "tsx" | "js" | "jsx" | "composite"
+            path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "ts" | "tsx"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "json"
+                | "composite"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "webp"
+                | "gif"
+                | "ktx2"
+                | "mp3"
+                | "ogg"
+                | "wav"
+                | "mp4"
+                | "webm"
+                | "bin"
         )
 }
 
@@ -147,7 +172,86 @@ struct SplitState {
     generated_dir: PathBuf,
 }
 
-pub struct WatchSession {
+/// Keep the custom path separate: constructing a built-in session writes a
+/// loader, even when the caller requested --skip-build.
+pub enum WatchSession {
+    Builtin(Box<BuiltinWatchSession>),
+    Custom {
+        project: Project,
+        opts: BuildOptions,
+    },
+}
+
+impl WatchSession {
+    pub async fn create(
+        project: Project,
+        opts: &BuildOptions,
+        initial_build: bool,
+        steps: &mut ux::Steps,
+    ) -> Result<Self> {
+        if let Some(script) = crate::build_script::selected(&project, opts)? {
+            let project = Project::load(&project.root)?;
+            if initial_build {
+                crate::build_script::run(project.clone(), opts, &script).await?;
+                steps.done("Build script completed");
+            }
+            return Ok(Self::Custom {
+                project,
+                opts: opts.clone(),
+            });
+        }
+        Ok(Self::Builtin(Box::new(
+            BuiltinWatchSession::create(project, opts, initial_build, steps).await?,
+        )))
+    }
+
+    pub fn project(&self) -> &Project {
+        match self {
+            Self::Builtin(s) => s.project(),
+            Self::Custom { project, .. } => project,
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom { .. })
+    }
+
+    pub async fn run(self, mut fs: FsWatcher, notify: impl Fn(ReloadEvent)) -> Result<()> {
+        let (project, opts) = match self {
+            Self::Builtin(s) => return s.run(fs, notify).await,
+            Self::Custom { project, opts } => (project, opts),
+        };
+        // A script's output directory must be distinct from its sources. Ignore
+        // it as well as bin/.dcl-one so generated chunks cannot trigger a loop.
+        while let Some(mut batch) = fs.next_batch().await {
+            let main = match Project::load(&project.root).and_then(|p| p.main_output()) {
+                Ok(main) => project.root.join(main),
+                Err(e) => {
+                    ux::report_watch(&e);
+                    continue;
+                }
+            };
+            let output_dir = main.parent().filter(|p| *p != project.root);
+            batch.retain(|p| p != &main && !output_dir.is_some_and(|d| p.starts_with(d)));
+            let (models, paths) = partition_batch(batch);
+            if paths.is_empty() {
+                for (path, removed) in models {
+                    notify(ReloadEvent::Model { path, removed });
+                }
+                continue;
+            }
+            // Reload package.json and scene.json on every build. Never fall back
+            // to a built-in build when a script reports a failure.
+            match build::build(&opts).await {
+                Ok(_) => notify(ReloadEvent::Scene),
+                Err(e) => ux::report_watch(&e),
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct BuiltinWatchSession {
     project: Project,
     es_opts: EsbuildOptions,
     ignore_composite: bool,
@@ -159,9 +263,10 @@ pub struct WatchSession {
     loader: split::Loader,
     typecheck: build::BackgroundCheck,
     type_checking: bool,
+    built_in: bool,
 }
 
-impl WatchSession {
+impl BuiltinWatchSession {
     pub async fn create(
         project: Project,
         opts: &BuildOptions,
@@ -205,6 +310,7 @@ impl WatchSession {
             loader,
             typecheck: build::BackgroundCheck::default(),
             type_checking: !opts.skip_type_check,
+            built_in: opts.built_in,
         };
         if session.type_checking && initial_build {
             session.typecheck.restart(session.project.clone());
@@ -222,8 +328,66 @@ impl WatchSession {
         }
     }
 
+    /// The loader stub carries scene.json's `authoritativeMultiplayer`, and
+    /// the flag can flip under a running preview (the /scene page's switch, a
+    /// hand edit). A scene.json mid-edit keeps the flag it had.
+    fn follow_mp_flag(&mut self, changed: &[PathBuf]) {
+        let is_scene_json = |p: &PathBuf| {
+            p.strip_prefix(&self.project.root)
+                .is_ok_and(|rel| rel == Path::new("scene.json"))
+        };
+        if !changed.iter().any(is_scene_json) {
+            return;
+        }
+        let Ok(fresh) = Project::load(&self.project.root) else {
+            return;
+        };
+        let mp = crate::entrypoint::authoritative_multiplayer(&fresh);
+        if mp != self.loader.mp {
+            self.loader.mp = mp;
+            self.rewrite_loader_stub();
+        }
+    }
+
     pub async fn run(mut self, mut fs: FsWatcher, notify: impl Fn(ReloadEvent)) -> Result<()> {
         while let Some(batch) = fs.next_batch().await {
+            // A project may opt into a custom script while preview is running.
+            // Check before touching generated files, including on a model save.
+            let custom = if self.built_in {
+                false
+            } else {
+                match crate::build_script::command(&self.project.root) {
+                    Ok(script) => script.is_some(),
+                    Err(e) => {
+                        ux::report_watch(&e);
+                        continue;
+                    }
+                }
+            };
+            if custom {
+                let opts = BuildOptions {
+                    dir: self.project.root.clone(),
+                    built_in: false,
+                    production: self.es_opts.production,
+                    ignore_composite: self.ignore_composite,
+                    custom_entry_point: self.custom_entry_point,
+                    skip_type_check: !self.type_checking,
+                    out_root: None,
+                    quiet: false,
+                };
+                let mut steps = ux::Steps::silent();
+                // Keep this session on failure so the next edit can retry.
+                match WatchSession::create(self.project.clone(), &opts, true, &mut steps).await {
+                    Ok(session) => {
+                        notify(ReloadEvent::Scene);
+                        return Box::pin(session.run(fs, notify)).await;
+                    }
+                    Err(e) => {
+                        ux::report_watch(&e);
+                        continue;
+                    }
+                }
+            }
             let (models, paths) = partition_batch(batch);
             for (model, removed) in &models {
                 let verb = if *removed { "removed" } else { "update" };
@@ -239,6 +403,7 @@ impl WatchSession {
                 continue;
             }
             let started = Instant::now();
+            self.follow_mp_flag(&paths);
             let composites_changed = match regenerate_composites(
                 &self.project,
                 self.ignore_composite,
@@ -429,9 +594,12 @@ mod tests {
     #[test]
     fn only_code_and_models_are_relevant() {
         assert!(under_root("scene.composite"));
+        assert!(under_root("src/config.json"));
         assert!(under_root("assets/tree.glb"));
         assert!(under_root("assets/tree.GLTF"));
-        assert!(!under_root("src/tex.png"));
+        assert!(under_root("src/tex.png"));
+        assert!(under_root("assets/sky.PNG"));
+        assert!(under_root("assets/music.ogg"));
         assert!(!under_root("README.md"));
     }
 }

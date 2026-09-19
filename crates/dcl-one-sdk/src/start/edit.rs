@@ -64,6 +64,7 @@ pub(super) struct SceneEdit {
     required_permissions: Option<Vec<String>>,
     allowed_media_hostnames: Option<Vec<String>>,
     spawn_points: Option<Vec<SpawnEdit>>,
+    authoritative_multiplayer: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -255,6 +256,10 @@ fn apply(scene: &mut Value, edit: &SceneEdit) -> Result<(), String> {
     }
     if let Some(spawns) = &edit.spawn_points {
         set_key(scene, "spawnPoints", spawn_values(spawns)?);
+    }
+    // Absent is the schema's off, so switching it off leaves no key behind.
+    if let Some(on) = edit.authoritative_multiplayer {
+        set_key(scene, "authoritativeMultiplayer", on.then(|| json!(true)));
     }
     Ok(())
 }
@@ -602,6 +607,32 @@ mod tests {
             json!("T"),
             "untouched fields stay"
         );
+    }
+
+    #[test]
+    fn the_server_switch_writes_the_flag_and_takes_it_away_whole() {
+        let mut scene = json!({ "display": { "title": "T" } });
+        let flip = |scene: &mut Value, on: bool| {
+            apply(
+                scene,
+                &SceneEdit {
+                    authoritative_multiplayer: Some(on),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        flip(&mut scene, true);
+        assert_eq!(scene["authoritativeMultiplayer"], json!(true));
+        flip(&mut scene, false);
+        assert!(
+            scene.get("authoritativeMultiplayer").is_none(),
+            "off is the absent key, not a false one"
+        );
+        assert_eq!(scene["display"]["title"], json!("T"));
+        let strict: Result<SceneEdit, _> =
+            serde_json::from_value(json!({ "authoritativeMultiplayer": "yes" }));
+        assert!(strict.is_err(), "the switch is a boolean and nothing else");
     }
 
     #[test]

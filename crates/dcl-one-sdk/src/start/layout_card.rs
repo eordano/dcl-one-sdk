@@ -251,6 +251,71 @@ pub(super) fn permission_rows(scene_json: &Value) -> String {
     out
 }
 
+/// What the Multiplayer pane says about the scene's local server, the isolate
+/// `start` runs beside the preview while scene.json's
+/// `authoritativeMultiplayer` is on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::start) enum ServerState {
+    /// The flag is off: the scene runs on clients only.
+    Off,
+    Running,
+    /// On, but `--no-host` keeps the server out of this preview.
+    Skipped,
+    /// On, and no isolate is attached: between the switch and the rebuild
+    /// that attaches it, or node is missing, or it failed to start.
+    Down,
+}
+
+impl ServerState {
+    fn key(self) -> &'static str {
+        match self {
+            ServerState::Off => "off",
+            ServerState::Running => "running",
+            ServerState::Skipped => "skipped",
+            ServerState::Down => "down",
+        }
+    }
+
+    fn says(self) -> &'static str {
+        match self {
+            ServerState::Off => {
+                "Off: the scene runs on players\u{2019} clients only. Switching it on saves \
+                 authoritativeMultiplayer to scene.json, rebuilds the scene and starts its server \
+                 beside this preview."
+            }
+            ServerState::Running => {
+                "The server is running beside this preview: the same scene code, headless, with \
+                 isServer() true, and clients trust it for state. Comms stay on the built-in room \
+                 while it runs, so this preview has no voice."
+            }
+            ServerState::Skipped => {
+                "scene.json asks for a server, but this preview was started with --no-host. \
+                 Clients wait for state until one joins: dcl-one-sdk host."
+            }
+            ServerState::Down => {
+                "On, with no server attached right now. It attaches after the next successful \
+                 build; the terminal says why if it does not. A preview started with --no-watch \
+                 picks the switch up on its next start."
+            }
+        }
+    }
+}
+
+/// One switch, drawn as a permission row so the script enables it with them,
+/// minus their warning wash: a server is a choice, not a risk to players.
+pub(super) fn server_pane(state: ServerState) -> String {
+    format!(
+        r#"<section class="lay__pane" data-pane="server" hidden><span class="knob__k">Multiplayer</span><div class="lay__perms"><label class="lay__perm lay__perm--plain"><input class="sw" type="checkbox" id="mp-switch"{c} disabled><span class="lay__perm-t"><span class="lay__perm-n">Authoritative server</span><span class="lay__perm-d">Run the scene a second time as its server: verified message senders, server-only writes, Storage</span></span></label></div><p class="note" id="mp-status" data-server="{key}">{says}</p></section>"#,
+        c = if state == ServerState::Off {
+            ""
+        } else {
+            " checked"
+        },
+        key = state.key(),
+        says = esc(state.says()),
+    )
+}
+
 /// The server renders the Info tab active and every control inert; the
 /// script switches tabs, drags, and saves.
 pub(super) fn scene_layout_card(
@@ -259,6 +324,7 @@ pub(super) fn scene_layout_card(
     base: (i64, i64),
     spawns: &[Value],
     info_pane: &str,
+    server: ServerState,
 ) -> String {
     let (min_x, min_y, max_x, max_y) = bbox(parcels);
     let (w, h) = ((max_x - min_x + 1) * 16, (max_y - min_y + 1) * 16);
@@ -268,11 +334,12 @@ pub(super) fn scene_layout_card(
         )
     };
     let tabs = format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         tab("info", "Info", true),
         tab("parcels", "Shape", false),
         tab("spawns", "Spawn points", false),
-        tab("perms", "Permissions", false)
+        tab("perms", "Permissions", false),
+        tab("server", "Multiplayer", false)
     );
     let info_pane = format!(r#"<section class="lay__pane" data-pane="info">{info_pane}</section>"#);
     let parcels_pane = format!(
@@ -301,7 +368,8 @@ pub(super) fn scene_layout_card(
             .unwrap_or_default()),
     );
     format!(
-        r#"<div class="jn lay lay--info" id="scene-layout"><div class="jn2__tabs" role="tablist">{tabs}</div><div class="lay__body"><div class="lay__left"><div class="lay__legend"><span class="lay__key"><i class="lay__swatch lay__swatch--in"></i>In scene</span><span class="lay__key"><i class="lay__swatch lay__swatch--area"></i>Spawn area</span><span class="lay__size">{n} parcel{s} · {w} × {h} m</span></div>{map}<div class="note lay__hint" id="lay-hint">Click the title, description, tags or cover to edit — changes save to scene.json</div></div><div class="lay__rail">{info_pane}{parcels_pane}{spawns_pane}{perms_pane}</div></div>{media_row}</div>"#,
+        r#"<div class="jn lay lay--info" id="scene-layout"><div class="jn2__tabs" role="tablist">{tabs}</div><div class="lay__body"><div class="lay__left"><div class="lay__legend"><span class="lay__key"><i class="lay__swatch lay__swatch--in"></i>In scene</span><span class="lay__key"><i class="lay__swatch lay__swatch--area"></i>Spawn area</span><span class="lay__size">{n} parcel{s} · {w} × {h} m</span></div>{map}<div class="note lay__hint" id="lay-hint">Click the title, description, tags or cover to edit — changes save to scene.json</div></div><div class="lay__rail">{info_pane}{parcels_pane}{spawns_pane}{perms_pane}{server_pane}</div></div>{media_row}</div>"#,
+        server_pane = server_pane(server),
         n = parcels.len(),
         s = if parcels.len() == 1 { "" } else { "s" },
         map = layout_grid(parcels, base, spawns),

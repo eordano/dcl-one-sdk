@@ -53,6 +53,8 @@ dcl-one-sdk deploy --target peer.decentraland.org
 | `init` | scaffold a scene or smart-wearable project |
 | `build` | bundle and type-check the scene |
 | `start` | run a local preview server with live reload |
+| `host` | run only the scene's authoritative server, against a running preview |
+| `storage` | read and write the `Storage` / `EnvVar` values server-side scenes use |
 | `deploy` | hash, sign, and upload the scene to a catalyst or worlds server |
 | `unpublish` | remove a published LAND scene from a dcl-one-style content server |
 | `pack` | pack a smart wearable into `smart-wearable.zip` |
@@ -125,6 +127,23 @@ bundles are compiled into it, which `/health` confirms with
 `ABGEN_EMBED_BIN=<path>` embeds a different abgen instead of downloading — the
 escape hatch for building offline, for a musl host (the pinned Linux archives
 are glibc-linked), and for testing an abgen from source.
+
+## Authoritative server
+
+A scene with `"authoritativeMultiplayer": true` in scene.json gets its server
+simulated locally, as upstream's preview does: `start` runs the built scene a
+second time, headless under node, with `isServer()` answering `true`, and joins
+it to the preview's room as the peer clients trust for state.
+`registerMessages`, `syncEntity`, `validateBeforeChange` and `@dcl/sdk/server`
+(`Storage`, `EnvVar`) behave as on the hosted service, with message senders
+verified by the room's signed handshake. The server has no LiveKit transport
+yet, so such a preview keeps comms on the built-in ws-room and runs without
+voice. The **Multiplayer** tab of the preview's `/scene` page switches the
+flag on and off, and a running preview follows it with no restart: the server
+attaches or detaches after the rebuild, and restarts on every later one so
+server code reloads with the client's. `--no-host` (or upstream's
+`--no-server`) skips the server; `dcl-one-sdk host` runs only the server
+against a preview that is already up. A scene without the flag is unchanged.
 
 ## Voice (LiveKit)
 

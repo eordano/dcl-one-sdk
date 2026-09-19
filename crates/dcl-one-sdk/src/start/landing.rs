@@ -24,7 +24,7 @@ use join_card::{
     host_label, join_control, knobs, realm_carry, Carry, Knobs, Target, WHERE_DESKTOP, WHERE_LAN,
     WHERE_PHONE, WHERE_WEB,
 };
-use layout_card::{grid_bounds, scene_layout_card};
+use layout_card::{grid_bounds, scene_layout_card, ServerState};
 pub(in crate::start) use layout_card::{parse_parcels, PERMISSIONS};
 use serde_json::Value;
 use std::sync::Mutex;
@@ -266,7 +266,14 @@ fn launch_targets(
         WHERE_WEB,
         "Web explorer",
         "Opens the web explorer in this browser — no install",
-        web_join_url(&joinblock::web_explorer_base(), realm, position),
+        web_join_url(
+            knobs
+                .player
+                .as_deref()
+                .unwrap_or(&joinblock::web_explorer_base()),
+            realm,
+            position,
+        ),
         Carry::Nothing,
     ));
     let mut phone = Target::new(
@@ -473,6 +480,7 @@ fn render(
     let sections = format!(
         r##"  <section id="join" class="sec">
     {join_control}
+    <p><a class="btn" href="{creator_url}">Edit in Creator Hub</a></p>
   </section>
 
   <section id="requests" class="sec">
@@ -490,6 +498,7 @@ fn render(
             prefix
         ),
         route_links = route_links(st, prefix, lan_realm.is_some()),
+        creator_url = esc(&super::project_bridge::creator_url(realm)),
     );
     shell(
         st,
@@ -500,6 +509,19 @@ fn render(
         host_label(realm),
         &dash(&sections, &edit_data_blob(prefix, &scene)),
     )
+}
+
+/// The flag is scene.json's; whether a server answers it is this preview's.
+fn server_state(st: &AppState, project: Option<&Project>) -> ServerState {
+    if !project.is_some_and(crate::entrypoint::authoritative_multiplayer) {
+        ServerState::Off
+    } else if st.no_host {
+        ServerState::Skipped
+    } else if st.host_running() {
+        ServerState::Running
+    } else {
+        ServerState::Down
+    }
 }
 
 /// `/scene` — the layout card with an Info tab holding the scene hero.
@@ -527,7 +549,14 @@ pub(super) fn scene_page(st: &AppState, headers: &HeaderMap, local: bool) -> Res
             "lay__remote",
             "the shape, spawn points and permissions only save from there"
         ),
-        layout_card = scene_layout_card(scene.json, &scene.grid, scene.base, scene.spawns, &info),
+        layout_card = scene_layout_card(
+            scene.json,
+            &scene.grid,
+            scene.base,
+            scene.spawns,
+            &info,
+            server_state(st, projects.first()),
+        ),
         more_scenes = more_scenes_chips(projects.get(1..).unwrap_or_default()),
     );
     html(shell(

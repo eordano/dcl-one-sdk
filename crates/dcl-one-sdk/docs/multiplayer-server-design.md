@@ -248,6 +248,50 @@ the host's unicast `RES_CRDT_STATE` for its `REQ_CRDT_STATE` and a `pong`
 custom event whose `from` is the peer's own address, proving the sender
 stamp, the `to` list and upstream's `Room` end to end over the wire.
 
+## Landed (2026-09-18): the mode works with default flags
+
+Voice (0.25.0) moved a preview's comms onto the embedded livekit-server while
+the host kept joining the ws-room, so a flagged scene started with no flags had
+its clients in a LiveKit scene room and its server in mini-comms; the release
+notes asked for a manual `--no-livekit`. `start` now decides `hosts_scene`
+(flag set, no `--no-host`) before comms: such a preview stays on the ws-room
+and says `voice off for this preview`, and an explicit `--livekit-url` beside
+a host is called out instead of silently splitting the room
+(`tests/livekit_embedded.rs::a_scene_with_a_server_keeps_comms_on_the_ws_room`).
+`--no-server`, upstream's spelling (auth-server `e2bbcc9a`), is a visible alias
+of `--no-host`. The README gained the section M4 asked for. `tests/host_room.rs`
+had stopped compiling when `BuildOptions` grew `built_in`; it builds and passes
+again. Still open: a LiveKit transport for the host, which would give flagged
+scenes voice back.
+
+## Landed (2026-09-18): the flag is a switch, and the preview follows it
+
+The `/scene` page's layout card has a **Multiplayer** tab: one switch
+(`POST /scene-json` `{ "authoritativeMultiplayer": bool }`, the editors'
+allowlist and gates; off removes the key) and a status line for the four
+states (`off`, `running`, `skipped` under `--no-host`, `down`). What made a
+switch worth having is that the flag no longer needs a restart, from the page
+or from a hand edit:
+
+- **Server.** The isolate moved from a local in `start` to `AppState.host`
+  (`src/start/host_slot.rs`); `follow_host` runs at startup and after every
+  scene rebuild
+  (`notify_reload`), attaching, dropping, or swapping the isolate for a fresh
+  one. The swap also fixes a gap the mode always had: the isolate runs the
+  bundle it loaded, so server code used to go stale on the first save.
+- **Client.** The loader stub bakes the flag in (`__dclOneMp`), and the
+  built-in watch session staged it once; `follow_mp_flag` re-reads it on a
+  scene.json batch and rewrites the stub before the rebuild.
+- **Comms.** `/about` and `/get-scene-adapter` read `AppState::voice()`, which
+  is `None` while the scene has a server, so a preview that started with a
+  livekit-server sends clients to the ws-room as soon as the flag appears and
+  back to LiveKit when it goes. Clients already connected keep their room
+  until they rejoin; the terminal and the page's toast say so.
+
+`tests/host_toggle.rs` drives the cycle against a real `start`: scaffold, on,
+host in the room with the loader armed and `/scene` reporting `running`, off,
+key gone with the host detached and the loader disarmed.
+
 ## Non-goals for now
 
 - Scaling past one room per scene process.

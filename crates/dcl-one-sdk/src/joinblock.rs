@@ -4,6 +4,19 @@ use std::net::Ipv4Addr;
 
 pub const DEFAULT_WEB_EXPLORER: &str = "https://decentraland.org/bevy-web";
 
+pub fn parse_web_explorer(value: &str) -> Result<url::Url, &'static str> {
+    let url = url::Url::parse(value.trim())
+        .map_err(|_| "Enter a complete http:// or https:// player URL.")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("Use an http:// or https:// player URL without credentials.");
+    }
+    Ok(url)
+}
+
 pub fn web_explorer_base() -> String {
     std::env::var("DCL_ONE_SDK_WEB_EXPLORER")
         .ok()
@@ -203,18 +216,46 @@ fn query_value_encode(value: &str) -> String {
 }
 
 pub fn web_join_url(web_explorer: &str, realm: &str, position: (i64, i64)) -> String {
+    let Ok(mut player) = parse_web_explorer(web_explorer) else {
+        return String::new();
+    };
+    let extra: Vec<_> = player
+        .query_pairs()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_ref(),
+                "preview" | "realm" | "initialRealm" | "position"
+            ) && !(key == "portables" && crate::start::world_base_configured())
+        })
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    player.set_query(None);
+    let fragment = player.fragment().map(str::to_string);
+    player.set_fragment(None);
+    if !player.path().ends_with('/')
+        && !player.path().rsplit('/').next().unwrap_or("").contains('.')
+    {
+        player.set_path(&format!("{}/", player.path()));
+    }
     let encoded_realm = query_value_encode(realm);
-    let base = format!(
-        "{web_explorer}/?preview=true&realm={encoded_realm}&position={},{}",
+    let mut base = format!(
+        "{player}?preview=true&realm={encoded_realm}&position={},{}",
         position.0, position.1
     );
-    match crate::start::world_base_configured() {
-        true => format!(
-            "{base}&portables={}",
+    if crate::start::world_base_configured() {
+        base.push_str(&format!(
+            "&portables={}",
             form_encode(&format!("{realm}/world/{CONTROLLER_WORLD}"))
-        ),
-        false => base,
+        ));
     }
+    for (key, value) in extra {
+        base.push_str(&format!("&{}={}", form_encode(&key), form_encode(&value)));
+    }
+    if let Some(fragment) = fragment {
+        base.push('#');
+        base.push_str(&fragment);
+    }
+    base
 }
 
 pub fn desktop_deep_link(
@@ -967,6 +1008,47 @@ mod tests {
                 (52, -68)
             ),
             "https://decentraland.org/bevy-web/?preview=true&realm=http://10.1.2.20:5600&position=52,-68"
+        );
+    }
+
+    #[test]
+    fn custom_web_player_preserves_options_and_replaces_preview_destination() {
+        for path in ["play", "play/", "player.html"] {
+            let link = web_join_url(
+                &format!("https://catalyst.example.com/{path}?realm=old&realm=duplicate&initialRealm=stale&preview=false&position=9,9&quality=low#view"),
+                "http://127.0.0.1:8000/t/demo?x=1&y=2", (52, -68),
+            );
+            let parsed = url::Url::parse(&link).unwrap();
+            let params: Vec<_> = parsed.query_pairs().collect();
+            for (key, expected) in [
+                ("realm", "http://127.0.0.1:8000/t/demo?x=1&y=2"),
+                ("preview", "true"),
+                ("position", "52,-68"),
+                ("quality", "low"),
+            ] {
+                assert_eq!(
+                    params
+                        .iter()
+                        .filter(|(k, _)| k == key)
+                        .map(|(_, v)| v.as_ref())
+                        .collect::<Vec<_>>(),
+                    [expected]
+                );
+            }
+            assert!(!params.iter().any(|(k, _)| k == "initialRealm"));
+            assert_eq!(parsed.fragment(), Some("view"));
+            assert_eq!(
+                parsed.path(),
+                if path == "player.html" {
+                    "/player.html"
+                } else {
+                    "/play/"
+                }
+            );
+        }
+        assert_eq!(
+            web_join_url("javascript:alert(1)", "http://localhost:8000", (0, 0)),
+            ""
         );
     }
 

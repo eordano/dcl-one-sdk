@@ -161,6 +161,82 @@ fn launch_href(html: &str) -> String {
     html[at..][..html[at..].find('"').unwrap()].replace("&amp;", "&")
 }
 
+#[test]
+fn web_player_presets_and_custom_urls_reach_the_launch_link() {
+    let st = gather_state();
+    for player in [
+        joinblock::DEFAULT_WEB_EXPLORER,
+        "https://interconnected.online/play",
+        "https://catalyst.example.com/play/?quality=low#view",
+    ] {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("where", "web")
+            .append_pair("player", player)
+            .finish();
+        let html = render_local(&st, None, &gather_knobs(&query));
+        let link = url::Url::parse(&launch_href(&html)).unwrap();
+        assert_eq!(link.origin(), url::Url::parse(player).unwrap().origin());
+        let params: std::collections::HashMap<_, _> = link.query_pairs().collect();
+        assert_eq!(params["realm"], LOCAL);
+        assert_eq!(params["preview"], "true");
+        assert_eq!(params["position"], "0,0");
+        assert!(html.contains("decentraland.org/bevy-web</option>"));
+        assert!(html.contains("interconnected.online/play</option>"));
+        assert!(html.contains("Custom URL…</option>"));
+        if player.contains("catalyst.example.com") {
+            assert!(html.contains(r#"name="playerUrl""#));
+            assert_eq!(params["quality"], "low");
+            assert_eq!(link.fragment(), Some("view"));
+        }
+    }
+}
+
+#[test]
+fn custom_player_form_and_target_switches_keep_the_url() {
+    let st = gather_state();
+    let knobs = gather_knobs(
+        "where=web&player=custom&playerUrl=https%3A%2F%2Fcatalyst.example.com%2Fplay%2F",
+    );
+    assert_eq!(
+        knobs.player.as_deref(),
+        Some("https://catalyst.example.com/play/")
+    );
+    assert!(launch_href(&render_local(&st, None, &knobs))
+        .starts_with("https://catalyst.example.com/play/?preview=true"));
+    let desktop = render_local(
+        &st,
+        None,
+        &gather_knobs("where=desktop&player=https%3A%2F%2Fcatalyst.example.com%2Fplay%2F"),
+    );
+    assert!(desktop
+        .contains(r#"type="hidden" name="player" value="https://catalyst.example.com/play/""#));
+    assert!(launch_href(&desktop).starts_with("decentraland://"));
+}
+
+#[test]
+fn invalid_players_are_visible_but_cannot_be_launched() {
+    let st = gather_state();
+    for player in [
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "https://user:secret@example.org/play",
+        "",
+        "//example.org/play",
+    ] {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("where", "web")
+            .append_pair("player", player)
+            .finish();
+        let html = render_local(&st, None, &gather_knobs(&query));
+        assert!(
+            html.contains(r#"id="launch" aria-disabled="true""#),
+            "{player}"
+        );
+        assert!(html.contains(r#"id="player-note" role="alert""#));
+        assert!(!html.contains("<script>alert(1)</script>"));
+    }
+}
+
 /// The knobs reach the link, come back set, and cannot repoint it: a core
 /// key keeps the value this server chose, and there is no longer any way
 /// to put a flag of one's own choosing into this page's launch button.
@@ -390,7 +466,7 @@ fn the_targets_that_read_no_params_grey_out_every_knob() {
             "{where_key}: a fixed flag reads as its value, no control: {html}"
         );
         assert!(
-            !html.contains(r#"<select class="knob__sel""#)
+            !html.contains(r#"<select class="knob__sel" id="spawn""#)
                 && html.contains("this link carries only the realm and a position"),
             "{where_key}: the spawn choice reads as text with the why: {html}"
         );
@@ -886,6 +962,7 @@ fn the_layout_card_leads_with_info_and_counts_its_tabs() {
         (0, 0),
         &spawns,
         "<article class=\"scene\">HERO</article>",
+        ServerState::Off,
     );
     assert!(
         card.contains(r#"class="jn lay lay--info" id="scene-layout""#),
@@ -896,6 +973,7 @@ fn the_layout_card_leads_with_info_and_counts_its_tabs() {
         ("parcels", "Shape"),
         ("spawns", "Spawn points"),
         ("perms", "Permissions"),
+        ("server", "Multiplayer"),
     ] {
         assert!(card.contains(&format!(r#"data-laytab="{key}""#)));
         assert!(card.contains(&format!("disabled>{label}</button>")));
@@ -954,5 +1032,43 @@ fn the_default_knobs_launch_a_second_client_straight_in() {
     assert!(
         knobs(Some("where=desktop"), &[]).opts.is_empty(),
         "a submitted form names its own set"
+    );
+}
+
+/// The Multiplayer pane is one inert switch the script enables with the
+/// permission rows, checked whenever scene.json carries the flag, and a status
+/// line that tells the four states apart: the flag is scene.json's, whether a
+/// server answers it is this preview's.
+#[test]
+fn the_multiplayer_pane_carries_the_switch_and_says_what_the_server_is_doing() {
+    let off = server_pane(ServerState::Off);
+    assert!(
+        off.contains(r#"<section class="lay__pane" data-pane="server" hidden>"#)
+            && off.contains(r#"<input class="sw" type="checkbox" id="mp-switch" disabled>"#),
+        "off is an unchecked, inert switch: {off}"
+    );
+    assert!(off.contains(r#"data-server="off""#) && off.contains("clients only"));
+    for (state, key, says) in [
+        (ServerState::Running, "running", "isServer() true"),
+        (ServerState::Skipped, "skipped", "--no-host"),
+        (ServerState::Down, "down", "next successful"),
+    ] {
+        let pane = server_pane(state);
+        assert!(
+            pane.contains(r#"id="mp-switch" checked disabled>"#),
+            "{key}: the switch follows scene.json, not the isolate: {pane}"
+        );
+        assert!(
+            pane.contains(&format!(r#"data-server="{key}""#)) && pane.contains(says),
+            "{key}: {pane}"
+        );
+    }
+    assert!(
+        off.contains("lay__perm--plain") && STYLE.contains(".lay__perm--plain .sw:checked"),
+        "a server is a choice, not a permission: it does not wear the warning wash"
+    );
+    assert!(
+        SCRIPT.contains("authoritativeMultiplayer: on") && SCRIPT.contains("'mp-switch'"),
+        "the script saves the switch through /scene-json"
     );
 }

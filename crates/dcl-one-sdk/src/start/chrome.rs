@@ -156,13 +156,14 @@ pub(crate) fn document(
 <body>
 <a class="skip" href="{skip_to}">{skip_label}</a>
 <header class="bar">
-  <div class="bar__mark"><span class="bar__dot"></span>DCL One SDK</div>
+  <div class="bar__mark"><span class="bar__dot"></span>DCL One SDK <span id="preview-connection" data-health-url="{health_url}" role="status" aria-live="polite"></span></div>
   {nav}
 </header>
 {body}
 </body>
 </html>
 "##,
+        health_url = esc(&format!("{prefix}/about")),
         t = esc(title),
         nav = nav.map(|n| pgnav(prefix, n)).unwrap_or_default(),
     )

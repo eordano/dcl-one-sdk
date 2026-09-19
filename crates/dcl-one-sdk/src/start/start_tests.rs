@@ -1050,6 +1050,14 @@ async fn inspector_revalidates_by_etag_and_serves_the_index_from_memory() {
 
     let first = get_asset(&st, "app.js", HeaderMap::new()).await;
     assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        first.headers()["cross-origin-embedder-policy"],
+        "require-corp"
+    );
+    assert_eq!(
+        first.headers()["cross-origin-resource-policy"],
+        "cross-origin"
+    );
     let etag = first.headers().get(header::ETAG).expect("etag").clone();
     assert_eq!(
         first.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -1059,6 +1067,10 @@ async fn inspector_revalidates_by_etag_and_serves_the_index_from_memory() {
     again.insert(header::IF_NONE_MATCH, etag.clone());
     let revalidated = get_asset(&st, "app.js", again.clone()).await;
     assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        revalidated.headers()["cross-origin-embedder-policy"],
+        "require-corp"
+    );
     assert_eq!(revalidated.headers().get(header::ETAG).unwrap(), &etag);
     let body = axum::body::to_bytes(revalidated.into_body(), usize::MAX)
         .await

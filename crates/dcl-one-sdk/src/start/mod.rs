@@ -1,4 +1,8 @@
 pub(crate) mod ansi;
+mod assistant;
+mod assistant_bridge;
+mod assistant_history;
+mod assistant_provider;
 pub(crate) mod chrome;
 mod content_cache;
 mod deploy_page;
@@ -6,12 +10,18 @@ mod deploy_rights;
 mod deploy_status;
 mod edit;
 mod editor;
+mod external_debug;
+mod external_debug_state;
+mod host_slot;
 mod http;
 mod land_picker;
 mod landing;
+mod project_assets;
+mod project_bridge;
 pub(crate) mod proxy;
 pub(crate) mod scene_logs;
 mod storage_page;
+mod ui_designer;
 
 use crate::build::{self, BuildOptions};
 use crate::data_layer::{self, DataLayerState};
@@ -118,12 +128,20 @@ pub(crate) struct AppState {
     /// Readers take a snapshot; `set_scene_json` / `refresh_scene_json` are
     /// the only writers (the landing page's editors rewrite scene.json).
     projects: RwLock<Vec<Project>>,
+    project_watch: bool,
+    assistant: assistant::Assistant,
+    external_debug: external_debug_state::DebugState,
     machine: String,
     reload_tx: broadcast::Sender<ReloadFrame>,
     offline_comms: bool,
     /// Set: `/about` hands out `signed-login:` and the signed endpoints mint
-    /// LiveKit tokens; unset: mini-comms ws-rooms on this server.
+    /// LiveKit tokens; unset: mini-comms ws-rooms on this server. Read it
+    /// through [`AppState::voice`], which a hosted scene overrides.
     livekit: Option<crate::livekit::Livekit>,
+    /// `--no-host`: scene.json's `authoritativeMultiplayer` attaches nothing.
+    no_host: bool,
+    /// The first project's server isolate; [`host_slot`] keeps it on the flag.
+    host: Mutex<Option<crate::host::Isolate>>,
     port: u16,
     data_layer: Option<DataLayerState>,
     entity_cache: Mutex<HashMap<PathBuf, (Instant, Value)>>,
@@ -156,10 +174,15 @@ impl AppState {
     fn new(projects: Vec<Project>, port: u16, reload_tx: broadcast::Sender<ReloadFrame>) -> Self {
         AppState {
             projects: RwLock::new(projects),
+            project_watch: false,
+            assistant: assistant::Assistant::default(),
+            external_debug: external_debug_state::DebugState::default(),
             machine: machine_id(),
             reload_tx,
             offline_comms: false,
             livekit: None,
+            no_host: false,
+            host: Mutex::new(None),
             port,
             data_layer: None,
             entity_cache: Mutex::new(HashMap::new()),
@@ -344,11 +367,15 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     // Voice by default: a livekit-server of this preview's own, unless comms
     // are off, on a server elsewhere, or the preview is reached through a
     // tunnel, which forwards the preview port alone and never media ports.
+    // A scene with a server stays on the ws-room too: see `host_slot`.
+    let hosts_scene = !opts.no_host && crate::entrypoint::authoritative_multiplayer(&first);
     let mut livekit = opts.livekit.clone();
     let mut livekit_server = None;
     if opts.embedded_livekit && livekit.is_none() && !opts.offline_comms {
         crate::livekit::validate_room(&opts.livekit_room)?;
-        if trunk_url.is_some() {
+        if hosts_scene {
+            host_slot::note_voice_off();
+        } else if trunk_url.is_some() {
             ux::note(
                 "voice off over a tunnel: the built-in livekit-server is reachable from this machine and its LAN only; \
                  pass --livekit-url with a LiveKit server the tunnel's peers can reach",
@@ -384,8 +411,10 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     };
 
     let mut state = AppState::new(workspace.projects.clone(), port, broadcast::channel(32).0);
+    state.project_watch = !opts.no_watch;
     state.offline_comms = opts.offline_comms;
     state.livekit = livekit.clone();
+    state.no_host = opts.no_host;
     state.data_layer = data_layer;
     state.local_ab = opts.local_ab;
     state.mcp = opts.mcp;
@@ -411,7 +440,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
 
     let app = build_router(state.clone(), comms_state);
 
-    if let Some(lk) = &livekit {
+    if let Some(lk) = state.voice() {
         let server = match &livekit_server {
             Some(running) => format!("0.0.0.0:{}", running.port),
             None => lk.describe_url(),
@@ -435,23 +464,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
         Err(e) => ux::report_watch(&e.context("reading the storage target")),
     }
 
-    let _host_isolate = if !opts.no_host && crate::entrypoint::authoritative_multiplayer(&first) {
-        match crate::host::spawn_isolate(&first.root, &format!("http://127.0.0.1:{port}"), "room-1")
-        {
-            Ok(isolate) => {
-                ux::note_arrow(
-                    "authoritative host attached (scene.json authoritativeMultiplayer; --no-host to skip)",
-                );
-                Some(isolate)
-            }
-            Err(e) => {
-                ux::report_watch(&e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    state.follow_host(None);
 
     let mut sidecar = if opts.ab_sidecar {
         crate::asset_bundles::spawn_sidecar(port, &first.root)
@@ -537,6 +550,7 @@ pub async fn start(opts: StartOptions) -> Result<()> {
     crate::asset_bundles::kill_sidecar_group();
     crate::livekit_server::kill_group();
     drop(livekit_server);
+    state.release_host();
     result
 }
 
@@ -649,6 +663,7 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
             get(world_content).head(world_content),
         )
         .route("/mobile-preview", get(mobile_preview))
+        .route("/scene-inspector", get(external_debug::producer))
         .route("/data-layer", get(data_layer_ws))
         .route("/inspector", get(inspector_redirect))
         .route("/inspector/", get(inspector_index))
@@ -678,6 +693,7 @@ fn build_router(state: Arc<AppState>, comms_state: Arc<crate::comms::CommsState>
                 .merge(storage_page::routes())
                 .with_state(state.clone()),
         )
+        .merge(project_bridge::routes(state.clone()))
         .layer(middleware::from_fn_with_state(state, access_log))
         .layer(compression_layer())
 }
@@ -841,10 +857,11 @@ fn spawn_tunnel_printer(
     });
 }
 
-/// Preview builds are never production/minified and always use the generated
-/// entry point, never the scene's own `main`.
+/// Built-in preview builds use the generated entry point; custom scripts own
+/// their output and receive DCL_ONE_SDK_PRODUCTION=0.
 fn preview_build_opts(opts: &StartOptions, dir: PathBuf) -> BuildOptions {
     BuildOptions {
+        built_in: false,
         dir,
         production: false,
         ignore_composite: opts.ignore_composite,
@@ -950,7 +967,9 @@ async fn watch_or_retry(
     state: Arc<AppState>,
 ) -> Result<()> {
     project.main_output()?;
-    project.tsconfig()?;
+    if crate::build_script::selected(&project, &build_opts)?.is_none() {
+        project.tsconfig()?;
+    }
     let fs = FsWatcher::new(&project.root)?;
     let root = project.root.clone();
     match WatchSession::create(project.clone(), &build_opts, initial_build, steps).await {
@@ -1016,6 +1035,7 @@ async fn retry_initial_build(
 fn notify_reload(root: &Path, scene: &str, state: &AppState, event: ReloadEvent) {
     state.refresh_scene_json(root);
     lock_cache(state).remove(root);
+    state.follow_reload(root, &event);
     let mut clients = 0;
     for frame in live_reload::reload_frames(root, scene, &state.machine, &event) {
         clients = state.reload_tx.send(frame).unwrap_or(0);

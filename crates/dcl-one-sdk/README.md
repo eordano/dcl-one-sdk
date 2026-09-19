@@ -74,13 +74,67 @@ installs and the command still exits 0. `--offline` skips the request;
 
 ---
 
+The preview/editor header reports lost connections and clears the warning after
+the preview server responds again, including when accessed through a tunnel.
+
 ## Build it
 
 ```
 dcl-one-sdk build [--dir D] [-p|--production] [-w|--watch]
                   [--ignoreComposite] [--customEntryPoint]
-                  [--skip-install] [--skip-type-check]
+                  [--skip-install] [--skip-type-check] [--built-in]
 ```
+
+### Custom build scripts
+
+If `package.json` defines `scripts.build`, `build`, `build --watch`, `start`,
+`deploy` and `pack` run that command. For example:
+
+```json
+{ "scripts": { "build": "node scripts/build-scene.mjs" } }
+```
+
+The command contract is:
+
+- Run once, from the scene root, through `sh -c` (Windows: `cmd.exe /d /s /c`).
+  `node_modules/.bin` is prepended to the inherited `PATH`. stdout/stderr and
+  stdin are inherited. No npm wrapper, prebuild/postbuild hooks, dependency
+  installation or SDK pipeline runs around it.
+- Own type checking, bundling, composite generation and assets. Print check
+  results yourself; the CLI reports script start and successful completion.
+  SDK flags such as `--skip-type-check`, `--ignoreComposite` and
+  `--customEntryPoint` only configure the built-in pipeline.
+- Exit zero and leave a nonempty JavaScript bundle at `scene.json.main`, a
+  relative path inside the scene. The bundle must implement the scene runtime
+  interface (`onStart`/`onUpdate`, CommonJS and `~system/*` imports as needed).
+  Emit all runtime assets into the scene tree and include them via `.dclignore`.
+- Read `DCL_ONE_SDK_PRODUCTION` (`1` for deploy/production, `0` for preview) if
+  different build profiles are needed; `DCL_ONE_SDK_MAIN` names the bundle.
+  Output stays in the scene tree, including production builds. SDK release
+  artifacts under `.dcl-one/release` never override custom output during publish.
+- A failed command or missing/empty output fails the build without SDK fallback.
+  In preview watch mode, the server stays up to retry on the next source edit;
+  clients reload only after a successful build. Deploy and pack stop on failure.
+- Watch reruns on JS/TS (including `.mjs`/`.cjs`), composite and root
+  `package.json`, `scene.json`, `tsconfig.json` edits. Models reload directly.
+  Keep generated code in its own output directory (normally `bin/`), separate
+  from inputs: that directory, hidden directories and `node_modules` are ignored.
+  Other inputs need an explicit build or a watched source edit. The script must
+  terminate; do not start another watcher inside it.
+
+`--skip-build` on start/deploy/pack skips the initial command; start still watches
+unless `--no-watch` is also passed. `build --built-in` explicitly uses the SDK
+pipeline. Use that flag when delegating back to the CLI inside a custom command;
+recursive custom build invocations fail with an explanation. The exact scaffold
+scripts `dcl-one-sdk build` and `dcl-one-sdk build --built-in` are treated as
+built-in aliases for compatibility. With no build script, the SDK pipeline below
+is used. Build selection is per member in a workspace.
+
+Custom production builds share the scene tree with preview: serialize build and
+deploy commands for the same scene. Successful incremental scripts may keep an
+existing bundle; output validation checks its presence, not its modification time.
+
+### Built-in pipeline
 
 Bundles the scene into `bin/index.js` and type-checks it. At a
 `dcl-workspace.json` root it builds every member in order. Two things differ
@@ -119,7 +173,7 @@ dcl-one-sdk start [--dir D] [-p|--port N] [--skip-build] [--no-watch]
                   [--no-livekit | --livekit-url WS_URL --livekit-api-key KEY
                    --livekit-api-secret SECRET] [--livekit-room NAME]
                   [--no-asset-bundles] [--no-mcp] [--mcp-port N]
-                  [--tunnel WSS_URL] [-- EXPLORER_PARAMS...]
+                  [--no-host] [--tunnel WSS_URL] [-- EXPLORER_PARAMS...]
 ```
 
 Builds the scene, serves it as a local realm on port 8000 (or the next free
@@ -182,10 +236,24 @@ phone), whether the link asks the client to open its **MCP port**, which **spawn
 point** to land on, and checkboxes for the deep-link params worth having in a
 preview loop — `multi-instance` (a second client beside the first),
 `skip-auth-screen`, `landscape-terrain-enabled`, `hub`, `force-open-backpack`.
-There is no free-text field: the page builds the link only from controls it
-drew, dropping a query key it does not own or a value it never offered before
-the link exists, so it cannot be made to produce a param the client would refuse
-anyway.
+The desktop deep-link flags are limited to the controls shown on the page.
+
+Under **Web explorer**, **Player** offers `decentraland.org/bevy-web` and
+`interconnected.online/play`, plus **Custom URL…** for another HTTP(S) player,
+including `https://catalyst.example.com/play/`. Set it directly in the preview page URL:
+
+```text
+http://127.0.0.1:8000/?where=web&player=https%3A%2F%2Fcatalyst.example.com%2Fplay%2F
+```
+
+The selection survives target changes and can be bookmarked or shared. It
+overrides `DCL_ONE_SDK_WEB_EXPLORER` for that page; otherwise the environment
+variable or the Decentraland preset supplies the default. Launch preserves
+the player's existing URL options and fragment, and sets `preview=true`,
+`realm`, and `position` for this scene (replacing any stale `initialRealm`).
+The custom form submits `player=custom&playerUrl=<encoded URL>`, which is
+equivalent to setting `player=<encoded URL>` directly. If the browser asks
+the player for local network access, allow it to reach the local preview.
 
 The short list is deliberate. The client declares around ninety launch flags but
 accepts sixteen from a deep link (`DeepLinkAllowlist.cs`): eight for any realm,
@@ -267,6 +335,54 @@ keeps no old versions, so there are no other bytes to serve, and failing the
 request would break a fetch already in flight when the watcher rewrote the file.
 If you need the exact bytes a hash was minted for, this server cannot give them
 to you.
+
+### Authoritative server
+
+```
+dcl-one-sdk start [--no-host]
+dcl-one-sdk host  [--dir D] [--preview http://127.0.0.1:8000] [--room room-1]
+```
+
+A scene with `"authoritativeMultiplayer": true` in scene.json gets its server
+simulated locally, as upstream's preview does: `start` runs the built scene a
+second time, headless under node, with `isServer()` answering `true`, and
+joins it to the preview's room as the peer clients trust for state. The same
+bundle runs on both sides, so `registerMessages`, `syncEntity`,
+`validateBeforeChange` and `@dcl/sdk/server` behave as they do on the hosted
+service: message senders are the wallet addresses the room's signed handshake
+verified, late joiners get the server's state, and `Storage` / `EnvVar` go to
+the preview's storage routes below. `start` prints `authoritative host
+attached`, the server's own lines arrive as `◉ multiplayer: …`, and its
+`console.log` output prints beside the client's.
+
+The flag has a switch: the **Multiplayer** tab of the preview's `/scene` page
+turns the **Authoritative server** on and off and says what the server is
+doing (off, running, skipped by `--no-host`, or not attached). It writes
+scene.json, as a hand edit would, and a running preview follows either one
+with no restart: the rebuild re-arms the client loader, then the server
+attaches or detaches (`◉ multiplayer: host detached`). Every later rebuild
+restarts the server on the new bundle, so server code reloads with the
+client's; its in-memory state starts over, `Storage` does not. Switching it
+off removes the key rather than writing `false`. Like the page's other
+editors, the switch saves only from the machine hosting the preview.
+
+The server reaches clients through the built-in ws-room and has no LiveKit
+transport yet, so while a scene has a server its clients are sent there and
+the preview runs without voice: one started with the flag says `voice off for
+this preview` and starts no livekit-server, one that gains the flag later
+says `comms moved to the built-in ws-room`, and clients already inside rejoin
+to meet the server. Switching the server off hands new clients back to voice
+when the preview has a livekit-server running. `--no-host` (upstream's
+spelling, `--no-server`, works too) skips the server and keeps voice: use it
+when another preview of the same scene already runs one, since two servers
+fight over the room. Without a server, clients of a flagged scene wait for
+state sync (`isStateSyncronized()` stays `false`).
+
+`dcl-one-sdk host` runs only the server, against a preview that is already up
+(`start --no-host`, say, or one on another port): it needs a built scene,
+reconnects when the preview restarts, and exits when its parent does. A scene
+without the flag is unchanged by any of this: no server starts and no bundle
+byte differs.
 
 ### Storage
 
@@ -486,3 +602,168 @@ published.
 `start` now launches an embedded LiveKit server on supported platforms and mints signed realm and scene room tokens. Use `--no-livekit` for the built-in ws-room, or `--livekit-url` with credentials for an external SFU. Cargo builds on macOS require a LiveKit server on PATH; Nix builds embed one.
 
 Token acceptance and preview shutdown are tested against the embedded server. Explorer audio and LAN media connectivity remain unverified. Authoritative multiplayer hosts still use mini-comms: use `--no-livekit` for those scenes until the host transport supports LiveKit.
+
+### Use Creator Hub with the same local project
+
+Start the scene with the Creator Hub origin allowed, then choose **Edit in
+Creator Hub** on the preview page:
+
+```sh
+DCL_ONE_SDK_ALLOWED_ORIGINS=https://catalyst.example.com dcl-one-sdk start --dir ./my-scene
+```
+
+`/create?projectUrl=http://localhost:8000` connects directly from your browser to
+that SDK process. `DCL_ONE_SDK_CREATOR_HUB_URL` changes the link destination for a
+self-hosted Creator Hub. Add its full origin to `DCL_ONE_SDK_ALLOWED_ORIGINS`.
+Browser local-network permission may be required. Connect to a single scene;
+a workspace with several scenes must first be opened with `--dir <scene>`.
+
+Creator Hub edits the same source files and `main.composite` that your IDE and
+SDK use. Saving goes through the SDK's existing watcher, bundler, composite
+normalizer, and `SCENE_UPDATE` WebSocket notification. Keep watching enabled;
+`--no-watch` saves files without rebuilding. Publishing, scene settings, storage,
+and the optional upstream inspector continue to use the SDK's existing pages.
+The file API does not install packages or implement a second build pipeline.
+
+The loopback-only `/api/project` manifest reports available capabilities and
+links; `/api/project/files` lists editable files; `/api/project/file?path=...`
+reads `{path, content, revision}`. PUT the same path with `{content, revision}`
+to save, or `revision: null` to create an absent file. A stale revision returns
+409 instead of overwriting a detected IDE edit. Source under `src/`,
+composites, `scene.json`, `package.json`, and `tsconfig.json` are supported.
+Hidden files, generated output, dependencies, symlinks, and paths outside the
+project are excluded. Files cap at 16 MiB. Requests through public preview
+tunnels and remote forwarding are refused, even with remote publishing enabled.
+
+### Scene assistant
+
+Creator Hub can use the locally installed `codex`, `claude`, `cursor-agent`, or
+`gemini` CLI through the same SDK project connection. Sign in using that CLI's
+normal setup first. The SDK runs it in the project directory and streams text,
+tool activity, errors, and session identifiers to the editor. It keeps the
+provider's permission and sandbox policy; it does not add bypass flags. Cancel
+or disconnect stops the turn and its child processes. One turn runs at a time.
+Gemini starts a fresh turn because its CLI does not expose stable session resume.
+
+To give the assistant live scene tools, run the existing `dcl-scene-mcp` relay
+with its HTTP transport, pair your editor tab using its printed instructions,
+and set `DCL_ONE_SDK_SCENE_MCP_URL` to that loopback `/mcp` URL when starting the
+SDK. `DCL_SCENE_MCP_BEARER` supplies the relay's bearer to the SDK. The provider
+connects through the SDK's existing port; no new assistant server or model
+backend is required. The bridge reports MCP availability and editor pairing
+separately. Without a paired editor, assistants can still edit project files.
+
+The SDK does not start this relay. Its `--mcp` flag configures the native
+Explorer's separate MCP endpoint. Release installations provide a
+`dcl-scene-mcp` launcher pinned to the shipped relay and Node runtime; start
+`dcl-scene-mcp --http` separately and give the SDK the same relay bearer and
+pairing token. Updating the SDK binary alone does not update an independently
+running relay. Keep relay cache and screenshot evidence in writable state
+directories when installing the package read-only.
+
+Bearer credentials stay in the SDK process. Claude receives a temporary MCP
+configuration; Cursor and Gemini receive temporary merged project configuration
+that restores the original when the turn ends. Codex receives a URL override.
+All point to the SDK's guarded MCP proxy. An external edit to a configuration
+file during a turn is preserved. Source changes made by any provider use the
+same watcher and reload notifications as IDE and visual-editor saves.
+
+`GET /api/project/assistant/providers` discovers installed providers.
+`POST /api/project/assistant/turn` accepts `{provider,prompt,sessionId?,model?}`
+and streams newline-delimited JSON events (`started`, `session`, `text`, `tool`,
+`error`, `done`). `DELETE /api/project/assistant/turn/<turnId>` cancels and returns
+`{turnId,cancelled:true}`. These routes use the same loopback and explicit-origin
+checks as file editing. Authentication and permission failures are surfaced as
+errors rather than silently disabling tools.
+
+Binary project assets use `/api/project/assets` for listing and
+`/api/project/asset?path=...` for GET/HEAD, PUT, and DELETE. GET/HEAD returns an
+ETag containing the revision. PUT raw bytes with `If-None-Match: *` to create,
+or `If-Match: <revision>` to replace; DELETE also requires the current revision.
+Models, textures, image/audio/video files, and glTF binary buffers are supported,
+up to 64 MiB each. Uploads and deletions share the source-file path protections
+and feed the same SDK watcher. Creator Hub can therefore save catalog assets
+into the project and remove confirmed unused assets without a separate asset
+store or stale browser-only copies.
+
+Set `DCL_SCENE_MCP_TOKEN` alongside the MCP URL/bearer to offer **Pair this
+editor** in Creator Hub. `/api/project/assistant/bridge` forwards the existing
+relay protocol over WebSocket and inserts the configured pairing token into
+the first hello server-side. The token never goes to the browser. The SDK
+reports a bridge URL only when the local MCP server answers and pairing is
+configured. Remote relay URLs are refused; the SDK does not duplicate or
+launch another relay.
+
+### Native and mobile debug sessions
+
+Creator Hub's connected-project debug descriptor at `/api/project/debug`
+reuses SDK launch URLs and QR generation. It includes native, second-instance,
+and mobile preview links with a `scene-inspector` connection back to this SDK
+process. No additional debug port is allocated. Opening a link is a user action;
+requesting the descriptor does not launch a client.
+
+Clients send upstream `SCENE_INSPECTOR` telemetry over the same SDK port's
+`/scene-inspector` WebSocket, authenticated by a transient token carried in the
+launch URL. The access log records only the path, never the token query.
+Creator Hub reads sessions and newline-delimited telemetry at
+`/api/project/debug/sessions` and `/api/project/debug/events`. These consumer
+routes retain the local-machine and trusted-origin guards. History is bounded
+at 32 MiB / 512 batches; stream gaps are reported explicitly.
+
+`POST /api/project/debug/command` accepts `{sessionId,cmd,args?}` for `pause`,
+`resume`, or `reload_scene`. Results return only after the target client's
+`SCENE_INSPECTOR_CMD_ACK`, disconnect, or five-second timeout. Another client
+cannot acknowledge a different session's command. Ended sessions remain visible
+for one minute. Native MCP remains the existing SDK-controlled launch option;
+its terminal scene-error reader continues to operate independently.
+
+The debug descriptor has this client shape (URLs include any forwarded prefix):
+
+```ts
+type ProjectDebug = {
+  nativeUrl: string; multiInstanceUrl: string; mobileUrl: string | null;
+  mobileQr: string | null; eventsUrl: string; sessionsUrl: string; commandUrl: string;
+  capabilities: { telemetry: true; commands: ['pause', 'resume', 'reload_scene']; nativeMcp: boolean };
+}
+```
+
+### Upstream UI Designer
+
+Use the upstream inspector's UI Designer against the same SDK data layer and
+project files. Install a genuine inspector build (verified with 7.46.1), then run
+`bash scripts/install-ui-designer-runtime.sh /path/to/@dcl/inspector` from this
+crate. The runtime packages upstream OXC 0.60.0 and mini-rpc 1.0.7; it exports
+`parse(filename, source)`, `RPC`, and `Transport`, preserving the inspector's AST
+contract. Set `DCL_ONE_INSPECTOR_DIR` to that package and start with `--data-layer`.
+The explicit inspector directory takes precedence over the project's installed
+offline shim. See [UI Designer provisioning](docs/ui-designer-deployment.md) for
+the complete deployment procedure and verification steps.
+
+`/api/project` advertises `links.uiDesigner` and `links.uiDesignerRuntime` only
+when the installed bundle and exact runtime are present. Creator Hub hosts this
+inspector with its parent CodeParser and IframeStorage RPC bridges, retaining its
+ribbon. Source writes use the existing revision-checked project API; deletion
+requires `DELETE /api/project/file?path=...` with `If-Match`. Essential root scene
+and package configuration cannot be deleted. The isolated local verification
+SDK uses reserved port 5363; no additional production listener is needed.
+
+
+Assistant conversations live in the project's private `.dcl-one/assistant.sqlite`,
+not browser storage. The SDK keeps up to 20 conversations and 1 MiB of transcript
+per conversation, plus provider resume IDs. State is excluded from project file
+and asset lists, cleanup candidates, and deployment payloads. The history APIs
+use the same local-peer and trusted-origin checks as project editing:
+
+- `GET /api/project/assistant/conversations` lists saved conversations.
+- `GET /api/project/assistant/conversations/{id}` returns its ordered events.
+- `DELETE /api/project/assistant/conversations/{id}` removes it when no turn runs.
+- A turn accepts `conversationId` and optional `selectedEntities: [{id, name}]`.
+  Its `started` event returns `conversationId`; resume IDs are resolved from that
+  project's history. A conversation cannot switch providers. Selected IDs and
+  names are context hints; the provider is instructed to verify them with scene
+  tools before editing. No selection grants extra model permissions.
+
+Reopen Scene assistant and choose a conversation to continue it. Gemini history
+is viewable, but its current CLI adapter cannot resume previous model context;
+the panel states this explicitly. History stores text and tool events. Per-turn
+scene rollback, detachable chat and inline screenshots remain separate gaps.

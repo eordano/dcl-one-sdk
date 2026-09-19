@@ -7,13 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 
+#[derive(Clone)]
 pub struct BuildOptions {
+    /// Ignore package.json scripts.build and use the SDK pipeline.
+    pub built_in: bool,
     pub dir: PathBuf,
     pub production: bool,
     pub ignore_composite: bool,
     pub custom_entry_point: bool,
     pub skip_type_check: bool,
-    /// `None` builds in place (the dev tree the watcher owns); a deploy builds
+    /// Built-in pipeline only: `None` builds in place; a deploy builds
     /// into [`RELEASE_OUT`] so the two profiles never clobber one file and a
     /// publish never rewrites the tree it just fingerprinted.
     pub out_root: Option<PathBuf>,
@@ -22,7 +25,7 @@ pub struct BuildOptions {
     pub quiet: bool,
 }
 
-/// The release profile's artifact root, relative to the scene: where a deploy's
+/// The built-in release profile's artifact root, relative to the scene: where a deploy's
 /// production bundle lands. Stale only when `--skip-build` skips the rebuild.
 pub const RELEASE_OUT: &str = ".dcl-one/release";
 
@@ -49,6 +52,7 @@ pub struct Built {
 pub fn member_options(opts: &BuildOptions, project: &Project) -> BuildOptions {
     BuildOptions {
         dir: project.root.clone(),
+        built_in: opts.built_in,
         production: opts.production,
         ignore_composite: opts.ignore_composite,
         custom_entry_point: opts.custom_entry_point,
@@ -168,6 +172,9 @@ async fn bundle_step(
 
 pub async fn build(opts: &BuildOptions) -> Result<Built> {
     let project = Project::load(&opts.dir)?;
+    if let Some(script) = crate::build_script::selected(&project, opts)? {
+        return crate::build_script::run(project, opts, &script).await;
+    }
     let main = project.main_output()?;
     project.tsconfig()?;
     let art_root = opts

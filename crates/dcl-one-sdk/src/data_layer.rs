@@ -478,6 +478,62 @@ mod tests {
     }
 
     #[test]
+    fn configured_inspector_overrides_the_scene_shim_and_reports_broken_configuration() {
+        let t = TestDir::new("datalayer-override");
+        t.write("scene/package.json", "{}");
+        t.write(
+            "scene/node_modules/@dcl/inspector/package.json",
+            r#"{"main":"index.js"}"#,
+        );
+        t.write(
+            "scene/node_modules/@dcl/inspector/index.js",
+            "exports.dumpEngineToCrdtCommands=()=>Buffer.from('scene shim')",
+        );
+        t.write(
+            "scene/node_modules/@dcl/ecs/dist-cjs.js",
+            "exports.Engine=()=>({});exports.Composite={};exports.EntityMappingMode={}",
+        );
+        t.write("host/package.json", r#"{"main":"index.js"}"#);
+        t.write(
+            "host/index.js",
+            "exports.dumpEngineToCrdtCommands=()=>Buffer.from('configured inspector')",
+        );
+        let root = t.0.join("scene");
+        let driver = write_driver(&root).unwrap();
+        let run = |configured: bool| {
+            let mut command = std::process::Command::new(node_for_data_layer().unwrap());
+            command
+                .arg(&driver)
+                .arg(&root)
+                .arg("dump-crdt")
+                .env_remove("DCL_ONE_INSPECTOR_DIR");
+            if configured {
+                command.env("DCL_ONE_INSPECTOR_DIR", t.0.join("host"));
+            }
+            command.output().unwrap()
+        };
+        for (configured, expected) in [(false, "scene shim"), (true, "configured inspector")] {
+            let output = run(configured);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("main.crdt")).unwrap(),
+                expected
+            );
+        }
+        t.write(
+            "host/index.js",
+            "throw new Error('configured inspector broken')",
+        );
+        let output = run(true);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("configured inspector broken"));
+    }
+
+    #[test]
     fn resolve_prefers_a_plain_asset_and_falls_back_to_the_gzipped_one() {
         let t = TestDir::new("datalayer-resolve");
         t.write("public/index.html", "<html></html>");

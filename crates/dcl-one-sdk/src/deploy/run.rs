@@ -65,6 +65,7 @@ async fn build_unless_skipped(opts: &DeployOptions) -> Result<()> {
         return Ok(());
     }
     build::build(&build::BuildOptions {
+        built_in: false,
         dir: opts.dir.clone(),
         production: true,
         ignore_composite: false,

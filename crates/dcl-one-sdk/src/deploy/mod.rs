@@ -528,6 +528,7 @@ fn case_collisions(rels: &[String]) -> Vec<(String, String)> {
 }
 
 pub fn preview(project: &Project) -> Result<DeployPreview> {
+    crate::build_script::command(&project.root)?;
     let root = &project.root;
     let (publishable, mut ignored) = collect_files(root)?;
     let publishable = with_release_files(root, publishable);
@@ -773,9 +774,18 @@ fn release_rel_files(release_root: &Path) -> Vec<String> {
     out
 }
 
+// Custom scripts write into the scene tree. Old SDK release artifacts must
+// never shadow that output, even on --skip-build or in the publish preview.
+fn uses_release(root: &Path) -> bool {
+    matches!(crate::build_script::command(root), Ok(None))
+}
+
 /// The payload's paths: the tree's publishable files plus any the release
 /// build alone emits (a chunk only the production build splits out).
 fn with_release_files(root: &Path, mut rels: Vec<String>) -> Vec<String> {
+    if !uses_release(root) {
+        return rels;
+    }
     for rel in release_rel_files(&root.join(crate::build::RELEASE_OUT)) {
         if !rels.contains(&rel) {
             rels.push(rel);
@@ -793,6 +803,9 @@ fn with_release_files(root: &Path, mut rels: Vec<String>) -> Vec<String> {
 /// the preview states, the hashes the forecast asks about, the bytes the
 /// deploy signs — goes through here, so they describe the same file.
 pub fn payload_path(root: &Path, rel: &str) -> PathBuf {
+    if !uses_release(root) {
+        return root.join(rel);
+    }
     let release = root.join(crate::build::RELEASE_OUT).join(rel);
     match release.is_file() {
         true => release,
@@ -801,6 +814,7 @@ pub fn payload_path(root: &Path, rel: &str) -> PathBuf {
 }
 
 pub fn prepare(project: &Project) -> Result<Prepared> {
+    crate::build_script::command(&project.root)?;
     let rel_paths = with_release_files(&project.root, collect_publishable_files(&project.root)?);
     let main = project.main_output()?;
     if !rel_paths.iter().any(|r| r == &main) {

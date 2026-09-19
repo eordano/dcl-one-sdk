@@ -149,6 +149,7 @@ async fn golden(fixture: Fixture) {
     };
     let root = stage(&fixture);
     let built = build::build(&BuildOptions {
+        built_in: false,
         dir: root.clone(),
         production: fixture.production,
         ignore_composite: false,

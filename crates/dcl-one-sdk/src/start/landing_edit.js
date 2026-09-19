@@ -71,6 +71,9 @@
         ? 'Drag to redraw this area — it snaps to world metres, not to parcels'
         : 'Drag on the grid to draw an area, or click one to edit it';
     }
+    if (layTab === 'server') {
+      return 'The server is this same scene code, run headless beside the preview with isServer() true';
+    }
     return 'Permissions apply to the whole scene';
   };
   const layHint = () => {
@@ -372,6 +375,7 @@
     card.classList.toggle('lay--parcels', layTab === 'parcels');
     card.classList.toggle('lay--spawns', layTab === 'spawns');
     card.classList.toggle('lay--perms', layTab === 'perms');
+    card.classList.toggle('lay--server', layTab === 'server');
     const add = document.getElementById('lay-sadd');
     if (add) {
       add.textContent = layArmed ? 'Drawing — drag on the grid' : '+ Add spawn area';
@@ -702,6 +706,24 @@
         return;
       }
       refresh();
+      return;
+    }
+    if (t.id === 'mp-switch') {
+      const on = t.checked;
+      if (!(await save({ authoritativeMultiplayer: on }))) {
+        t.checked = !on;
+        return;
+      }
+      toast(
+        on
+          ? 'Saved. The preview rebuilds and starts the scene\u2019s server; clients already in it rejoin to meet the server.'
+          : 'Saved. The server stops once the scene has rebuilt.',
+        false,
+        8000
+      );
+      refresh();
+      // the rebuild that attaches or drops the server lands after the save
+      setTimeout(refresh, 2500);
       return;
     }
     if (t.classList && t.classList.contains('sw') && t.dataset.perm) {

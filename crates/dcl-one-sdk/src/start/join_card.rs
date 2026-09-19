@@ -70,6 +70,7 @@ pub(super) struct Knobs {
     pub(super) where_key: String,
     /// `None` until touched: the server's own `--mcp` decides the default.
     pub(super) mcp: Option<bool>,
+    pub(super) player: Option<String>,
 }
 
 impl Knobs {
@@ -115,6 +116,7 @@ pub(super) fn knobs(query: Option<&str>, spawn_names: &[String]) -> Knobs {
         };
     };
     let mut knobs = Knobs::default();
+    let mut custom_player = String::new();
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "opt" if TOGGLES.iter().any(|(k, _)| *k == value) => {
@@ -123,10 +125,62 @@ pub(super) fn knobs(query: Option<&str>, spawn_names: &[String]) -> Knobs {
             "spawn" if spawn_names.iter().any(|n| *n == value) => knobs.spawn = value.into_owned(),
             "where" if WHERE_KEYS.contains(&value.as_ref()) => knobs.where_key = value.into_owned(),
             "mcp" if value == "on" || value == "off" => knobs.mcp = Some(value == "on"),
+            "player" => knobs.player = Some(value.into_owned()),
+            "playerUrl" => custom_player = value.into_owned(),
             _ => {}
         }
     }
+    if knobs.player.as_deref() == Some("custom") {
+        knobs.player = Some(custom_player);
+    }
     knobs
+}
+
+fn player_control(knobs: &Knobs, web: bool) -> String {
+    let player = knobs
+        .player
+        .clone()
+        .unwrap_or_else(crate::joinblock::web_explorer_base);
+    if !web {
+        return knobs
+            .player
+            .as_ref()
+            .map_or_else(String::new, |value| kept("player", value));
+    }
+    let presets = [
+        crate::joinblock::DEFAULT_WEB_EXPLORER,
+        "https://interconnected.online/play",
+    ];
+    let selected = presets
+        .iter()
+        .position(|url| *url == player.trim().trim_end_matches('/'));
+    let options: String = presets
+        .iter()
+        .enumerate()
+        .map(|(i, url)| {
+            format!(
+                r#"<option value="{url}"{checked}>{label}</option>"#,
+                checked = if selected == Some(i) { " selected" } else { "" },
+                label = url.trim_start_matches("https://"),
+            )
+        })
+        .collect();
+    let custom = if selected.is_none() {
+        format!(
+            r#"<label class="knob__k" for="player-url">Custom player URL</label><input class="knob__sel" id="player-url" name="playerUrl" type="url" required value="{}" placeholder="https://catalyst.example.com/play/" aria-describedby="player-note" spellcheck="false">"#,
+            esc(&player)
+        )
+    } else {
+        String::new()
+    };
+    let note = match crate::joinblock::parse_web_explorer(&player) {
+        Ok(_) => r#"<span class="knob__note" id="player-note">The player opens this scene with preview mode enabled.</span>"#.to_string(),
+        Err(error) => format!(r#"<span class="knob__note" id="player-note" role="alert">{error}</span>"#),
+    };
+    format!(
+        r#"<div class="knob"><label class="knob__k" for="player">Player</label><select class="knob__sel" id="player" name="player">{options}<option value="custom"{checked}>Custom URL…</option></select>{custom}{note}</div>"#,
+        checked = if selected.is_none() { " selected" } else { "" }
+    )
 }
 
 /// One choice of the "where" knob: the link it launches and how much of the
@@ -209,6 +263,15 @@ pub(super) fn join_control(
 ) -> String {
     let target = &targets[selected];
     let carry = target.carry;
+    let player_control = player_control(knobs, target.key == WHERE_WEB);
+    let launch = if target.url.is_empty() {
+        r#"<span class="jn__cta" id="launch" aria-disabled="true">Launch</span>"#.to_string()
+    } else {
+        format!(
+            r#"<a class="jn__cta" id="launch" href="{}">Launch</a>"#,
+            esc(&target.url)
+        )
+    };
     let on_off = |on: bool| if on { "On" } else { "Off" };
 
     let tabs: String = targets
@@ -286,7 +349,7 @@ pub(super) fn join_control(
     };
 
     format!(
-        r#"<div class="jn"><form class="side" method="get" action="{action}"><div class="jn2__head"><div class="jn2__title"><h2>Join this preview</h2><span class="jn__hint">{hint}</span></div></div><fieldset class="knob knob--tabs"><legend class="knob__k u-sr-only">where</legend><div class="jn2__tabs">{tabs}</div></fieldset><div class="jn2__body"><div class="jn2__col">{spawn_knob}<fieldset class="knob"><legend class="knob__k">Scene errors in the terminal</legend>{mcp_control}{mcp_note}</fieldset><button class="knob__go" type="submit">Apply</button></div><div class="jn2__col"><fieldset class="knob"><legend class="knob__k">Deep-link flags{flag_count}</legend><div class="flags">{flags}</div></fieldset></div></div><div class="jn2__foot"><a class="jn__cta" id="launch" href="{u}">Launch</a><span class="jn2__link"><span class="jn__url" id="deep-link">{u}</span><button class="deep__copy" id="copy-link" type="button" hidden>Copy</button></span>{qr}</div></form></div>"#,
+        r#"<div class="jn"><form class="side" method="get" action="{action}"><div class="jn2__head"><div class="jn2__title"><h2>Join this preview</h2><span class="jn__hint">{hint}</span></div></div><fieldset class="knob knob--tabs"><legend class="knob__k u-sr-only">where</legend><div class="jn2__tabs">{tabs}</div></fieldset><div class="jn2__body"><div class="jn2__col">{player_control}{spawn_knob}<fieldset class="knob"><legend class="knob__k">Scene errors in the terminal</legend>{mcp_control}{mcp_note}</fieldset><button class="knob__go" type="submit">Apply</button></div><div class="jn2__col"><fieldset class="knob"><legend class="knob__k">Deep-link flags{flag_count}</legend><div class="flags">{flags}</div></fieldset></div></div><div class="jn2__foot">{launch}<span class="jn2__link"><span class="jn__url" id="deep-link">{u}</span><button class="deep__copy" id="copy-link" type="button" hidden>Copy</button></span>{qr}</div></form></div>"#,
         action = esc(&format!("{prefix}/")),
         hint = esc(&target.hint),
         u = esc(&target.url),

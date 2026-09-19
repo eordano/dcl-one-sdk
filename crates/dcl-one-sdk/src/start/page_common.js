@@ -69,3 +69,40 @@ const pageRememberWallet = async (address) => {
 (() => {
   if (document.getElementById('page-warming')) setTimeout(() => location.reload(), 1200);
 })();
+
+// Check the preview itself, independently of wallet and publish requests.
+// A deadline also catches suspended servers and connections that never reject.
+(() => {
+  const status = document.getElementById('preview-connection');
+  const bar = document.querySelector('.bar');
+  if (!status || !bar) return;
+  let checking = false;
+  let timer;
+  const show = (online) => {
+    bar.classList.toggle('bar--offline', !online);
+    status.textContent = online ? '' : 'Preview disconnected — reconnecting…';
+    status.title = online ? 'Preview connected' : PAGE_OFFLINE;
+  };
+  const check = async () => {
+    if (checking) return;
+    checking = true;
+    clearTimeout(timer);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+      const response = await fetch(status.dataset.healthUrl, { cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error(PAGE_OFFLINE);
+      const about = await response.json();
+      show(about.acceptingUsers === true && navigator.onLine !== false);
+    } catch {
+      show(false);
+    } finally {
+      clearTimeout(timeout);
+      checking = false;
+      timer = setTimeout(check, 3000);
+    }
+  };
+  window.addEventListener('offline', () => show(false));
+  window.addEventListener('online', check);
+  check();
+})();

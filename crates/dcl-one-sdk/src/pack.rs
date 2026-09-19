@@ -69,6 +69,7 @@ pub async fn pack(opts: &PackOptions) -> Result<()> {
 
     if !opts.skip_build {
         build::build(&build::BuildOptions {
+            built_in: false,
             dir: root.clone(),
             production: true,
             ignore_composite: false,

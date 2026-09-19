@@ -393,3 +393,63 @@ async fn init_then_a_flagless_start_carries_voice() {
     );
     assert_dies_with_preview(&mut guard, &client, &sfu, &log).await;
 }
+
+/// A scene with a server keeps its clients where the server is: the
+/// authoritative host joins the built-in ws-room and has no LiveKit
+/// transport, so `/about` must not send clients to a LiveKit room the host
+/// never reaches. `--no-host` leaves the server out, which is exactly the
+/// bare start above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scene_with_a_server_keeps_comms_on_the_ws_room() {
+    let tmp = fresh_tmp("authoritative");
+    let root = tmp.join("scene");
+    write(
+        &root.join("scene.json"),
+        &json!({
+            "display": { "title": "Server" },
+            "main": "bin/index.js",
+            "runtimeVersion": "7",
+            "authoritativeMultiplayer": true,
+            "scene": { "parcels": ["0,0"], "base": "0,0" }
+        })
+        .to_string(),
+    );
+    write(&root.join("bin/index.js"), "export function main() {}\n");
+
+    let port = free_port();
+    let log = tmp.join("start.log");
+    let child = start_command(&log)
+        .args([
+            "--dir",
+            &root.display().to_string(),
+            "--port",
+            &port.to_string(),
+            "--skip-build",
+            "--no-watch",
+            "--no-asset-bundles",
+            "--no-mcp",
+        ])
+        .spawn()
+        .unwrap();
+    let _guard = ChildGuard(child);
+
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    let about = wait_for_about(&base, &client, &log).await;
+    let fixed = about["comms"]["fixedAdapter"]
+        .as_str()
+        .expect("fixedAdapter");
+    assert!(
+        fixed.starts_with("ws-room:"),
+        "clients of a scene with a server must join the room its server is in, got {fixed}"
+    );
+    let text = log_text(&log);
+    assert!(
+        text.contains("voice off for this preview: the authoritative host"),
+        "start must say why a flagged scene runs without voice:\n{text}"
+    );
+    assert!(
+        !text.contains("Voice: comms on "),
+        "no livekit-server should come up beside an authoritative host:\n{text}"
+    );
+}

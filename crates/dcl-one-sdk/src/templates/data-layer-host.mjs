@@ -13,28 +13,15 @@ const inspectorRequire = inspectorDir
   : null
 
 function req(name) {
-  let lastErr
-  try {
-    return sceneRequire(name)
-  } catch (e) {
-    lastErr = e
-  }
   if (inspectorRequire) {
     if (name === '@dcl/inspector') {
-      try {
-        return inspectorRequire(inspectorDir)
-      } catch (e) {
-        lastErr = e
-      }
-    } else {
-      try {
-        return inspectorRequire(name)
-      } catch (e) {
-        lastErr = e
-      }
+      return inspectorRequire(inspectorDir)
     }
+    try {
+      return inspectorRequire(name)
+    } catch {}
   }
-  throw lastErr
+  return sceneRequire(name)
 }
 
 function pathToPosix(v) {

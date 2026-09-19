@@ -1,6 +1,6 @@
 [package]
 name = "catalyrst-auth-chain"
-version = "0.27.0"
+version = "0.29.0"
 edition = "2021"
 description = "Decentraland auth-chain wire types and the address / hex / pointer / deep-link primitives shared by dcl-one-sdk and the catalyrst services"
 

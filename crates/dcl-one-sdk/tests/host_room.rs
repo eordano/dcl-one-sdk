@@ -91,6 +91,7 @@ async fn build_flagged_scene() -> PathBuf {
     scene["authoritativeMultiplayer"] = serde_json::Value::Bool(true);
     std::fs::write(&scene_json, serde_json::to_string_pretty(&scene).unwrap()).unwrap();
     build::build(&BuildOptions {
+        built_in: false,
         dir: root.clone(),
         production: true,
         ignore_composite: false,

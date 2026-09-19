@@ -173,8 +173,21 @@ fn not_modified(headers: &HeaderMap, etag: &HeaderValue) -> bool {
         .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"))
 }
 
+fn inspector_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "cross-origin-embedder-policy",
+        HeaderValue::from_static("require-corp"),
+    );
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("cross-origin"),
+    );
+    headers
+}
+
 fn revalidated(etag: HeaderValue, vary: bool) -> Response {
-    let mut out = HeaderMap::new();
+    let mut out = inspector_headers();
     out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     out.insert(header::ETAG, etag);
     if vary {
@@ -223,14 +236,16 @@ pub(super) async fn inspector_index(
             .into_response();
     };
     let ws_url = format!("{}/data-layer", preview_ws_origin(&headers));
+    let designer = super::ui_designer::available(&st);
     // The injected config rides the tag: a different origin is a different page.
     let etag = etag.and_then(|tag| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         ws_url.hash(&mut h);
+        designer.hash(&mut h);
         let tag = tag.to_str().ok()?.trim_end_matches('"').to_string();
         HeaderValue::from_str(&format!("{tag}-{:x}\"", h.finish())).ok()
     });
-    let mut out = HeaderMap::new();
+    let mut out = inspector_headers();
     out.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
@@ -242,7 +257,12 @@ pub(super) async fn inspector_index(
         }
         out.insert(header::ETAG, etag);
     }
-    let config = data_layer::inspector_config_json(&ws_url);
+    let mut config: serde_json::Value =
+        serde_json::from_str(&data_layer::inspector_config_json(&ws_url))
+            .expect("inspector config");
+    config["uiEditorEnabled"] = json!(designer);
+    config["uiEditorSupported"] = json!(designer);
+    let config = config.to_string();
     let body = data_layer::inject_config(&html, &config);
     (out, body).into_response()
 }
@@ -283,7 +303,7 @@ pub(super) async fn inspector_asset(
             ""
         },
     );
-    let mut out = HeaderMap::new();
+    let mut out = inspector_headers();
     out.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(data_layer::inspector_mime(Path::new(&path))),

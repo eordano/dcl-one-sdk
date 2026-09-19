@@ -139,6 +139,8 @@ body.editing #edit-tags { cursor: pointer; }
 }
 .bar__mark { color: var(--text); }
 .bar__dot { width: 8px; height: 8px; background: var(--online); }
+.bar--offline .bar__dot { background: var(--err, #e15759); }
+#preview-connection { font-size: 12px; }
 .pgnav { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
 .pgnav__lnk {
   display: inline-flex; align-items: center; padding: var(--s-2) var(--s-2-5);
@@ -274,6 +276,8 @@ body.editing .scene__desc:empty::before { content: attr(data-hint); color: var(-
 }
 .knob__sel:focus-visible { border-color: color-mix(in srgb, var(--brand) 55%, transparent); }
 .knob__sel:disabled { background: var(--fill-1); border-style: dashed; color: var(--ink-45); cursor: not-allowed; }
+#player, #player-url { width: 100%; min-width: 0; }
+.jn__cta[aria-disabled="true"] { background: var(--fill-2); color: var(--ink-45); cursor: not-allowed; }
 .knob__k { text-transform: uppercase; letter-spacing: .06em; padding-bottom: var(--s-3); }
 .knob__on { color: var(--brand-ink); margin-left: var(--s-2); }
 .knob__note { max-width: var(--measure-narrow); }
@@ -362,6 +366,8 @@ body.editing .lay__hint { display: block; }
 .lay__perm:has(.sw:disabled) { cursor: default; }
 .lay__perm:has(.sw:checked) { border-color: var(--warn-line); background: var(--warn-wash); }
 .lay__perm .sw:checked { background: var(--warning); }
+.lay__perm--plain:has(.sw:checked) { border-color: var(--line); background: var(--fill-1); }
+.lay__perm--plain .sw:checked { background: var(--brand); }
 .lay__perm-n { color: var(--ink-7); }
 .lay__perm:has(.sw:checked) .lay__perm-n { color: var(--text); }
 .lay__perm-d { line-height: var(--lh-snug); }
